@@ -1,0 +1,14 @@
+node_modules/
+dist/
+test-results/
+
+*.tsbuildinfo
+*.log
+
+test-output.txt
+test-results.json
+test-results2.json
+test-diff.log
+
+.DS_Store
+Thumbs.db

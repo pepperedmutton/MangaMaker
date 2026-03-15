@@ -1,0 +1,370 @@
+import { z } from "zod";
+
+export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
+
+export type Locale = (typeof SUPPORTED_LOCALES)[number];
+
+export const localeSchema = z.enum(SUPPORTED_LOCALES);
+
+export const DEFAULT_LOCALE: Locale = "en";
+
+const LOCALE_STORAGE_KEY = "mangamaker:locale";
+
+type TranslationParams = Record<string, number | string>;
+type TranslationEntry = string | ((params: TranslationParams) => string);
+
+const translations: Record<Locale, Record<string, TranslationEntry>> = {
+  en: {
+    "app.title": "MangaMaker",
+    "language.label": "Language",
+    "language.en": "English",
+    "language.zh-CN": "中文",
+    "toolbar.select": "Select",
+    "toolbar.panel": "Panel",
+    "toolbar.text": "Text",
+    "toolbar.bubble": "Bubble",
+    "toolbar.importImage": "Import Image",
+    "toolbar.exportPage": "Export Page",
+    "toolbar.undo": "Undo",
+    "toolbar.redo": "Redo",
+    "toolbar.zoom": "Zoom",
+    "toolbar.importHint.ready": "Select a panel, then import an image.",
+    "toolbar.importHint.needsPanel": "Select a panel before importing an image.",
+    "toolbar.shortcutHint":
+      "Shortcuts: V Select, P Panel, T Text, B Bubble, Ctrl/Cmd+Z Undo, Shift+Ctrl/Cmd+Z Redo",
+    "toolbar.importDisabledReason": "Select a panel first",
+    "ribbon.insert": "Insert",
+    "ribbon.font": "Font",
+    "ribbon.view": "View",
+    "inspector.title": "Inspector",
+    "inspector.nothingSelected": "Nothing selected",
+    "inspector.createProjectToBegin": "Create a project and page to begin.",
+    "inspector.page": "Page",
+    "inspector.currentPage": "Current page",
+    "inspector.projectExport": "Project export",
+    "inspector.exportProjectPdf": "Export project PDF",
+    "inspector.nextStep": "Recommended next step",
+    "inspector.nextStep.addPanel": "Choose the Panel tool, then drag on the canvas.",
+    "inspector.nextStep.importImage": "Select a panel, then import an image.",
+    "inspector.nextStep.addDialogue": "Add text or a bubble to make the page readable.",
+    "inspector.nextStep.export": "Export a PNG page or a PDF project.",
+    "inspector.panelCount": ({ count }) => `${count} panels`,
+    "inspector.textCount": ({ count }) => `${count} text boxes`,
+    "inspector.bubbleCount": ({ count }) => `${count} bubbles`,
+    "inspector.deleteSelected": "Delete selected object",
+    "inspector.noExports": "No exports yet",
+    "inspector.lastExport": ({ fileName }) => `Last export: ${fileName}`,
+    "inspector.lastLocalSave": ({ time }) => `Last local save: ${time}`,
+    "inspector.autosaveHint": "Autosave creates a local draft",
+    "inspector.addPoint": "Add vertex",
+    "inspector.removePoint": "Remove",
+    "inspector.pointCount": ({ count }) => `${count} vertices`,
+    "inspector.importImageHint":
+      "Import an image into this panel. Once selected, the full source image stays visible and the cropped area is highlighted.",
+    "inspector.editImageHint":
+      "While this panel is selected, the full source image stays visible. Drag the image to pan and use the wheel to zoom the highlighted crop.",
+    "inspector.editCrop": "Adjust Crop",
+    "inspector.replaceImage": "Replace Image",
+    "inspector.imageSection": "Image",
+    "inspector.sizeSection": "Size & Position",
+    "inspector.styleSection": "Border & Fill",
+    "inspector.textDirection": "Text direction",
+    "inspector.textDirectionH": "Horizontal",
+    "inspector.textDirectionV": "Vertical",
+    "inspector.fontFamily": "Font family",
+    "inspector.textBoxSize": "Text box",
+    "inspector.imageEditStatus": "Selected source preview active",
+    "status.ready": "Ready.",
+    "status.autosavedAt": ({ time }) => `Autosaved ${time}`,
+    "status.localDraftAvailable": "Local draft saving available",
+    "common.width": "Width",
+    "common.height": "Height",
+    "common.x": "X",
+    "common.y": "Y",
+    "common.panel": "Panel",
+    "common.bubble": "Bubble",
+    "common.status": "Status",
+    "common.done": "Done",
+    "common.fill": "Fill",
+    "common.border": "Border",
+    "common.borderWidth": "Border width",
+    "common.cornerRadius": "Corner radius",
+    "common.content": "Content",
+    "common.fontSize": "Font size",
+    "common.color": "Color",
+    "common.text": "Text",
+    "dialog.removePage": ({ name }) => `Remove ${name}?`,
+    "dialog.deleteObject": "Delete the selected object?",
+    "command.projectCreated": "Project created. Create your first page.",
+    "command.projectAutosaved": "Project autosaved locally.",
+    "command.projectLoaded": "Project loaded.",
+    "command.pageAdded": ({ name }) => `${name} added.`,
+    "command.pageDuplicated": ({ name }) => `${name} created.`,
+    "command.pageRemoved": "Page removed.",
+    "command.pageReordered": "Page order updated.",
+    "command.toolActive": ({ tool }) => `${tool} tool active.`,
+    "command.panelCreated": "Panel created.",
+    "command.imagePlaced": "Image bound to panel.",
+    "command.textAdded": "Text added.",
+    "command.bubbleAdded": "Speech bubble added.",
+    "command.objectRemoved": "Object removed.",
+    "command.exportReady": ({ fileName }) => `${fileName} ready.`,
+    "command.undo": "Undid last change.",
+    "command.redo": "Redid change.",
+    "command.projectRenamed": "Project title updated.",
+    "command.localeChanged": "Interface language updated.",
+    "defaults.projectTitle": "My first manga",
+    "defaults.pageName": ({ index }) => `Page ${index}`,
+    "defaults.pageCopy": ({ name }) => `${name} Copy`,
+    "firstRun.startHere": "Start Here",
+    "firstRun.headline": "Turn AI images into a comic page.",
+    "firstRun.lede":
+      "Create a project, add a page, draw panels, import images, add dialogue, and export.",
+    "firstRun.projectTitle": "Project title",
+    "firstRun.projectTitlePlaceholder": "My first manga",
+    "firstRun.createProject": "Create project",
+    "firstRun.restoreDraft": "Restore saved draft",
+    "firstRun.projectCreatedHint": "Project created. Next, create your first page.",
+    "firstRun.createFirstPage": "Create your first page",
+    "firstRun.checklist.createProject": "Create project",
+    "firstRun.checklist.createPage": "Create page",
+    "firstRun.checklist.addPanel": "Add panel",
+    "firstRun.checklist.importImage": "Import image",
+    "firstRun.checklist.addDialogue": "Add text or bubble",
+    "firstRun.checklist.exportPage": "Export page",
+    "onboarding.title": "Next step",
+    "onboarding.addPage.title": "Create the first page",
+    "onboarding.addPage.body": "Start by creating a page for the current project.",
+    "onboarding.addPage.action": "Create page",
+    "onboarding.addPanel.title": "Add a panel",
+    "onboarding.addPanel.body": "Choose the Panel tool, then drag on the canvas.",
+    "onboarding.addPanel.action": "Panel tool",
+    "onboarding.importImage.title": "Bind an image to the panel",
+    "onboarding.importImage.body": "Select a panel, then import or replace its source image.",
+    "onboarding.importImage.action": "Import image",
+    "onboarding.addDialogue.title": "Add dialogue",
+    "onboarding.addDialogue.body": "Insert text or a speech bubble so the page reads clearly.",
+    "onboarding.addDialogue.action": "Text tool",
+    "onboarding.exportPage.title": "Export the page",
+    "onboarding.exportPage.body": "Export the current page as PNG when the layout is ready.",
+    "onboarding.exportPage.action": "Export page",
+    "sidebar.project": "Project",
+    "sidebar.untitledProject": "Untitled project",
+    "sidebar.pageCount": ({ count }) => `${count} ${Number(count) === 1 ? "page" : "pages"}`,
+    "sidebar.projectTitleLabel": "Project title",
+    "sidebar.renameProject": "Rename",
+    "sidebar.renameHint": "You can rename the project at any time.",
+    "sidebar.addPage": "Add page",
+    "sidebar.duplicate": "Duplicate",
+    "sidebar.delete": "Delete",
+    "sidebar.moveUp": "Move up",
+    "sidebar.moveDown": "Move down",
+    "sidebar.emptyPages": "Your pages will appear here.",
+    "sidebar.pageSummary": ({ panels, dialogue }) => `${panels} panels, ${dialogue} dialogue`,
+    "canvas.panelPlaceholder": "Panel",
+    "canvas.imageEditHint": "Selected panel: drag image to pan, wheel to zoom the highlighted crop",
+  },
+  "zh-CN": {
+    "app.title": "MangaMaker 漫画制作器",
+    "language.label": "语言",
+    "language.en": "English",
+    "language.zh-CN": "中文",
+    "toolbar.select": "选择",
+    "toolbar.panel": "分镜",
+    "toolbar.text": "文字",
+    "toolbar.bubble": "气泡",
+    "toolbar.importImage": "导入图片",
+    "toolbar.exportPage": "导出页面",
+    "toolbar.undo": "撤销",
+    "toolbar.redo": "重做",
+    "toolbar.zoom": "缩放",
+    "toolbar.importHint.ready": "先选中一个分镜，再导入图片。",
+    "toolbar.importHint.needsPanel": "导入图片前需要先选中一个分镜。",
+    "toolbar.shortcutHint":
+      "快捷键：V 选择，P 分镜，T 文字，B 气泡，Ctrl/Cmd+Z 撤销，Shift+Ctrl/Cmd+Z 重做",
+    "toolbar.importDisabledReason": "请先选中一个分镜",
+    "ribbon.insert": "插入",
+    "ribbon.font": "字体",
+    "ribbon.view": "视图",
+    "inspector.title": "检查器",
+    "inspector.nothingSelected": "当前未选中对象",
+    "inspector.createProjectToBegin": "先创建项目和页面，再开始编辑。",
+    "inspector.page": "页面",
+    "inspector.currentPage": "当前页面",
+    "inspector.projectExport": "项目导出",
+    "inspector.exportProjectPdf": "导出项目 PDF",
+    "inspector.nextStep": "推荐下一步",
+    "inspector.nextStep.addPanel": "选择“分镜”工具，然后在画布上拖拽。",
+    "inspector.nextStep.importImage": "选中一个分镜，然后导入图片。",
+    "inspector.nextStep.addDialogue": "添加文字或气泡，让页面更可读。",
+    "inspector.nextStep.export": "导出 PNG 页面或 PDF 项目。",
+    "inspector.panelCount": ({ count }) => `${count} 个分镜`,
+    "inspector.textCount": ({ count }) => `${count} 个文字框`,
+    "inspector.bubbleCount": ({ count }) => `${count} 个气泡`,
+    "inspector.deleteSelected": "删除当前选中对象",
+    "inspector.noExports": "还没有导出记录",
+    "inspector.lastExport": ({ fileName }) => `最近导出：${fileName}`,
+    "inspector.lastLocalSave": ({ time }) => `最近本地保存：${time}`,
+    "inspector.autosaveHint": "自动保存会生成本地草稿",
+    "inspector.addPoint": "添加顶点",
+    "inspector.removePoint": "删除",
+    "inspector.pointCount": ({ count }) => `${count} 个顶点`,
+    "inspector.importImageHint": "先为该分镜导入图片。选中后会显示原图，并高亮当前裁切区域。",
+    "inspector.editImageHint": "选中该分镜时，会显示绑定原图并高亮当前切出的区域。拖动图片可平移，滚轮可缩放。",
+    "inspector.editCrop": "调整裁切",
+    "inspector.replaceImage": "替换图片",
+    "inspector.imageSection": "图片",
+    "inspector.sizeSection": "大小与位置",
+    "inspector.styleSection": "边框与填充",
+    "inspector.textDirection": "文字方向",
+    "inspector.textDirectionH": "横排",
+    "inspector.textDirectionV": "竖排",
+    "inspector.fontFamily": "字体",
+    "inspector.textBoxSize": "文字框",
+    "inspector.imageEditStatus": "选中时源图预览启用",
+    "status.ready": "就绪。",
+    "status.autosavedAt": ({ time }) => `已自动保存 ${time}`,
+    "status.localDraftAvailable": "支持本地草稿自动保存",
+    "common.width": "宽度",
+    "common.height": "高度",
+    "common.x": "X",
+    "common.y": "Y",
+    "common.panel": "分镜",
+    "common.bubble": "气泡",
+    "common.status": "状态",
+    "common.done": "完成",
+    "common.fill": "填充色",
+    "common.border": "边框色",
+    "common.borderWidth": "边框宽度",
+    "common.cornerRadius": "圆角半径",
+    "common.content": "内容",
+    "common.fontSize": "字号",
+    "common.color": "颜色",
+    "common.text": "文字",
+    "dialog.removePage": ({ name }) => `删除 ${name}？`,
+    "dialog.deleteObject": "删除当前选中对象？",
+    "command.projectCreated": "项目已创建。现在可以创建第一页。",
+    "command.projectAutosaved": "项目已自动保存到本地。",
+    "command.projectLoaded": "项目已加载。",
+    "command.pageAdded": ({ name }) => `已添加 ${name}。`,
+    "command.pageDuplicated": ({ name }) => `已创建 ${name}。`,
+    "command.pageRemoved": "页面已删除。",
+    "command.pageReordered": "页面顺序已更新。",
+    "command.toolActive": ({ tool }) => `当前工具：${tool}。`,
+    "command.panelCreated": "分镜已创建。",
+    "command.imagePlaced": "图片已绑定到分镜。",
+    "command.textAdded": "文字已添加。",
+    "command.bubbleAdded": "气泡已添加。",
+    "command.objectRemoved": "对象已删除。",
+    "command.exportReady": ({ fileName }) => `${fileName} 已准备好。`,
+    "command.undo": "已撤销上一步操作。",
+    "command.redo": "已重做上一步操作。",
+    "command.projectRenamed": "项目标题已更新。",
+    "command.localeChanged": "界面语言已切换。",
+    "defaults.projectTitle": "我的第一部漫画",
+    "defaults.pageName": ({ index }) => `第 ${index} 页`,
+    "defaults.pageCopy": ({ name }) => `${name} 副本`,
+    "firstRun.startHere": "从这里开始",
+    "firstRun.headline": "把 AI 图片整理成漫画页面。",
+    "firstRun.lede": "创建项目、添加页面、绘制分镜、导入图片、加入对白，然后导出。",
+    "firstRun.projectTitle": "项目标题",
+    "firstRun.projectTitlePlaceholder": "我的第一部漫画",
+    "firstRun.createProject": "创建项目",
+    "firstRun.restoreDraft": "恢复已保存草稿",
+    "firstRun.projectCreatedHint": "项目已创建。下一步，创建第一页。",
+    "firstRun.createFirstPage": "创建第一页",
+    "firstRun.checklist.createProject": "创建项目",
+    "firstRun.checklist.createPage": "创建页面",
+    "firstRun.checklist.addPanel": "添加分镜",
+    "firstRun.checklist.importImage": "导入图片",
+    "firstRun.checklist.addDialogue": "添加文字或气泡",
+    "firstRun.checklist.exportPage": "导出页面",
+    "onboarding.title": "下一步",
+    "onboarding.addPage.title": "创建第一页",
+    "onboarding.addPage.body": "先为当前项目创建一个页面。",
+    "onboarding.addPage.action": "创建页面",
+    "onboarding.addPanel.title": "添加分镜",
+    "onboarding.addPanel.body": "选择“分镜”工具，然后在画布上拖拽。",
+    "onboarding.addPanel.action": "分镜工具",
+    "onboarding.importImage.title": "为分镜绑定图片",
+    "onboarding.importImage.body": "选中一个分镜，然后导入或替换它绑定的原图。",
+    "onboarding.importImage.action": "导入图片",
+    "onboarding.addDialogue.title": "添加对白",
+    "onboarding.addDialogue.body": "加入文字或气泡，让页面可读。",
+    "onboarding.addDialogue.action": "文字工具",
+    "onboarding.exportPage.title": "导出页面",
+    "onboarding.exportPage.body": "排版完成后，将当前页面导出为 PNG。",
+    "onboarding.exportPage.action": "导出页面",
+    "sidebar.project": "项目",
+    "sidebar.untitledProject": "未命名项目",
+    "sidebar.pageCount": ({ count }) => `${count} 页`,
+    "sidebar.projectTitleLabel": "项目标题",
+    "sidebar.renameProject": "重命名",
+    "sidebar.renameHint": "项目标题可以随时修改。",
+    "sidebar.addPage": "添加页面",
+    "sidebar.duplicate": "复制",
+    "sidebar.delete": "删除",
+    "sidebar.moveUp": "上移",
+    "sidebar.moveDown": "下移",
+    "sidebar.emptyPages": "页面会显示在这里。",
+    "sidebar.pageSummary": ({ panels, dialogue }) => `${panels} 个分镜，${dialogue} 条对白`,
+    "canvas.panelPlaceholder": "分镜",
+    "canvas.imageEditHint": "已选中分镜：拖动图片平移，滚轮缩放高亮裁切区域",
+  },
+};
+
+export type TranslationKey = string;
+
+export const translate = (
+  locale: Locale,
+  key: TranslationKey,
+  params: TranslationParams = {},
+) => {
+  const table = translations[locale] ?? translations[DEFAULT_LOCALE];
+  const entry = table[key] ?? translations[DEFAULT_LOCALE][key];
+  if (!entry) {
+    return key;
+  }
+  return typeof entry === "function" ? entry(params) : entry;
+};
+
+export const getStoredLocale = (): Locale | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const stored = window.localStorage.getItem(LOCALE_STORAGE_KEY);
+  return stored && SUPPORTED_LOCALES.includes(stored as Locale) ? (stored as Locale) : null;
+};
+
+export const resolveInitialLocale = (): Locale => {
+  const stored = getStoredLocale();
+  if (stored) {
+    return stored;
+  }
+  if (typeof navigator !== "undefined" && navigator.language.toLowerCase().startsWith("zh")) {
+    return "zh-CN";
+  }
+  return DEFAULT_LOCALE;
+};
+
+export const persistLocale = (locale: Locale) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+};
+
+export const getDefaultProjectTitle = (locale: Locale) =>
+  translate(locale, "defaults.projectTitle");
+
+export const getDefaultPageName = (locale: Locale, index: number) =>
+  translate(locale, "defaults.pageName", { index });
+
+export const getDuplicatedPageName = (locale: Locale, name: string) =>
+  translate(locale, "defaults.pageCopy", { name });
+
+export const formatLocaleTime = (locale: Locale, timestamp: string) =>
+  new Date(timestamp).toLocaleTimeString(locale === "zh-CN" ? "zh-CN" : "en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
