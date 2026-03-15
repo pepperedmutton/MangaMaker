@@ -22,7 +22,7 @@ import {
   snapValue,
   zoomImageViewBox,
 } from "../domain/helpers";
-import type { Bubble, Page, Panel, TextItem } from "../domain/schema";
+import type { Bubble, Page, Panel, Rect as PanelRect, TextItem } from "../domain/schema";
 import { useI18n } from "../i18n/useI18n";
 import { useEditorStore } from "../state/editorStore";
 
@@ -35,6 +35,14 @@ type DraftShape =
       y: number;
       width: number;
       height: number;
+    }
+  | null;
+
+type BoundaryOverlayPreview =
+  | {
+      objectType: "panel" | "text";
+      objectId: string;
+      rect: { x: number; y: number; width: number; height: number };
     }
   | null;
 
@@ -100,6 +108,15 @@ const createRectFromDrag = (shape: DraftShape) => {
   };
 };
 
+const isRectCrossingPageBounds = (
+  rect: { x: number; y: number; width: number; height: number },
+  page: Pick<Page, "width" | "height">,
+) =>
+  rect.x < 0 ||
+  rect.y < 0 ||
+  rect.x + rect.width > page.width ||
+  rect.y + rect.height > page.height;
+
 const applyHandleToRect = (
   handle: ResizeHandle,
   rect: { x: number; y: number; width: number; height: number },
@@ -120,12 +137,16 @@ const applyHandleToRect = (
   return { x: rect.x, y: rect.y, width: point.x - rect.x, height: point.y - rect.y };
 };
 
-const getPanelImageRenderMetrics = (panel: Panel, scale: number) => {
+const getPanelImageRenderMetrics = (
+  panel: Pick<Panel, "width" | "height" | "image">,
+  scale: number,
+  viewBoxOverride?: PanelRect,
+) => {
   if (!panel.image) {
     return null;
   }
 
-  const { viewBox } = panel.image;
+  const viewBox = viewBoxOverride ?? panel.image.viewBox;
   const sourceWidth = panel.image.sourceWidth ?? viewBox.width;
   const sourceHeight = panel.image.sourceHeight ?? viewBox.height;
   return {
@@ -200,7 +221,17 @@ const SelectedPanelImagePreview = ({
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const { t } = useI18n();
-  const metrics = getPanelImageRenderMetrics(panel, scale);
+  const [liveViewBox, setLiveViewBox] = useState<PanelRect | null>(null);
+  const dragStateRef = useRef<{
+    viewBox: PanelRect;
+    renderX: number;
+    renderY: number;
+    sourceWidth: number;
+    sourceHeight: number;
+  } | null>(null);
+  const activeViewBox = liveViewBox ?? panel.image?.viewBox ?? null;
+  const metrics =
+    activeViewBox && panel.image ? getPanelImageRenderMetrics(panel, scale, activeViewBox) : null;
   const clipPoints = panel.points.flatMap((point) => [point.x * scale, point.y * scale]);
 
   if (!panel.image || !image || !metrics) {
@@ -219,9 +250,34 @@ const SelectedPanelImagePreview = ({
         draggable
         onDragStart={(event) => {
           event.cancelBubble = true;
+          dragStateRef.current = {
+            viewBox: activeViewBox!,
+            renderX: metrics.renderX,
+            renderY: metrics.renderY,
+            sourceWidth: metrics.sourceWidth,
+            sourceHeight: metrics.sourceHeight,
+          };
         }}
         onDragMove={(event) => {
           event.cancelBubble = true;
+          const dragState = dragStateRef.current;
+          if (!dragState) {
+            return;
+          }
+          const nextViewBox = panImageViewBox(
+            panel,
+            dragState.sourceWidth,
+            dragState.sourceHeight,
+            dragState.viewBox,
+            (event.target.x() - dragState.renderX) / scale,
+            (event.target.y() - dragState.renderY) / scale,
+          );
+          const nextMetrics = getPanelImageRenderMetrics(panel, scale, nextViewBox);
+          if (!nextMetrics) {
+            return;
+          }
+          setLiveViewBox(nextViewBox);
+          event.target.position({ x: nextMetrics.renderX, y: nextMetrics.renderY });
         }}
         onMouseDown={(event) => {
           event.cancelBubble = true;
@@ -231,20 +287,31 @@ const SelectedPanelImagePreview = ({
         }}
         onDragEnd={(event) => {
           event.cancelBubble = true;
+          const dragState = dragStateRef.current;
+          if (!dragState) {
+            return;
+          }
           const nextViewBox = panImageViewBox(
             panel,
-            metrics.sourceWidth,
-            metrics.sourceHeight,
-            metrics.viewBox,
-            (event.target.x() - metrics.renderX) / scale,
-            (event.target.y() - metrics.renderY) / scale,
+            dragState.sourceWidth,
+            dragState.sourceHeight,
+            dragState.viewBox,
+            (event.target.x() - dragState.renderX) / scale,
+            (event.target.y() - dragState.renderY) / scale,
           );
+          const nextMetrics = getPanelImageRenderMetrics(panel, scale, nextViewBox);
+          setLiveViewBox(nextViewBox);
+          if (nextMetrics) {
+            event.target.position({ x: nextMetrics.renderX, y: nextMetrics.renderY });
+          }
           void executeCommand("setPanelImageCrop", {
             pageId: page.id,
             panelId: panel.id,
             viewBox: nextViewBox,
+          }).finally(() => {
+            dragStateRef.current = null;
+            setLiveViewBox(null);
           });
-          event.target.position({ x: metrics.renderX, y: metrics.renderY });
         }}
       />
       <Group
@@ -292,18 +359,28 @@ const PanelNode = ({
   scale,
   selected,
   showImagePreview,
+  onBoundaryPreviewChange,
 }: {
   page: Page;
   panel: Panel;
   scale: number;
   selected: boolean;
   showImagePreview: boolean;
+  onBoundaryPreviewChange: (preview: BoundaryOverlayPreview) => void;
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const activeTool = useEditorStore((state) => state.activeTool);
   const image = useImageElement(panel.image?.src);
   const { t } = useI18n();
   const clipPoints = panel.points.flatMap((point) => [point.x * scale, point.y * scale]);
+  const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
+    event.cancelBubble = true;
+    void executeCommand("selectObject", {
+      pageId: page.id,
+      objectType: "panel",
+      objectId: panel.id,
+    });
+  };
 
   const renderImage = () => {
     const metrics = getPanelImageRenderMetrics(panel, scale);
@@ -340,23 +417,61 @@ const PanelNode = ({
         x={panel.x * scale}
         y={panel.y * scale}
         draggable={activeTool === "select" && !showImagePreview}
-        onClick={(event) => {
-          event.cancelBubble = true;
-          void executeCommand("selectObject", {
-            pageId: page.id,
+        onMouseDown={handleSelect}
+        onDragStart={(event) => {
+          if (event.target !== event.currentTarget) {
+            return;
+          }
+          onBoundaryPreviewChange({
             objectType: "panel",
             objectId: panel.id,
+            rect: {
+              x: panel.x,
+              y: panel.y,
+              width: panel.width,
+              height: panel.height,
+            },
           });
         }}
+        onDragMove={(event) => {
+          if (event.target !== event.currentTarget) {
+            return;
+          }
+          onBoundaryPreviewChange({
+            objectType: "panel",
+            objectId: panel.id,
+            rect: {
+              x: event.target.x() / scale,
+              y: event.target.y() / scale,
+              width: panel.width,
+              height: panel.height,
+            },
+          });
+        }}
+        onClick={handleSelect}
+        onDblClick={handleSelect}
         onDragEnd={(event) => {
           if (event.target !== event.currentTarget) {
             return;
           }
+          const nextRect = {
+            x: event.target.x() / scale,
+            y: event.target.y() / scale,
+            width: panel.width,
+            height: panel.height,
+          };
+          onBoundaryPreviewChange({
+            objectType: "panel",
+            objectId: panel.id,
+            rect: nextRect,
+          });
           void executeCommand("movePanel", {
             pageId: page.id,
             panelId: panel.id,
-            x: event.target.x() / scale,
-            y: event.target.y() / scale,
+            x: nextRect.x,
+            y: nextRect.y,
+          }).finally(() => {
+            onBoundaryPreviewChange(null);
           });
         }}
       >
@@ -472,11 +587,13 @@ const TextNode = ({
   item,
   scale,
   selected,
+  onBoundaryPreviewChange,
 }: {
   page: Page;
   item: TextItem;
   scale: number;
   selected: boolean;
+  onBoundaryPreviewChange: (preview: BoundaryOverlayPreview) => void;
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const activeTool = useEditorStore((state) => state.activeTool);
@@ -488,6 +605,30 @@ const TextNode = ({
         x={item.x * scale}
         y={item.y * scale}
         draggable={activeTool === "select"}
+        onDragStart={() => {
+          onBoundaryPreviewChange({
+            objectType: "text",
+            objectId: item.id,
+            rect: {
+              x: item.x,
+              y: item.y,
+              width: item.width,
+              height: item.height,
+            },
+          });
+        }}
+        onDragMove={(event) => {
+          onBoundaryPreviewChange({
+            objectType: "text",
+            objectId: item.id,
+            rect: {
+              x: event.target.x() / scale,
+              y: event.target.y() / scale,
+              width: item.width,
+              height: item.height,
+            },
+          });
+        }}
         onClick={(event) => {
           event.cancelBubble = true;
           void executeCommand("selectObject", {
@@ -497,11 +638,24 @@ const TextNode = ({
           });
         }}
         onDragEnd={(event) => {
+          const nextRect = {
+            x: event.target.x() / scale,
+            y: event.target.y() / scale,
+            width: item.width,
+            height: item.height,
+          };
+          onBoundaryPreviewChange({
+            objectType: "text",
+            objectId: item.id,
+            rect: nextRect,
+          });
           void executeCommand("updateText", {
             pageId: page.id,
             textId: item.id,
-            x: event.target.x() / scale,
-            y: event.target.y() / scale,
+            x: nextRect.x,
+            y: nextRect.y,
+          }).finally(() => {
+            onBoundaryPreviewChange(null);
           });
         }}
       >
@@ -673,6 +827,7 @@ export const CanvasView = ({ page }: { page: Page }) => {
   const activeTool = useEditorStore((state) => state.activeTool);
   const zoom = useEditorStore((state) => state.zoom);
   const [draftShape, setDraftShape] = useState<DraftShape>(null);
+  const [boundaryOverlayPreview, setBoundaryOverlayPreview] = useState<BoundaryOverlayPreview>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
 
@@ -698,6 +853,10 @@ export const CanvasView = ({ page }: { page: Page }) => {
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    setBoundaryOverlayPreview(null);
+  }, [page.id, selection?.objectId, selection?.objectType, selection?.pageId]);
+
   const workspace = getPageWorkspace(page);
   const workspaceOffset = getPageWorkspaceOffset(page);
   const fitScale =
@@ -722,6 +881,31 @@ export const CanvasView = ({ page }: { page: Page }) => {
     selectedRect && Math.abs(selectedRect.x + selectedRect.width / 2 - page.width / 2) < 24;
   const showHorizontalGuide =
     selectedRect && Math.abs(selectedRect.y + selectedRect.height / 2 - page.height / 2) < 24;
+  const selectedBoundaryRect =
+    selection?.pageId === page.id &&
+    (selection.objectType === "panel" || selection.objectType === "text")
+      ? boundaryOverlayPreview &&
+        boundaryOverlayPreview.objectId === selection.objectId &&
+        boundaryOverlayPreview.objectType === selection.objectType
+        ? boundaryOverlayPreview.rect
+        : selectedObject && "style" in selectedObject
+          ? {
+              x: selectedObject.x,
+              y: selectedObject.y,
+              width: selectedObject.width,
+              height: selectedObject.height,
+            }
+          : selectedObject && "fontFamily" in selectedObject
+            ? {
+                x: selectedObject.x,
+                y: selectedObject.y,
+                width: selectedObject.width,
+                height: selectedObject.height,
+              }
+            : null
+      : null;
+  const showPageBoundaryOverlay =
+    selectedBoundaryRect !== null && isRectCrossingPageBounds(selectedBoundaryRect, page);
 
   const handleWheel = (event: KonvaEventObject<WheelEvent>) => {
     if (!selectedImagePanel?.image) {
@@ -972,12 +1156,13 @@ export const CanvasView = ({ page }: { page: Page }) => {
                     page={page}
                     panel={entry.object}
                     scale={scale}
-                    selected={
+                  selected={
                       selection?.pageId === page.id &&
                       selection.objectType === "panel" &&
                       selection.objectId === entry.object.id
                     }
                     showImagePreview={selectedImagePanel?.id === entry.object.id}
+                    onBoundaryPreviewChange={(preview) => setBoundaryOverlayPreview(preview)}
                   />
                 );
               }
@@ -994,6 +1179,7 @@ export const CanvasView = ({ page }: { page: Page }) => {
                       selection.objectType === "text" &&
                       selection.objectId === entry.object.id
                     }
+                    onBoundaryPreviewChange={(preview) => setBoundaryOverlayPreview(preview)}
                   />
                 );
               }
@@ -1023,6 +1209,27 @@ export const CanvasView = ({ page }: { page: Page }) => {
                 dash={[10, 8]}
                 strokeWidth={2}
                 fill={draftShape.kind === "bubble" ? "rgba(255,255,255,0.5)" : "rgba(195,109,47,0.08)"}
+              />
+            ) : null}
+
+            {showPageBoundaryOverlay ? (
+              <Line
+                points={[
+                  0,
+                  0,
+                  page.width * scale,
+                  0,
+                  page.width * scale,
+                  page.height * scale,
+                  0,
+                  page.height * scale,
+                ]}
+                closed
+                stroke="#7bb7c9"
+                strokeWidth={3}
+                dash={[14, 10]}
+                fillEnabled={false}
+                listening={false}
               />
             ) : null}
           </Group>

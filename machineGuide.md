@@ -82,6 +82,8 @@ Required examples:
 
 - project creation and rename
 - page add/duplicate/remove/reorder/select
+- page background color change
+- 页面背景色修改
 - panel create/move/resize/delete
 - panel image bind and selection-driven crop adjustment
 - polygon vertex editing
@@ -147,9 +149,17 @@ Guidance:
 - Use `tests/e2e` to verify user-visible GUI behavior.
 - End-to-end tests may seed baseline project state through the automation API when canvas event synthesis is not the behavior under test; the GUI behavior being claimed must still be exercised through visible GUI controls.
 - Tests must verify that objects can remain inside the larger workspace even when they move beyond the comic page edge.
+- Tests must verify that when selected panel/text content overlaps the comic-page edge, the dashed page boundary remains visually readable above that content.
+- 测试还必须验证：当已选中的分镜或文本框压到漫画页面边界时，页面边界虚线仍然会清晰地显示在对象上方。
 - Tests for panel images must verify that selecting a panel reveals the bound source image layer, that drag and wheel update the crop, and that clearing selection returns the panel to normal clipped rendering.
 - Tests for panel images must also verify that dragging the image never changes the panel's own stage position.
+- Tests for panel images must also verify that the clipped panel content updates live during image drag before `dragEnd`.
+- Tests for panel geometry edits must verify that moving panel vertices or resize handles does not drag the bound image to a different stage position.
+- 分镜图片测试还必须验证：在 `dragEnd` 之前，分镜内部的裁切图像就已经随拖拽实时更新。
+- 分镜几何编辑测试还必须验证：拖拽分镜顶点或尺寸手柄时，不能把绑定图片拖到不同的 stage 位置。
 - Tests for zoom must verify that the ribbon exposes a continuous slider, that changing it updates session zoom, and that the visible canvas size responds accordingly.
+- Tests for page background must verify that the ribbon control updates the current page background through the shared command layer.
+- 页面背景测试还必须验证：ribbon 中的背景色控件会通过共享命令层更新当前页面背景。
 - 缩放测试必须验证：ribbon 暴露的是连续滑杆，调整它会更新 session zoom，并让可见画布尺寸随之变化。
 分镜图片测试还必须验证：拖拽图片绝不能改变分镜本身在 stage 中的位置。
 
@@ -168,11 +178,19 @@ agent 必须保持以下不变量：
 - Panel image display is crop-based, not whole-image scaling.
 - Selecting a panel with an image reveals the bound source image layer and highlights the current cut region until selection clears.
 - Adjusting the selected panel image must not move the panel itself in stage space.
+- Dragging the selected panel image must update the panel's visible crop live before the drag ends.
+- Changing panel vertices or panel size must not drag the bound image to a different stage position.
+- 拖拽已选中分镜中的图片时，分镜可见裁切必须在拖拽结束前实时更新。
+- 改变分镜顶点或分镜尺寸时，不能把绑定图片拖到不同的 stage 位置。
 调整选中分镜的图片时，不能让分镜本身在 stage 空间内发生位移。
 - Panel geometry supports polygons.
 - The page renders inside a larger workspace rather than consuming the full canvas.
 - Objects may leave the page bounds while remaining inside the workspace bounds.
 - The default canvas view fits the page without scroll bars.
+- The comic-page boundary stays readable above selected overlapping panel/text content via a dashed overlay.
+- The current page background remains editable from the ribbon through a command-backed path.
+- 当已选中的分镜或文本框压到漫画页面边界时，页面边界必须通过虚线覆盖保持可读。
+- 当前页面背景必须能通过 ribbon 中受命令层驱动的路径持续编辑。
 - Workspace zoom remains continuously adjustable instead of being limited to discrete presets.
 - 工作区缩放必须保持为连续可调，而不是退化回离散预设。
 - Text supports horizontal and vertical layout.

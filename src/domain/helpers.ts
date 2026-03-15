@@ -291,6 +291,31 @@ export const clampImageViewBox = (
   return { x, y, width, height };
 };
 
+export const preservePanelImageViewBox = (
+  previousPanel: Pick<Panel, "x" | "y" | "width" | "height">,
+  nextPanel: Pick<Panel, "x" | "y" | "width" | "height">,
+  sourceWidth: number,
+  sourceHeight: number,
+  viewBox: Rect,
+) => {
+  const renderedImageLeft =
+    previousPanel.x - (viewBox.x / viewBox.width) * previousPanel.width;
+  const renderedImageTop =
+    previousPanel.y - (viewBox.y / viewBox.height) * previousPanel.height;
+  const renderedImageWidth = (sourceWidth / viewBox.width) * previousPanel.width;
+  const renderedImageHeight = (sourceHeight / viewBox.height) * previousPanel.height;
+
+  const nextViewBoxWidth = (sourceWidth * nextPanel.width) / renderedImageWidth;
+  const nextViewBoxHeight = (sourceHeight * nextPanel.height) / renderedImageHeight;
+
+  return clampImageViewBox(sourceWidth, sourceHeight, {
+    x: ((nextPanel.x - renderedImageLeft) / nextPanel.width) * nextViewBoxWidth,
+    y: ((nextPanel.y - renderedImageTop) / nextPanel.height) * nextViewBoxHeight,
+    width: nextViewBoxWidth,
+    height: nextViewBoxHeight,
+  });
+};
+
 export const panImageViewBox = (
   panel: Pick<Panel, "width" | "height">,
   sourceWidth: number,

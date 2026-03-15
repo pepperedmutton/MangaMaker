@@ -7,7 +7,22 @@ import {
   MIN_ZOOM,
 } from "../../src/domain/defaults";
 import { getPageWorkspace } from "../../src/domain/helpers";
+import type { Panel } from "../../src/domain/schema";
 import { createHarness, runCommand } from "./harness";
+
+const getPanelImageRenderRect = (panel: Panel) => {
+  if (!panel.image) {
+    throw new Error("Expected panel image");
+  }
+  const sourceWidth = panel.image.sourceWidth ?? panel.image.viewBox.width;
+  const sourceHeight = panel.image.sourceHeight ?? panel.image.viewBox.height;
+  return {
+    x: panel.x - (panel.image.viewBox.x / panel.image.viewBox.width) * panel.width,
+    y: panel.y - (panel.image.viewBox.y / panel.image.viewBox.height) * panel.height,
+    width: (sourceWidth / panel.image.viewBox.width) * panel.width,
+    height: (sourceHeight / panel.image.viewBox.height) * panel.height,
+  };
+};
 
 const {
   mockSaveLocalDraft,
@@ -47,6 +62,7 @@ describe("commandRegistry coverage", () => {
         "saveProject",
         "loadProject",
         "addPage",
+        "setPageBackground",
         "duplicatePage",
         "removePage",
         "reorderPage",
@@ -108,6 +124,14 @@ describe("commandRegistry coverage", () => {
     await runCommand(harness, "setLocale", { locale: "en" });
     const englishPage = (await runCommand(harness, "addPage", {})) as { name: string };
     expect(englishPage.name).toBe("Page 3");
+
+    const updatedPage = await runCommand(harness, "setPageBackground", {
+      pageId: harness.readSession().project.pages[0].id,
+      background: "#ccddee",
+    });
+    expect(updatedPage).toMatchObject({
+      background: "#ccddee",
+    });
   });
 
   it("covers page selection, zoom, and history state", async () => {
@@ -187,6 +211,13 @@ describe("commandRegistry coverage", () => {
     });
     expect((movedPanel as { y: number }).y).toBeGreaterThan(1540);
 
+    await runCommand(harness, "movePanel", {
+      pageId: page.id,
+      panelId: panel.id,
+      x: 200,
+      y: 240,
+    });
+
     const image = await runCommand(harness, "placeImageInPanel", {
       pageId: page.id,
       panelId: panel.id,
@@ -223,17 +254,36 @@ describe("commandRegistry coverage", () => {
     });
     expect((polygon as { points: Array<unknown> }).points).toHaveLength(5);
 
+    const projectWithLargerSource = structuredClone(harness.readSession().project);
+    const panelWithImage = projectWithLargerSource.pages[0].panels[0];
+    if (!panelWithImage.image) {
+      throw new Error("Expected panel image after placement");
+    }
+    panelWithImage.image.sourceWidth = 400;
+    panelWithImage.image.sourceHeight = 300;
+    harness.context.setProject(projectWithLargerSource);
+
+    const renderRectBeforeReshape = getPanelImageRenderRect(
+      harness.readSession().project.pages[0].panels[0],
+    );
+
     const reshaped = await runCommand(harness, "setPanelPoints", {
       pageId: page.id,
       panelId: panel.id,
       points: [
-        { x: -120, y: -120 },
+        { x: -20, y: -20 },
         { x: 160, y: 0 },
         { x: 160, y: 160 },
         { x: 0, y: 160 },
       ],
     });
-    expect((reshaped as { x: number }).x).toBeLessThan(0);
+    expect((reshaped as { x: number }).x).toBeLessThan(200);
+    expect((reshaped as { y: number }).y).toBeLessThan(240);
+    const renderRectAfterReshape = getPanelImageRenderRect(reshaped as Panel);
+    expect(renderRectAfterReshape.x).toBeCloseTo(renderRectBeforeReshape.x, 6);
+    expect(renderRectAfterReshape.y).toBeCloseTo(renderRectBeforeReshape.y, 6);
+    expect(renderRectAfterReshape.width).toBeCloseTo(renderRectBeforeReshape.width, 6);
+    expect(renderRectAfterReshape.height).toBeCloseTo(renderRectBeforeReshape.height, 6);
   });
 
   it("updates styles, text boxes, text direction, and bubbles while keeping selection coherent", async () => {

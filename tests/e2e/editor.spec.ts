@@ -34,6 +34,16 @@ const setZoomSlider = async (page: Page, zoom: number) => {
   }, zoom);
 };
 
+const setColorInput = async (page: Page, label: string, color: string) => {
+  await page.getByLabel(label).evaluate((element, value) => {
+    const input = element as HTMLInputElement;
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    descriptor?.set?.call(input, String(value));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, color);
+};
+
 const getPanelCanvasPoint = async (
   page: Page,
   options: {
@@ -106,8 +116,8 @@ const getSelectedPanelPreviewSamplePoint = async (page: Page, panelIndex = 0) =>
     const renderWidth = previewRight - previewLeft;
     const renderHeight = previewBottom - previewTop;
     const sourceSamples = [
-      { x: 110, y: 110 },
       { x: 265, y: 140 },
+      { x: 110, y: 110 },
     ];
 
     for (const sample of sourceSamples) {
@@ -212,6 +222,14 @@ const readCanvasPixelAtPagePoint = async (
   }
 
   return pixel;
+};
+
+const getMaxBlueBiasAtPagePoints = async (
+  page: Page,
+  points: Array<{ x: number; y: number }>,
+) => {
+  const pixels = await Promise.all(points.map((point) => readCanvasPixelAtPagePoint(page, point)));
+  return Math.max(...pixels.map((pixel) => pixel[2] - pixel[0]));
 };
 
 const getSelectedPageId = async (page: Page) =>
@@ -342,14 +360,25 @@ test("selected panels reveal the bound source image and allow direct wheel/drag 
     "While this panel is selected, the full source image stays visible.",
   );
 
-  const previewSamplePoint = await getSelectedPanelPreviewSamplePoint(page);
-  const selectedPreviewPixel = await readCanvasPixelAtPagePoint(page, previewSamplePoint);
   const panelCenter = await getPanelCanvasPoint(page);
   const canvasBox = await getCanvasBox(page);
+  const panelCenterPagePoint = await page.evaluate(() => {
+    const panel = window.mangaMaker?.project.get().pages[0]?.panels[0];
+    return panel
+      ? {
+          x: panel.x + panel.width * 0.5,
+          y: panel.y + panel.height * 0.5,
+        }
+      : null;
+  });
+  if (!panelCenterPagePoint) {
+    throw new Error("Panel center point not available");
+  }
   const panelPositionBeforeImageDrag = await page.evaluate(() => {
     const panel = window.mangaMaker?.project.get().pages[0]?.panels[0];
     return panel ? { x: panel.x, y: panel.y } : null;
   });
+  const panelPixelBeforeImageDrag = await readCanvasPixelAtPagePoint(page, panelCenterPagePoint);
 
   await page.mouse.move(canvasBox.x + panelCenter.x, canvasBox.y + panelCenter.y);
   await page.mouse.wheel(0, -420);
@@ -374,6 +403,12 @@ test("selected panels reveal the bound source image and allow direct wheel/drag 
   await page.mouse.move(canvasBox.x + panelCenter.x + 60, canvasBox.y + panelCenter.y + 24, {
     steps: 8,
   });
+  const panelPixelDuringImageDrag = await readCanvasPixelAtPagePoint(page, panelCenterPagePoint);
+  const liveDragPixelDifference = panelPixelBeforeImageDrag.reduce(
+    (total, channel, index) => total + Math.abs(channel - panelPixelDuringImageDrag[index]),
+    0,
+  );
+  expect(liveDragPixelDifference).toBeGreaterThan(40);
   await page.mouse.up();
 
   await expect
@@ -405,6 +440,15 @@ test("selected panels reveal the bound source image and allow direct wheel/drag 
     )
     .toEqual(panelPositionBeforeImageDrag);
 
+  const previewSamplePoint = await getSelectedPanelPreviewSamplePoint(page);
+  await expect
+    .poll(async () => {
+      const pixel = await readCanvasPixelAtPagePoint(page, previewSamplePoint);
+      return pixel[0] + pixel[1] + pixel[2];
+    })
+    .toBeLessThan(745);
+  const selectedPreviewPixel = await readCanvasPixelAtPagePoint(page, previewSamplePoint);
+
   await page.evaluate(() => window.mangaMaker?.commands.execute("clearSelection", {}));
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.session.get().selection))
@@ -435,6 +479,34 @@ test("polygon panels support adding and removing vertices through the inspector"
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels[0]?.points.length))
     .toBe(4);
+});
+
+test("double-clicking a panel still leaves it selected", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Panel Double Click");
+
+  await createPanelViaApi(page, { x: 140, y: 160, width: 320, height: 280 });
+  const panelId = await page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels[0]?.id ?? null);
+  if (!panelId) {
+    throw new Error("Panel id not available");
+  }
+
+  await page.evaluate(() => window.mangaMaker?.commands.execute("clearSelection", {}));
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.session.get().selection))
+    .toBeNull();
+
+  const panelCenter = await getPanelCanvasPoint(page);
+  const canvasBox = await getCanvasBox(page);
+  await page.mouse.dblclick(canvasBox.x + panelCenter.x, canvasBox.y + panelCenter.y);
+
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.session.get().selection))
+    .toEqual({
+      pageId: expect.any(String),
+      objectType: "panel",
+      objectId: panelId,
+    });
 });
 
 test("text boxes support home-tab font controls and vertical text direction", async ({
@@ -479,6 +551,65 @@ test("text boxes support home-tab font controls and vertical text direction", as
       direction: "vertical",
       content: "Vertical test",
     });
+});
+
+test("the page boundary overlay appears live only after a selected panel crosses the page edge", async ({
+  page,
+}) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Boundary Overlay Workflow");
+
+  await createPanelViaApi(page, { x: 120, y: 220, width: 280, height: 220 });
+
+  const panelState = await page.evaluate(() => {
+    const panel = window.mangaMaker?.project.get().pages[0]?.panels[0];
+    return panel
+      ? {
+          x: panel.x,
+          y: panel.y,
+          width: panel.width,
+          height: panel.height,
+        }
+      : null;
+  });
+  if (!panelState) {
+    throw new Error("Panel state not available");
+  }
+
+  const boundarySamplePoints = [0, 18, 36, 54, 72].map((offset) => ({
+    x: 2,
+    y: panelState.y + 20 + offset,
+  }));
+  const idleBlueBias = await getMaxBlueBiasAtPagePoints(page, boundarySamplePoints);
+  expect(idleBlueBias).toBeLessThan(20);
+
+  const canvasBox = await getCanvasBox(page);
+  const dragStart = await getPanelCanvasPoint(page, {
+    xRatio: 0.5,
+    yRatio: 0.35,
+  });
+
+  await page.mouse.move(canvasBox.x + dragStart.x, canvasBox.y + dragStart.y);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + dragStart.x - 240, canvasBox.y + dragStart.y, {
+    steps: 12,
+  });
+
+  const liveBlueBias = await getMaxBlueBiasAtPagePoints(page, boundarySamplePoints);
+  expect(liveBlueBias).toBeGreaterThan(35);
+  await page.mouse.up();
+
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels[0]?.x ?? null))
+    .toBeLessThan(0);
+
+  await page.evaluate(() => window.mangaMaker?.commands.execute("clearSelection", {}));
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.session.get().selection))
+    .toBeNull();
+
+  const clearedBlueBias = await getMaxBlueBiasAtPagePoints(page, boundarySamplePoints);
+  expect(clearedBlueBias).toBeLessThan(20);
 });
 
 test("bubble creation and page/project export stay available from the GUI", async ({ page }) => {
@@ -559,12 +690,18 @@ test("canvas defaults to a fit-to-view display and major GUI actions keep comman
   expect(commands).toEqual(
     expect.arrayContaining([
       "addPage",
+      "setPageBackground",
       "setPanelImageCrop",
       "addPanelPoint",
       "updateText",
       "exportProjectPdf",
     ]),
   );
+
+  await setColorInput(page, "Page Background", "#ccddee");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.background))
+    .toBe("#ccddee");
 
   await page.evaluate(() => window.mangaMaker?.commands.execute("addPage", {}));
   await expect

@@ -214,6 +214,21 @@ textarea {
   text-align: center;
 }
 
+.ribbon-color {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  align-items: flex-start;
+}
+
+.ribbon-color-input {
+  width: 3.8rem;
+  min-width: 3.8rem;
+  height: 2.3rem;
+  padding: 0.2rem;
+  border-radius: 10px;
+}
+
 .ribbon-dir-btn {
   min-width: 36px;
   min-height: 36px;

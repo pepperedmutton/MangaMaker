@@ -13,6 +13,11 @@ export type TextFormatState = {
   onDirectionChange: (value: "horizontal" | "vertical") => void;
 };
 
+export type PageFormatState = {
+  background: string;
+  onBackgroundChange: (value: string) => void;
+};
+
 type RibbonBarProps = {
   locale: Locale;
   activeTool: ToolMode;
@@ -21,6 +26,7 @@ type RibbonBarProps = {
   canRedo: boolean;
   canExport: boolean;
   textFormat?: TextFormatState;
+  pageFormat?: PageFormatState;
   onSetTool: (tool: ToolMode) => void;
   onExport: () => void;
   onUndo: () => void;
@@ -62,6 +68,7 @@ export const RibbonBar = ({
   canRedo,
   canExport,
   textFormat,
+  pageFormat,
   onSetTool,
   onExport,
   onUndo,
@@ -121,6 +128,25 @@ export const RibbonBar = ({
             active={activeTool === "bubble"}
             onClick={() => onSetTool("bubble")}
           />
+        </div>
+      </div>
+
+      <Divider />
+
+      <div className={`ribbon-group${pageFormat ? "" : " ribbon-group-dim"}`}>
+        <span className="ribbon-group-label">{t("ribbon.page")}</span>
+        <div className="ribbon-group-row">
+          <label className="ribbon-color">
+            <span className="ribbon-label">{t("toolbar.pageBackground")}</span>
+            <input
+              className="ribbon-color-input"
+              aria-label={t("toolbar.pageBackground")}
+              type="color"
+              disabled={!pageFormat}
+              value={pageFormat?.background ?? "#ffffff"}
+              onChange={(event) => pageFormat?.onBackgroundChange(event.target.value)}
+            />
+          </label>
         </div>
       </div>
 

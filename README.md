@@ -48,9 +48,18 @@ Required scope:
 - A panel displays a cropped portion of its bound source image, not a scaled copy of the whole image.
 - When a panel with an image is selected, the bound source image must become visible beyond the mask and the currently cut region must remain highlighted.
 - While that panel stays selected, the user must be able to drag the image to pan and use the mouse wheel to zoom the visible crop.
+- While the user drags the selected panel image, the panel content must update live before mouse release.
+- 当用户拖拽已选中分镜中的图片时，分镜内部内容必须在松开鼠标前实时更新。
 - Dragging or zooming the bound image must not change the panel's own stage position.
+- Dragging panel vertices or panel resize handles must reshape the panel without dragging the bound image's stage position along with it.
+- When a selected panel or text box approaches or crosses the comic-page edge, the page boundary must remain visible above it as a dashed overlay.
+- 拖拽分镜顶点或分镜尺寸手柄时，必须只改变分镜形状，不能把绑定图片在 stage 中的位置一起带走。
+- 拖拽或缩放绑定图片时，不能改变分镜本身在 stage 中的位置。
+- 当已选中的分镜或文本框接近或越过漫画页面边界时，页面边界必须以虚线覆盖的方式显示在对象上方。
 - Workspace zoom must be controlled by a continuous slider, with 100% meaning the fit-to-workspace baseline.
+- The top ribbon must include a page background color control for the current page.
 - 工作区缩放必须由连续滑杆控制，其中 100% 表示适配工作区的基准比例。
+- 顶部 ribbon 必须包含当前页面的背景颜色控制。
 - When that panel is unselected, it must return to normal clipped panel rendering.
 拖拽或缩放绑定图片时，不能改变分镜本身在 stage 中的位置。
 - Panels must support polygons and user-adjustable vertex count.
@@ -92,10 +101,12 @@ Project and page / 项目与页面：
 
 - Create, rename, load, autosave, and reset projects.
 - Add, duplicate, remove, reorder, and select pages.
+- Change page background color from the ribbon.
 - Export page PNG and project PDF.
 
 - 创建、重命名、加载、自动保存和重置项目。
 - 添加、复制、删除、重排和切换页面。
+- 可以直接在 ribbon 中修改页面背景色。
 - 导出页面 PNG 和项目 PDF。
 
 Panel and image / 分镜与图片：
@@ -104,7 +115,11 @@ Panel and image / 分镜与图片：
 - Bind one image file to one panel image slot.
 - Edit the visible image range through panel-local crop data.
 - Selecting a panel with an image must reveal the bound source image layer, highlight the active cut region, and allow direct drag-and-wheel adjustment.
+- Selected-panel image dragging must update the visible crop live during the drag, not only after drop.
+- 选中分镜后，拖拽图片时可见裁切必须在拖拽过程中实时更新，而不是只在松手后更新。
 - Direct image adjustment must not move the panel itself.
+- Panel vertex edits and panel resize edits must not drag the bound image to a different stage position.
+- 分镜顶点编辑和分镜尺寸编辑都不能把绑定图片拖到不同的 stage 位置。
 直接调整图片时，不能把分镜本身一起移动。
 - Support polygon panels with editable vertices.
 
@@ -143,7 +158,9 @@ System and automation / 系统与自动化：
 - The canvas must fit on screen without requiring scroll bars for the default full-page view.
 - The comic page must not fill the entire canvas; it must remain centered inside a visibly larger workspace.
 - The zoom UI must be a continuous slider rather than discrete presets.
+- The comic-page boundary must be readable above selected overlapping content via a dashed overlay.
 - 缩放界面必须是连续滑杆，而不是离散预设。
+- 当已选中的文本框或分镜压到漫画页面边界时，页面边界必须通过虚线覆盖保持清晰可读。
 - The primary workflow must stay visible and low-friction.
 - Advanced controls may exist, but basic page assembly must remain obvious.
 - The product must prefer clarity over feature density.
@@ -195,7 +212,10 @@ Current status:
 当前状态：
 
 - The required scope in this document is implemented in the current repository state.
-- Crop-based panel images, selection-driven source-image preview, polygon vertex editing, fit-to-view canvas behavior, a continuous zoom slider, Home-tab font controls, vertical text, export, autosave, automation API, and bilingual UI are present.
+- Crop-based panel images, selection-driven source-image preview, live in-panel image dragging feedback, polygon vertex editing that keeps the image stage position stable, fit-to-view canvas behavior, a continuous zoom slider, Home-tab font controls, vertical text, export, autosave, automation API, and bilingual UI are present.
+- Page-boundary dashed overlays for selected overlapping content and ribbon-based page background color controls are present.
+- 当前已具备页面边界虚线覆盖提示与 ribbon 页面背景色控制。
+- 当前已具备基于裁切的分镜图片、选中驱动的原图预览、分镜内实时拖图反馈、保持图片 stage 位置稳定的多边形顶点编辑、适配视图画布行为、连续缩放滑杆、Home Tab 字体控制、竖排文字、导出、自动保存、自动化 API 和双语界面。
 - 当前已具备基于裁切的分镜图片、选中驱动的原图预览、多边形顶点编辑、适配视图画布行为、连续缩放滑杆、Home Tab 字体控制、竖排文字、导出、自动保存、自动化 API 和双语界面。
 - The page renders inside a larger workspace, with margins around the page and support for moving objects beyond the page edge while staying in the workspace.
 - Validation currently passes with `npm test`, `npm run test:e2e`, and `npm run build`.

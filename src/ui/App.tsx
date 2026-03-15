@@ -330,6 +330,18 @@ export const App = () => {
           canUndo={pastCount > 0}
           canRedo={futureCount > 0}
           canExport={Boolean(selectedPage)}
+          pageFormat={
+            selectedPage
+              ? {
+                  background: selectedPage.background,
+                  onBackgroundChange: (background: string) =>
+                    void executeCommand("setPageBackground", {
+                      pageId: selectedPage.id,
+                      background,
+                    }),
+                }
+              : undefined
+          }
           textFormat={
             selectedText
               ? {

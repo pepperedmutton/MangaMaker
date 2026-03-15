@@ -21,6 +21,7 @@ import {
   fitViewBoxToPanelAspect,
   getPageById,
   insertPanelPoint,
+  preservePanelImageViewBox,
   removePanelPoint,
   removeLayerRef,
   scalePanelPoints,
@@ -286,6 +287,33 @@ const commands = {
         }),
       });
       return page;
+    },
+  },
+  setPageBackground: {
+    id: "setPageBackground",
+    label: "Set Page Background",
+    recordHistory: true,
+    inputSchema: z.object({
+      pageId: z.string(),
+      background: z.string(),
+    }),
+    execute: (context, input) => {
+      const current = context.getProject();
+      withPage(current, input.pageId, (page) => page);
+      const nextProject = ensureProject(
+        touch(
+          updatePage(current, input.pageId, (entry) => ({
+            ...entry,
+            background: input.background,
+          })),
+        ),
+      );
+      context.setProject(nextProject);
+      context.setSession({
+        selectedPageId: input.pageId,
+        statusMessage: createContextStatus(context, "success", "command.pageBackgroundUpdated"),
+      });
+      return withPage(nextProject, input.pageId, (entry) => entry);
     },
   },
   duplicatePage: {
@@ -684,8 +712,9 @@ const commands = {
                     image: item.image
                       ? {
                           ...item.image,
-                          viewBox: fitViewBoxToPanelAspect(
-                            { width: rect.width, height: rect.height },
+                          viewBox: preservePanelImageViewBox(
+                            item,
+                            rect,
                             item.image.sourceWidth ?? item.image.viewBox.width,
                             item.image.sourceHeight ?? item.image.viewBox.height,
                             item.image.viewBox,
@@ -974,8 +1003,14 @@ const commands = {
                     image: p.image
                       ? {
                           ...p.image,
-                          viewBox: fitViewBoxToPanelAspect(
-                            { width: newWidth, height: newHeight },
+                          viewBox: preservePanelImageViewBox(
+                            p,
+                            {
+                              x: newX,
+                              y: newY,
+                              width: newWidth,
+                              height: newHeight,
+                            },
                             p.image.sourceWidth ?? p.image.viewBox.width,
                             p.image.sourceHeight ?? p.image.viewBox.height,
                             p.image.viewBox,
