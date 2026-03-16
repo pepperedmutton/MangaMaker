@@ -903,7 +903,7 @@ const getBubbleBodyPath = (width: number, height: number, type: Bubble["bubbleTy
     case "round":
       // Rounded rectangle with tail notch at bottom
       const r = Math.min(26, w * 0.2, h * 0.2);
-      return `M ${r} 0 L ${w - r} 0 Q ${w} 0 ${w} ${r} L ${w} ${h - r} Q ${w} ${h} ${w - r} ${h} L ${w * 0.5 + 20} ${h} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h} L ${r} ${h} Q 0 ${h} 0 ${h - r} L 0 ${r} Q 0 0 ${r} 0 Z`;
+      return `M ${r} 0 L ${w - r} 0 Q ${w} 0 ${w} ${r} L ${w} ${h - r} Q ${w} ${h} ${w - r} ${h} L ${r} ${h} Q 0 ${h} 0 ${h - r} L 0 ${r} Q 0 0 ${r} 0 Z`;
     
     case "ellipse":
       // Ellipse
@@ -919,19 +919,18 @@ const getBubbleBodyPath = (width: number, height: number, type: Bubble["bubbleTy
               Q ${w * 0.95} ${h * 0.1} ${w * 0.85} ${h * 0.35}
               Q ${w} ${h * 0.5} ${w * 0.85} ${h * 0.65}
               Q ${w * 0.9} ${h * 0.85} ${w * 0.7} ${h * 0.8}
-              L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85}
               Q ${w * 0.2} ${h * 0.9} ${w * 0.15} ${h * 0.7}
               Q 0 ${h * 0.5} ${w * 0.15} ${h * 0.35}
               Q ${w * 0.05} ${h * 0.15} ${w * 0.2} ${h * 0.3} Z`;
     
     case "square":
-      // Square with tail
-      return `M 0 0 L ${w} 0 L ${w} ${h * 0.85} L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85} L 0 ${h * 0.85} Z`;
+      // Square
+      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
     
     case "roundedSquare":
       // Larger rounded corners
       const rr = Math.min(40, w * 0.25, h * 0.25);
-      return `M ${rr} 0 L ${w - rr} 0 Q ${w} 0 ${w} ${rr} L ${w} ${h * 0.8} Q ${w} ${h * 0.8 + rr * 0.5} ${w - rr * 0.5} ${h * 0.85} L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85} L ${rr * 0.5} ${h * 0.85} Q 0 ${h * 0.8 + rr * 0.5} 0 ${h * 0.8} L 0 ${rr} Q 0 0 ${rr} 0 Z`;
+      return `M ${rr} 0 L ${w - rr} 0 Q ${w} 0 ${w} ${rr} L ${w} ${h - rr} Q ${w} ${h} ${w - rr} ${h} L ${rr} ${h} Q 0 ${h} 0 ${h - rr} L 0 ${rr} Q 0 0 ${rr} 0 Z`;
     
     case "oval":
       // Tall oval
@@ -948,16 +947,16 @@ const getBubbleBodyPath = (width: number, height: number, type: Bubble["bubbleTy
         const y = h * 0.45 + Math.sin(angle) * radius;
         explosionPath += (i === 0 ? "M " : "L ") + `${x} ${y} `;
       }
-      explosionPath += `L ${w * 0.5 + 15} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 15} ${h * 0.85} Z`;
+      explosionPath += `Z`;
       return explosionPath;
     
     case "thought":
-      // Thought bubble (cloud with circles)
-      return `M ${w * 0.25} ${h * 0.2} Q ${w * 0.1} ${h * 0.15} ${w * 0.2} ${h * 0.05} Q ${w * 0.3} 0 ${w * 0.45} ${h * 0.08} Q ${w * 0.55} 0 ${w * 0.7} ${h * 0.05} Q ${w * 0.85} ${h * 0.1} ${w * 0.8} ${h * 0.25} Q ${w * 0.95} ${h * 0.35} ${w * 0.85} ${h * 0.5} Q ${w * 0.9} ${h * 0.7} ${w * 0.75} ${h * 0.75} L ${w * 0.6} ${h * 0.9} L ${w * 0.5} ${h + 10} L ${w * 0.4} ${h * 0.9} L ${w * 0.25} ${h * 0.75} Q ${w * 0.1} ${h * 0.7} ${w * 0.15} ${h * 0.5} Q ${w * 0.05} ${h * 0.35} ${w * 0.25} ${h * 0.2} Z`;
+      // Thought bubble
+      return `M ${w * 0.25} ${h * 0.2} Q ${w * 0.1} ${h * 0.15} ${w * 0.2} ${h * 0.05} Q ${w * 0.3} 0 ${w * 0.45} ${h * 0.08} Q ${w * 0.55} 0 ${w * 0.7} ${h * 0.05} Q ${w * 0.85} ${h * 0.1} ${w * 0.8} ${h * 0.25} Q ${w * 0.95} ${h * 0.35} ${w * 0.85} ${h * 0.5} Q ${w * 0.9} ${h * 0.7} ${w * 0.75} ${h * 0.75} Q ${w * 0.1} ${h * 0.7} ${w * 0.15} ${h * 0.5} Q ${w * 0.05} ${h * 0.35} ${w * 0.25} ${h * 0.2} Z`;
     
     case "jagged":
       // Jagged/sharp edges
-      return `M ${w * 0.1} 0 L ${w * 0.25} ${h * 0.1} L ${w * 0.5} 0 L ${w * 0.75} ${h * 0.1} L ${w} 0 L ${w * 0.9} ${h * 0.3} L ${w} ${h * 0.5} L ${w * 0.9} ${h * 0.7} L ${w} ${h * 0.9} L ${w * 0.75} ${h * 0.8} L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85} L ${w * 0.25} ${h * 0.8} L 0 ${h * 0.9} L ${w * 0.1} ${h * 0.7} L 0 ${h * 0.5} L ${w * 0.1} ${h * 0.3} L 0 ${h * 0.1} Z`;
+      return `M ${w * 0.1} 0 L ${w * 0.25} ${h * 0.1} L ${w * 0.5} 0 L ${w * 0.75} ${h * 0.1} L ${w} 0 L ${w * 0.9} ${h * 0.3} L ${w} ${h * 0.5} L ${w * 0.9} ${h * 0.7} L ${w} ${h * 0.9} L ${w * 0.75} ${h * 0.8} L ${w * 0.25} ${h * 0.8} L 0 ${h * 0.9} L ${w * 0.1} ${h * 0.7} L 0 ${h * 0.5} L ${w * 0.1} ${h * 0.3} L 0 ${h * 0.1} Z`;
     
     case "bubbleRound":
       // Perfect circle
@@ -976,12 +975,15 @@ const getBubbleTailPath = (bubble: Bubble, scale: number): string => {
   const w = bubble.width * scale;
   const h = bubble.height * scale;
   const base = getBubbleBasePoints(bubble);
-  const tailTipX = bubble.tailTip.x * scale;
-  const tailTipY = bubble.tailTip.y * scale;
-  const baseLeftX = base.left.x * scale;
-  const baseLeftY = base.left.y * scale;
-  const baseRightX = base.right.x * scale;
-  const baseRightY = base.right.y * scale;
+  
+  // tailTip and base are in absolute page coordinates. 
+  // We need them relative to the bubble's top-left corner (bubble.x, bubble.y)
+  const tailTipX = (bubble.tailTip.x - bubble.x) * scale;
+  const tailTipY = (bubble.tailTip.y - bubble.y) * scale;
+  const baseLeftX = (base.left.x - bubble.x) * scale;
+  const baseLeftY = (base.left.y - bubble.y) * scale;
+  const baseRightX = (base.right.x - bubble.x) * scale;
+  const baseRightY = (base.right.y - bubble.y) * scale;
   
   // Calculate tail base position based on bubble type
   let tailBaseY = h;
@@ -993,7 +995,7 @@ const getBubbleTailPath = (bubble: Bubble, scale: number): string => {
     tailBaseY = h * 0.9;
   }
   
-  return `M ${baseLeftX} ${Math.min(baseLeftY * scale, tailBaseY)} L ${tailTipX} ${tailTipY} L ${baseRightX} ${Math.min(baseRightY * scale, tailBaseY)} Z`;
+  return `M ${baseLeftX} ${Math.min(baseLeftY, tailBaseY)} L ${tailTipX} ${tailTipY} L ${baseRightX} ${Math.min(baseRightY, tailBaseY)} Z`;
 };
 
 const BubbleNode = ({
@@ -1072,8 +1074,8 @@ const BubbleNode = ({
         />
         {/* Bubble tail - regular tail or thought circles */}
         {bubble.bubbleType === "thought" ? (() => {
-          const tailTipX = bubble.tailTip.x * scale;
-          const tailTipY = bubble.tailTip.y * scale;
+          const tailTipX = (bubble.tailTip.x - bubble.x) * scale;
+          const tailTipY = (bubble.tailTip.y - bubble.y) * scale;
           const tailBaseX = bubble.width * 0.5 * scale;
           const tailBaseY = bubble.height * 0.85 * scale; // Assuming thought clouds have base at ~0.85h
           
