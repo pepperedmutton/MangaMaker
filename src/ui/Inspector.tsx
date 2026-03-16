@@ -590,6 +590,24 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
               }
             />
           </label>
+          {bubble.bubbleType === "thought" && (
+            <label>
+              <span>{t("inspector.thoughtCircles")}</span>
+              <input
+                type="number"
+                min={2}
+                max={5}
+                value={bubble.thoughtCircles ?? 3}
+                onChange={(event) =>
+                  void executeCommand("updateBubble", {
+                    pageId: page.id,
+                    bubbleId: bubble.id,
+                    thoughtCircles: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+          )}
           <label>
             <span>{t("inspector.backgroundColor")}</span>
             <input

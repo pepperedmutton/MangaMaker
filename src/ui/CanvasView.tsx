@@ -1070,13 +1070,44 @@ const BubbleNode = ({
           scaleX={scale}
           scaleY={scale}
         />
-        {/* Bubble tail */}
-        <Path
-          data={tailPath}
-          fill={bubble.backgroundColor}
-          stroke={strokeColor}
-          strokeWidth={bubble.strokeWidth}
-        />
+        {/* Bubble tail - regular tail or thought circles */}
+        {bubble.bubbleType === "thought" ? (() => {
+          const tailTipX = bubble.tailTip.x * scale;
+          const tailTipY = bubble.tailTip.y * scale;
+          const tailBaseX = bubble.width * 0.5 * scale;
+          const tailBaseY = bubble.height * 0.85 * scale; // Assuming thought clouds have base at ~0.85h
+          
+          const circles = [];
+          const numCircles = bubble.thoughtCircles ?? 3;
+          
+          for (let i = 0; i < numCircles; i++) {
+            const t = (i + 1) / (numCircles + 1); // Parameter along the line (0 to 1)
+            const cx = tailBaseX + (tailTipX - tailBaseX) * t;
+            const cy = tailBaseY + (tailTipY - tailBaseY) * t;
+            // Radius gets smaller towards the tip
+            const radius = Math.max(4 * scale, (15 - i * 3) * scale);
+            
+            circles.push(
+              <Circle
+                key={`thought-circle-${i}`}
+                x={cx}
+                y={cy}
+                radius={radius}
+                fill={bubble.backgroundColor}
+                stroke={strokeColor}
+                strokeWidth={bubble.strokeWidth}
+              />
+            );
+          }
+          return circles;
+        })() : (
+          <Path
+            data={tailPath}
+            fill={bubble.backgroundColor}
+            stroke={strokeColor}
+            strokeWidth={bubble.strokeWidth}
+          />
+        )}
         {/* Text */}
         <Text
           x={padding * scale}
