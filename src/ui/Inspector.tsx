@@ -509,6 +509,19 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
   );
 };
 
+const BUBBLE_TYPES: Array<{ type: Bubble["bubbleType"]; labelKey: string }> = [
+  { type: "round", labelKey: "inspector.bubbleType.round" },
+  { type: "ellipse", labelKey: "inspector.bubbleType.ellipse" },
+  { type: "cloud", labelKey: "inspector.bubbleType.cloud" },
+  { type: "square", labelKey: "inspector.bubbleType.square" },
+  { type: "roundedSquare", labelKey: "inspector.bubbleType.roundedSquare" },
+  { type: "oval", labelKey: "inspector.bubbleType.oval" },
+  { type: "explosion", labelKey: "inspector.bubbleType.explosion" },
+  { type: "thought", labelKey: "inspector.bubbleType.thought" },
+  { type: "jagged", labelKey: "inspector.bubbleType.jagged" },
+  { type: "bubbleRound", labelKey: "inspector.bubbleType.bubbleRound" },
+];
+
 const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const { t } = useI18n();
@@ -536,6 +549,76 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
             })
           }
         />
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.bubbleType")}</p>
+        <select
+          value={bubble.bubbleType}
+          onChange={(event) =>
+            void executeCommand("updateBubble", {
+              pageId: page.id,
+              bubbleId: bubble.id,
+              bubbleType: event.target.value as Bubble["bubbleType"],
+            })
+          }
+        >
+          {BUBBLE_TYPES.map(({ type, labelKey }) => (
+            <option key={type} value={type}>
+              {t(labelKey)}
+            </option>
+          ))}
+        </select>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.bubbleStyle")}</p>
+        <div className="field-grid">
+          <label>
+            <span>{t("inspector.strokeWidth")}</span>
+            <input
+              type="number"
+              min={0}
+              max={10}
+              value={bubble.strokeWidth}
+              onChange={(event) =>
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  strokeWidth: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>{t("inspector.backgroundColor")}</span>
+            <input
+              type="color"
+              value={bubble.backgroundColor}
+              onChange={(event) =>
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  backgroundColor: event.target.value,
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>{t("inspector.strokeColor")}</span>
+            <input
+              type="color"
+              value={bubble.strokeColor}
+              onChange={(event) =>
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  strokeColor: event.target.value,
+                })
+              }
+            />
+          </label>
+        </div>
       </section>
 
       <section>

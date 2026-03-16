@@ -83,6 +83,10 @@ export const createDefaultBubble = (
   fontFamily: "system-ui",
   textAlign: "center",
   verticalAlign: "middle",
+  bubbleType: "round",
+  strokeWidth: 2,
+  backgroundColor: "#ffffff",
+  strokeColor: "#111111",
   ...overrides,
 });
 

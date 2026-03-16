@@ -159,14 +159,16 @@ Text and bubble / 文字与气泡：
 - Support font family, font size, color, text alignment, and vertical alignment selection.
 - Text formatting controls (font, size, direction, alignment) appear in the right sidebar Inspector when a text object is selected.
 - Create, edit, move, resize, and delete speech bubbles.
-- Bubble formatting controls (font, size, alignment) appear in the right sidebar Inspector when a bubble is selected.
+- **Ten bubble types**: round, ellipse, cloud, square, rounded square, oval, explosion, thought, jagged, circle.
+- Bubble formatting controls (font, size, alignment, bubble type, border width, background color, border color) appear in the right sidebar Inspector when a bubble is selected.
 
 - 创建、编辑、移动、缩放和删除文本框。
 - 支持横排和竖排文字。
 - 支持字体、字号、颜色、文字对齐和垂直对齐选择。
 - 选中文字对象时，文字格式控制（字体、字号、方向、对齐）显示在右侧边栏 Inspector 中。
 - 创建、编辑、移动、缩放和删除气泡。
-- 选中气泡时，气泡格式控制（字体、字号、对齐）显示在右侧边栏 Inspector 中。
+- **十种气泡类型**：圆角矩形、椭圆、云朵、方形、大圆角方形、长椭圆、爆炸形、思考气泡、锯齿形、圆形。
+- 选中气泡时，气泡格式控制（字体、字号、对齐、气泡类型、边框宽度、背景颜色、边框颜色）显示在右侧边栏 Inspector 中。
 
 System and automation / 系统与自动化：
 

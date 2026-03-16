@@ -6,6 +6,7 @@ import {
   Image as KonvaImage,
   Layer,
   Line,
+  Path,
   Rect,
   Stage,
   Text,
@@ -893,6 +894,108 @@ const TextNode = ({
   );
 };
 
+// Generate bubble body path based on type
+const getBubbleBodyPath = (width: number, height: number, type: Bubble["bubbleType"]): string => {
+  const w = width;
+  const h = height;
+  
+  switch (type) {
+    case "round":
+      // Rounded rectangle with tail notch at bottom
+      const r = Math.min(26, w * 0.2, h * 0.2);
+      return `M ${r} 0 L ${w - r} 0 Q ${w} 0 ${w} ${r} L ${w} ${h - r} Q ${w} ${h} ${w - r} ${h} L ${w * 0.5 + 20} ${h} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h} L ${r} ${h} Q 0 ${h} 0 ${h - r} L 0 ${r} Q 0 0 ${r} 0 Z`;
+    
+    case "ellipse":
+      // Ellipse
+      return `M ${w * 0.5} 0 A ${w * 0.5} ${h * 0.5} 0 1 1 ${w * 0.5} ${h} A ${w * 0.5} ${h * 0.5} 0 1 1 ${w * 0.5} 0 Z`;
+    
+    case "cloud":
+      // Cloud shape with multiple bumps
+      const bump = Math.min(w, h) * 0.15;
+      return `M ${w * 0.2} ${h * 0.3} 
+              Q ${w * 0.1} ${h * 0.1} ${w * 0.3} ${h * 0.15}
+              Q ${w * 0.4} 0 ${w * 0.55} ${h * 0.1}
+              Q ${w * 0.7} 0 ${w * 0.8} ${h * 0.15}
+              Q ${w * 0.95} ${h * 0.1} ${w * 0.85} ${h * 0.35}
+              Q ${w} ${h * 0.5} ${w * 0.85} ${h * 0.65}
+              Q ${w * 0.9} ${h * 0.85} ${w * 0.7} ${h * 0.8}
+              L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85}
+              Q ${w * 0.2} ${h * 0.9} ${w * 0.15} ${h * 0.7}
+              Q 0 ${h * 0.5} ${w * 0.15} ${h * 0.35}
+              Q ${w * 0.05} ${h * 0.15} ${w * 0.2} ${h * 0.3} Z`;
+    
+    case "square":
+      // Square with tail
+      return `M 0 0 L ${w} 0 L ${w} ${h * 0.85} L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85} L 0 ${h * 0.85} Z`;
+    
+    case "roundedSquare":
+      // Larger rounded corners
+      const rr = Math.min(40, w * 0.25, h * 0.25);
+      return `M ${rr} 0 L ${w - rr} 0 Q ${w} 0 ${w} ${rr} L ${w} ${h * 0.8} Q ${w} ${h * 0.8 + rr * 0.5} ${w - rr * 0.5} ${h * 0.85} L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85} L ${rr * 0.5} ${h * 0.85} Q 0 ${h * 0.8 + rr * 0.5} 0 ${h * 0.8} L 0 ${rr} Q 0 0 ${rr} 0 Z`;
+    
+    case "oval":
+      // Tall oval
+      return `M ${w * 0.5} 0 C ${w * 0.85} 0 ${w} ${h * 0.25} ${w} ${h * 0.5} C ${w} ${h * 0.75} ${w * 0.85} ${h} ${w * 0.5} ${h} C ${w * 0.15} ${h} 0 ${h * 0.75} 0 ${h * 0.5} C 0 ${h * 0.25} ${w * 0.15} 0 ${w * 0.5} 0 Z`;
+    
+    case "explosion":
+      // Explosion/jagged shape
+      const spikes = 8;
+      let explosionPath = "";
+      for (let i = 0; i < spikes * 2; i++) {
+        const angle = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
+        const radius = i % 2 === 0 ? Math.min(w, h) * 0.45 : Math.min(w, h) * 0.35;
+        const x = w * 0.5 + Math.cos(angle) * radius;
+        const y = h * 0.45 + Math.sin(angle) * radius;
+        explosionPath += (i === 0 ? "M " : "L ") + `${x} ${y} `;
+      }
+      explosionPath += `L ${w * 0.5 + 15} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 15} ${h * 0.85} Z`;
+      return explosionPath;
+    
+    case "thought":
+      // Thought bubble (cloud with circles)
+      return `M ${w * 0.25} ${h * 0.2} Q ${w * 0.1} ${h * 0.15} ${w * 0.2} ${h * 0.05} Q ${w * 0.3} 0 ${w * 0.45} ${h * 0.08} Q ${w * 0.55} 0 ${w * 0.7} ${h * 0.05} Q ${w * 0.85} ${h * 0.1} ${w * 0.8} ${h * 0.25} Q ${w * 0.95} ${h * 0.35} ${w * 0.85} ${h * 0.5} Q ${w * 0.9} ${h * 0.7} ${w * 0.75} ${h * 0.75} L ${w * 0.6} ${h * 0.9} L ${w * 0.5} ${h + 10} L ${w * 0.4} ${h * 0.9} L ${w * 0.25} ${h * 0.75} Q ${w * 0.1} ${h * 0.7} ${w * 0.15} ${h * 0.5} Q ${w * 0.05} ${h * 0.35} ${w * 0.25} ${h * 0.2} Z`;
+    
+    case "jagged":
+      // Jagged/sharp edges
+      return `M ${w * 0.1} 0 L ${w * 0.25} ${h * 0.1} L ${w * 0.5} 0 L ${w * 0.75} ${h * 0.1} L ${w} 0 L ${w * 0.9} ${h * 0.3} L ${w} ${h * 0.5} L ${w * 0.9} ${h * 0.7} L ${w} ${h * 0.9} L ${w * 0.75} ${h * 0.8} L ${w * 0.5 + 20} ${h * 0.85} L ${w * 0.5} ${h + 15} L ${w * 0.5 - 20} ${h * 0.85} L ${w * 0.25} ${h * 0.8} L 0 ${h * 0.9} L ${w * 0.1} ${h * 0.7} L 0 ${h * 0.5} L ${w * 0.1} ${h * 0.3} L 0 ${h * 0.1} Z`;
+    
+    case "bubbleRound":
+      // Perfect circle
+      const radius = Math.min(w, h) * 0.5;
+      const cx = w * 0.5;
+      const cy = h * 0.45;
+      return `M ${cx} ${cy - radius} A ${radius} ${radius} 0 1 1 ${cx} ${cy + radius} A ${radius} ${radius} 0 1 1 ${cx} ${cy - radius} Z`;
+    
+    default:
+      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
+  }
+};
+
+// Generate tail path for bubble
+const getBubbleTailPath = (bubble: Bubble, scale: number): string => {
+  const w = bubble.width * scale;
+  const h = bubble.height * scale;
+  const base = getBubbleBasePoints(bubble);
+  const tailTipX = bubble.tailTip.x * scale;
+  const tailTipY = bubble.tailTip.y * scale;
+  const baseLeftX = base.left.x * scale;
+  const baseLeftY = base.left.y * scale;
+  const baseRightX = base.right.x * scale;
+  const baseRightY = base.right.y * scale;
+  
+  // Calculate tail base position based on bubble type
+  let tailBaseY = h;
+  if (bubble.bubbleType === "ellipse" || bubble.bubbleType === "oval") {
+    tailBaseY = h * 0.9;
+  } else if (bubble.bubbleType === "cloud" || bubble.bubbleType === "thought") {
+    tailBaseY = h * 0.85;
+  } else if (bubble.bubbleType === "bubbleRound") {
+    tailBaseY = h * 0.9;
+  }
+  
+  return `M ${baseLeftX} ${Math.min(baseLeftY * scale, tailBaseY)} L ${tailTipX} ${tailTipY} L ${baseRightX} ${Math.min(baseRightY * scale, tailBaseY)} Z`;
+};
+
 const BubbleNode = ({
   page,
   bubble,
@@ -920,6 +1023,11 @@ const BubbleNode = ({
       objectId: bubble.id,
     });
   };
+
+  const bodyPath = getBubbleBodyPath(bubble.width, bubble.height, bubble.bubbleType);
+  const tailPath = getBubbleTailPath(bubble, 1);
+  const strokeColor = selected ? "#c36d2f" : bubble.strokeColor;
+  const padding = 24;
 
   return (
     <>
@@ -953,19 +1061,28 @@ const BubbleNode = ({
           });
         }}
       >
-        <Rect
-          width={bubble.width * scale}
-          height={bubble.height * scale}
-          fill="#ffffff"
-          stroke={selected ? "#c36d2f" : "#111111"}
-          strokeWidth={3}
-          cornerRadius={26}
+        {/* Bubble body */}
+        <Path
+          data={bodyPath}
+          fill={bubble.backgroundColor}
+          stroke={strokeColor}
+          strokeWidth={bubble.strokeWidth}
+          scaleX={scale}
+          scaleY={scale}
         />
+        {/* Bubble tail */}
+        <Path
+          data={tailPath}
+          fill={bubble.backgroundColor}
+          stroke={strokeColor}
+          strokeWidth={bubble.strokeWidth}
+        />
+        {/* Text */}
         <Text
-          x={24 * scale}
-          y={20 * scale}
-          width={(bubble.width - 48) * scale}
-          height={(bubble.height - 40) * scale}
+          x={padding * scale}
+          y={padding * scale}
+          width={(bubble.width - padding * 2) * scale}
+          height={(bubble.height - padding * 2) * scale}
           text={bubble.text}
           fontSize={bubble.fontSize * scale}
           fontFamily={bubble.fontFamily}
@@ -974,22 +1091,6 @@ const BubbleNode = ({
           verticalAlign={bubble.verticalAlign}
         />
       </Group>
-
-      <Line
-        points={[
-          base.left.x * scale,
-          base.left.y * scale,
-          bubble.tailTip.x * scale,
-          bubble.tailTip.y * scale,
-          base.right.x * scale,
-          base.right.y * scale,
-        ]}
-        fill="#ffffff"
-        stroke={selected ? "#c36d2f" : "#111111"}
-        strokeWidth={3}
-        closed
-        listening={false}
-      />
 
       {selected ? (
         <>

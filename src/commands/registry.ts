@@ -1273,6 +1273,10 @@ const commands = {
       fontFamily: z.string().optional(),
       textAlign: z.enum(["left", "center", "right"]).optional(),
       verticalAlign: z.enum(["top", "middle", "bottom"]).optional(),
+      bubbleType: z.enum(["round", "ellipse", "cloud", "square", "roundedSquare", "oval", "explosion", "thought", "jagged", "bubbleRound"]).optional(),
+      strokeWidth: z.number().nonnegative().optional(),
+      backgroundColor: z.string().optional(),
+      strokeColor: z.string().optional(),
     }),
     execute: (context, input) => {
       const page = getPageById(context.getProject(), input.pageId);
@@ -1311,6 +1315,10 @@ const commands = {
                     ...(input.fontFamily !== undefined ? { fontFamily: input.fontFamily } : {}),
                     ...(input.textAlign !== undefined ? { textAlign: input.textAlign } : {}),
                     ...(input.verticalAlign !== undefined ? { verticalAlign: input.verticalAlign } : {}),
+                    ...(input.bubbleType !== undefined ? { bubbleType: input.bubbleType } : {}),
+                    ...(input.strokeWidth !== undefined ? { strokeWidth: input.strokeWidth } : {}),
+                    ...(input.backgroundColor !== undefined ? { backgroundColor: input.backgroundColor } : {}),
+                    ...(input.strokeColor !== undefined ? { strokeColor: input.strokeColor } : {}),
                   }
                 : item,
             ),

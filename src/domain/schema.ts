@@ -130,6 +130,19 @@ export const textItemSchema = z.object({
   verticalAlign: verticalAlignSchema.default("top"),
 });
 
+export const bubbleTypeSchema = z.enum([
+  "round",      // 圆角矩形
+  "ellipse",    // 椭圆
+  "cloud",      // 云朵
+  "square",     // 方形
+  "roundedSquare", // 圆角方形（更大圆角）
+  "oval",       // 长椭圆
+  "explosion",  // 爆炸形
+  "thought",    // 思考气泡
+  "jagged",     // 锯齿形
+  "bubbleRound", // 圆形气泡
+]);
+
 export const bubbleSchema = z.object({
   id: z.string(),
   x: z.number(),
@@ -142,6 +155,10 @@ export const bubbleSchema = z.object({
   fontFamily: z.string().default("system-ui"),
   textAlign: textAlignSchema.default("center"),
   verticalAlign: verticalAlignSchema.default("middle"),
+  bubbleType: bubbleTypeSchema.default("round"),
+  strokeWidth: z.number().nonnegative().default(2),
+  backgroundColor: z.string().default("#ffffff"),
+  strokeColor: z.string().default("#111111"),
 });
 
 export const objectTypeSchema = z.enum(["panel", "text", "bubble"]);
@@ -174,6 +191,7 @@ export type Panel = z.infer<typeof panelSchema>;
 export type TextDirection = z.infer<typeof textDirectionSchema>;
 export type TextItem = z.infer<typeof textItemSchema>;
 export type Bubble = z.infer<typeof bubbleSchema>;
+export type BubbleType = z.infer<typeof bubbleTypeSchema>;
 export type ObjectType = z.infer<typeof objectTypeSchema>;
 export type Page = z.infer<typeof pageSchema>;
 export type Project = z.infer<typeof projectSchema>;

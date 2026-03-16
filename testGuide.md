@@ -70,7 +70,7 @@ If the change affects human interaction, the following steps must be manually ve
    - Left-drag on the panel border must move the panel.
    - The panel must not move during image crop panning.
 6. **Text**: Adding text, switching between horizontal/vertical directions, setting horizontal alignment (left/center/right), setting vertical alignment (top/middle/bottom), and applying font changes from the Inspector sidebar.
-7. **Bubble**: Adding bubbles, setting text alignment, and applying font changes from the Inspector sidebar.
+7. **Bubble**: Adding bubbles, switching between ten bubble types (round, ellipse, cloud, square, rounded square, oval, explosion, thought, jagged, circle), setting text alignment, adjusting border width, background color, border color, and applying font changes from the Inspector sidebar.
 7. **Context Menus**: Right-clicking on objects must bring up custom custom menus, suppressing the default browser menu.
 8. **Zooming**: Using the continuous zoom slider must smoothly scale the workspace, without suddenly resizing the canvas window boundaries.
 
