@@ -639,6 +639,7 @@ const commands = {
       panelId: z.string(),
       x: z.number(),
       y: z.number(),
+      selectAfterMove: z.boolean().optional().default(true),
     }),
     execute: (context, input) => {
       const page = getPageById(context.getProject(), input.pageId);
@@ -659,13 +660,17 @@ const commands = {
         ),
       );
       context.setProject(nextProject);
-      context.setSession({
-        selection: {
-          pageId: input.pageId,
-          objectType: "panel",
-          objectId: input.panelId,
-        },
-      });
+      // Only update selection if selectAfterMove is true (default behavior)
+      // When dragging, we pass false to prevent auto-selection after drag
+      if (input.selectAfterMove) {
+        context.setSession({
+          selection: {
+            pageId: input.pageId,
+            objectType: "panel",
+            objectId: input.panelId,
+          },
+        });
+      }
       return withPage(nextProject, input.pageId, (entry) =>
         entry.panels.find((item) => item.id === input.panelId),
       );

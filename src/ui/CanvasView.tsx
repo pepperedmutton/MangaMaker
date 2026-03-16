@@ -559,6 +559,7 @@ const PanelNode = ({
             panelId: panel.id,
             x: nextRect.x,
             y: nextRect.y,
+            selectAfterMove: false,
           }).finally(() => {
             onBoundaryPreviewChange(null);
           });
@@ -654,6 +655,7 @@ const PanelNode = ({
                 panelId: panel.id,
                 x: panel.x + deltaX,
                 y: panel.y + deltaY,
+                selectAfterMove: false,
               }).finally(() => {
                 onBoundaryPreviewChange(null);
               });
