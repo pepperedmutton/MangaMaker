@@ -566,6 +566,10 @@ const PanelNode = ({
           }).finally(() => {
             onBoundaryPreviewChange(null);
           });
+          // Clear drag flag after a short delay to prevent blocking future clicks
+          setTimeout(() => {
+            isDraggingRef.current = false;
+          }, 50);
         }}
       >
         <Group
