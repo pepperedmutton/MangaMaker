@@ -149,7 +149,10 @@ export const bubbleSchema = z.object({
   y: z.number(),
   width: z.number().positive(),
   height: z.number().positive(),
+  // Tail configuration - tail can be attached to any point on bubble edge
   tailTip: pointSchema,
+  tailBaseAngle: z.number().default(90), // 0-360 degrees, default 90 (bottom)
+  tailWidth: z.number().positive().default(24), // Width of tail at base
   text: z.string(),
   fontSize: z.number().positive(),
   fontFamily: z.string().default("system-ui"),
@@ -159,6 +162,13 @@ export const bubbleSchema = z.object({
   strokeWidth: z.number().nonnegative().default(2),
   backgroundColor: z.string().default("#ffffff"),
   strokeColor: z.string().default("#111111"),
+  // Type-specific properties
+  cornerRadius: z.number().nonnegative().default(12), // for round, roundedSquare
+  bumpiness: z.number().min(0).max(1).default(0.5), // for cloud (0=smooth, 1=very bumpy)
+  spikeCount: z.number().int().min(4).max(16).default(8), // for explosion
+  spikeDepth: z.number().min(0.2).max(0.8).default(0.5), // for explosion (0.2=shallow, 0.8=deep)
+  jaggedness: z.number().min(2).max(12).default(6), // for jagged (number of zigzags per edge)
+  thoughtCircles: z.number().int().min(2).max(5).default(3), // for thought (number of trailing circles)
 });
 
 export const objectTypeSchema = z.enum(["panel", "text", "bubble"]);

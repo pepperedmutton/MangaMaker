@@ -78,6 +78,8 @@ export const createDefaultBubble = (
   width: 260,
   height: 150,
   tailTip: { x: 310, y: 390 },
+  tailBaseAngle: 90,
+  tailWidth: 24,
   text: "Dialogue",
   fontSize: 26,
   fontFamily: "system-ui",
@@ -87,6 +89,12 @@ export const createDefaultBubble = (
   strokeWidth: 2,
   backgroundColor: "#ffffff",
   strokeColor: "#111111",
+  cornerRadius: 12,
+  bumpiness: 0.5,
+  spikeCount: 8,
+  spikeDepth: 0.5,
+  jaggedness: 6,
+  thoughtCircles: 3,
   ...overrides,
 });
 
