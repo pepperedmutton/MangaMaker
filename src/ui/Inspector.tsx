@@ -9,6 +9,7 @@ type InspectorProps = {
   page: Page | null;
   onExportProjectPdf: () => void;
   onImportImage: () => void;
+  onCreatePanel?: () => void;
 };
 
 const DeleteButton = ({
@@ -539,7 +540,7 @@ const getRecommendedNextStepKey = (page: Page) => {
   return "inspector.nextStep.export";
 };
 
-export const Inspector = ({ page, onExportProjectPdf, onImportImage }: InspectorProps) => {
+export const Inspector = ({ page, onExportProjectPdf, onImportImage, onCreatePanel }: InspectorProps) => {
   const selection = useEditorStore((state) => state.selection);
   const lastExport = useEditorStore((state) => state.lastExport);
   const saveStatus = useEditorStore((state) => state.saveStatus);
@@ -579,6 +580,16 @@ export const Inspector = ({ page, onExportProjectPdf, onImportImage }: Inspector
           <section>
             <p className="eyebrow">{t("inspector.nextStep")}</p>
             <p>{t(getRecommendedNextStepKey(page))}</p>
+          </section>
+          <section>
+            <p className="eyebrow">{t("inspector.insert")}</p>
+            <button
+              className="primary-button insp-full-btn"
+              onClick={onCreatePanel}
+              disabled={!onCreatePanel}
+            >
+              {t("toolbar.panel")}
+            </button>
           </section>
           <section>
             <p className="eyebrow">{t("inspector.projectExport")}</p>

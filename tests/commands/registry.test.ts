@@ -75,6 +75,24 @@ describe("commandRegistry", () => {
         (cropped as { viewBox: { width: number; height: number } }).viewBox.height,
     ).toBeCloseTo(panel.width / panel.height, 2);
 
+    const transformed = await runCommand(harness, "transformImageInPanel", {
+      pageId: page.id,
+      panelId: panel.id,
+      x: 30,
+      y: 40,
+      scaleX: 1.5,
+      scaleY: 1.5,
+    });
+    
+    expect(transformed).toMatchObject({
+      transform: {
+        x: 30,
+        y: 40,
+        scaleX: 1.5,
+        scaleY: 1.5,
+      }
+    });
+
     await runCommand(harness, "exitPanelImageEdit", {});
     expect(harness.readSession().panelImageEditing).toBeNull();
   });

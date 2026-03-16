@@ -1,0 +1,131 @@
+﻿
+> mangamaker@0.1.0 test:e2e
+> playwright test
+
+
+Running 12 tests using 1 worker
+
+  ✓   1 tests\e2e\editor.spec.ts:379:1 › first-run flow creates a project, a page, and visible next-step guidance (785ms)
+  ✘   2 tests\e2e\editor.spec.ts:395:1 › selected panels reveal the bound source image and allow direct wheel/drag crop editing (825ms)
+  ✓   3 tests\e2e\editor.spec.ts:536:1 › polygon panels support adding and removing vertices through the inspector (601ms)
+  ✘   4 tests\e2e\editor.spec.ts:555:1 › double-clicking a panel still leaves it selected (5.4s)
+  ✘   5 tests\e2e\editor.spec.ts:583:1 › a selected image panel can still be moved without changing zoom layout (5.6s)
+  ✘   6 tests\e2e\editor.spec.ts:635:1 › right-clicking a panel opens a custom context menu and suppresses the browser menu (5.5s)
+  ✓   7 tests\e2e\editor.spec.ts:671:1 › text boxes support home-tab font controls and vertical text direction (587ms)
+  ✘   8 tests\e2e\editor.spec.ts:715:1 › the page boundary overlay appears live only after a selected panel crosses the page edge (682ms)
+  ✓   9 tests\e2e\editor.spec.ts:771:1 › bubble creation and page/project export stay available from the GUI (695ms)
+  ✓  10 tests\e2e\editor.spec.ts:793:1 › canvas defaults to a fit-to-view display and major GUI actions keep command parity (737ms)
+  ✓  11 tests\e2e\editor.spec.ts:894:1 › local draft recovery restores the saved project after reset (1.4s)
+  ✓  12 tests\e2e\editor.spec.ts:913:1 › interface copy switches cleanly between English and Chinese (553ms)
+
+
+  1) tests\e2e\editor.spec.ts:395:1 › selected panels reveal the bound source image and allow direct wheel/drag crop editing 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: > [32m40[39m
+    Received:   [31m0[39m
+
+      488 |     0,
+      489 |   );
+    > 490 |   expect(liveDragPixelDifference).toBeGreaterThan(40);
+          |                                   ^
+      491 |   await page.mouse.up();
+      492 |
+      493 |   await expect
+        at D:\MangaMaker\tests\e2e\editor.spec.ts:490:35
+
+    Error Context: test-results\editor-selected-panels-rev-14417-ect-wheel-drag-crop-editing\error-context.md
+
+  2) tests\e2e\editor.spec.ts:555:1 › double-clicking a panel still leaves it selected ─────────────
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoEqual[2m([22m[32mexpected[39m[2m) // deep equality[22m
+
+    Expected: [32m{"objectId": "panel-m2pzc5ou", "objectType": "panel", "pageId": Any<String>}[39m
+    Received: [31mnull[39m
+
+    Call Log:
+    - Timeout 5000ms exceeded while waiting on the predicate
+
+      572 |   await page.mouse.dblclick(canvasBox.x + panelCenter.x, canvasBox.y + panelCenter.y);
+      573 |
+    > 574 |   await expect
+          |   ^
+      575 |     .poll(() => page.evaluate(() => window.mangaMaker?.session.get().selection))
+      576 |     .toEqual({
+      577 |       pageId: expect.any(String),
+        at D:\MangaMaker\tests\e2e\editor.spec.ts:574:3
+
+    Error Context: test-results\editor-double-clicking-a-panel-still-leaves-it-selected\error-context.md
+
+  3) tests\e2e\editor.spec.ts:583:1 › a selected image panel can still be moved without changing zoom layout 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mnot[2m.[22mtoEqual[2m([22m[32mexpected[39m[2m) // deep equality[22m
+
+    Expected: not [32m{"x": 160, "y": 180}[39m
+
+
+    Call Log:
+    - Timeout 5000ms exceeded while waiting on the predicate
+
+      609 |   await page.mouse.up();
+      610 |
+    > 611 |   await expect
+          |   ^
+      612 |     .poll(() =>
+      613 |       page.evaluate(() => {
+      614 |         const panel = window.mangaMaker?.project.get().pages[0]?.panels[0];
+        at D:\MangaMaker\tests\e2e\editor.spec.ts:611:3
+
+    Error Context: test-results\editor-a-selected-image-pa-8a1dd-ithout-changing-zoom-layout\error-context.md
+
+  4) tests\e2e\editor.spec.ts:635:1 › right-clicking a panel opens a custom context menu and suppresses the browser menu 
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoBeVisible[2m([22m[2m)[22m failed
+
+    Locator: getByRole('menu', { name: 'Panel Actions' })
+    Expected: visible
+    Timeout: 5000ms
+    Error: element(s) not found
+
+    Call log:
+    [2m  - Expect "toBeVisible" with timeout 5000ms[22m
+    [2m  - waiting for getByRole('menu', { name: 'Panel Actions' })[22m
+
+
+      647 |   });
+      648 |
+    > 649 |   await expect(page.getByRole("menu", { name: "Panel Actions" })).toBeVisible();
+          |                                                                   ^
+      650 |   await expect(page.getByRole("menuitem", { name: "Import Image" })).toBeVisible();
+      651 |   await expect(page.getByRole("menuitem", { name: "Add Vertex" })).toBeVisible();
+      652 |   await expect
+        at D:\MangaMaker\tests\e2e\editor.spec.ts:649:67
+
+    Error Context: test-results\editor-right-clicking-a-pa-1c6f9-suppresses-the-browser-menu\error-context.md
+
+  5) tests\e2e\editor.spec.ts:715:1 › the page boundary overlay appears live only after a selected panel crosses the page edge 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: > [32m35[39m
+    Received:   [31m-22[39m
+
+      756 |
+      757 |   const liveBlueBias = await getMaxBlueBiasAtPagePoints(page, boundarySamplePoints);
+    > 758 |   expect(liveBlueBias).toBeGreaterThan(35);
+          |                        ^
+      759 |   await page.mouse.up();
+      760 |
+      761 |   await expect
+        at D:\MangaMaker\tests\e2e\editor.spec.ts:758:24
+
+    Error Context: test-results\editor-the-page-boundary-o-03aa2-panel-crosses-the-page-edge\error-context.md
+
+  5 failed
+    tests\e2e\editor.spec.ts:395:1 › selected panels reveal the bound source image and allow direct wheel/drag crop editing 
+    tests\e2e\editor.spec.ts:555:1 › double-clicking a panel still leaves it selected ──────────────
+    tests\e2e\editor.spec.ts:583:1 › a selected image panel can still be moved without changing zoom layout 
+    tests\e2e\editor.spec.ts:635:1 › right-clicking a panel opens a custom context menu and suppresses the browser menu 
+    tests\e2e\editor.spec.ts:715:1 › the page boundary overlay appears live only after a selected panel crosses the page edge 
+  7 passed (29.4s)

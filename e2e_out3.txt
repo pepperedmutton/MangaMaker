@@ -1,0 +1,21 @@
+﻿
+> mangamaker@0.1.0 test:e2e
+> playwright test
+
+
+Running 12 tests using 1 worker
+
+  ✓   1 tests\e2e\editor.spec.ts:379:1 › first-run flow creates a project, a page, and visible next-step guidance (675ms)
+  ✓   2 tests\e2e\editor.spec.ts:395:1 › selected panels reveal the bound source image and allow direct wheel/drag crop editing (743ms)
+  ✓   3 tests\e2e\editor.spec.ts:536:1 › polygon panels support adding and removing vertices through the inspector (541ms)
+  ✓   4 tests\e2e\editor.spec.ts:555:1 › double-clicking a panel still leaves it selected (486ms)
+  ✓   5 tests\e2e\editor.spec.ts:583:1 › a selected image panel can still be moved without changing zoom layout (770ms)
+  ✓   6 tests\e2e\editor.spec.ts:635:1 › right-clicking a panel opens a custom context menu and suppresses the browser menu (518ms)
+  ✓   7 tests\e2e\editor.spec.ts:671:1 › text boxes support home-tab font controls and vertical text direction (552ms)
+  ✓   8 tests\e2e\editor.spec.ts:715:1 › the page boundary overlay appears live only after a selected panel crosses the page edge (691ms)
+  ✓   9 tests\e2e\editor.spec.ts:771:1 › bubble creation and page/project export stay available from the GUI (644ms)
+  ✓  10 tests\e2e\editor.spec.ts:793:1 › canvas defaults to a fit-to-view display and major GUI actions keep command parity (722ms)
+  ✓  11 tests\e2e\editor.spec.ts:894:1 › local draft recovery restores the saved project after reset (1.4s)
+  ✓  12 tests\e2e\editor.spec.ts:913:1 › interface copy switches cleanly between English and Chinese (527ms)
+
+  12 passed (10.1s)

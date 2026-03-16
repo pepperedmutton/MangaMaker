@@ -1,7 +1,6 @@
 import type { ChangeEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { installAutomationApi } from "../automation/api";
-import { getOnboardingStep } from "../domain/helpers";
 import { downloadDataUrl } from "../export/download";
 import { formatLocaleTime, getDefaultProjectTitle, translate } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
@@ -10,7 +9,7 @@ import { useEditorStore } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
 import { CanvasView } from "./CanvasView";
 import { Inspector } from "./Inspector";
-import { FirstRunGuide, OnboardingBanner } from "./Onboarding";
+import { FirstRunGuide } from "./Onboarding";
 import { RibbonBar } from "./RibbonBar";
 import { Sidebar } from "./Sidebar";
 
@@ -35,7 +34,6 @@ export const App = () => {
   const locale = useEditorStore((state) => state.locale);
   const activeTool = useEditorStore((state) => state.activeTool);
   const zoom = useEditorStore((state) => state.zoom);
-  const lastExport = useEditorStore((state) => state.lastExport);
   const statusMessage = useEditorStore((state) => state.statusMessage);
   const saveStatus = useEditorStore((state) => state.saveStatus);
   const pastCount = useEditorStore((state) => state.past.length);
@@ -44,6 +42,10 @@ export const App = () => {
   const { t } = useI18n();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [projectTitleInput, setProjectTitleInput] = useState("");
+  const [pendingImportTarget, setPendingImportTarget] = useState<{
+    pageId: string;
+    panelId: string;
+  } | null>(null);
 
   useEffect(() => {
     installAutomationApi();
@@ -85,9 +87,6 @@ export const App = () => {
       ? selectedPage.bubbles.find((bubble) => bubble.id === selection.objectId) ?? null
       : null;
   const draftAvailable = hasLocalDraft();
-  const onboardingStep = getOnboardingStep(project, lastExport?.kind ?? null);
-  const bannerStep =
-    onboardingStep === "done" || onboardingStep === "createProject" ? null : onboardingStep;
 
   const handleExportPage = async () => {
     if (!selectedPage) {
@@ -132,62 +131,66 @@ export const App = () => {
   };
 
   const handleImportImage = () => {
-    if (!selectedPanel) {
+    if (!selectedPanel || !selectedPage) {
       return;
     }
+    setPendingImportTarget({
+      pageId: selectedPage.id,
+      panelId: selectedPanel.id,
+    });
     fileInputRef.current?.click();
   };
 
-  const handleImportForOnboarding = async () => {
-    if (!selectedPage) {
-      return;
-    }
-    const firstPanel = selectedPage.panels[0] ?? project.pages.flatMap((page) => page.panels)[0];
-    if (!firstPanel) {
-      return;
-    }
-    const pageId =
-      selectedPage.panels.some((panel) => panel.id === firstPanel.id)
-        ? selectedPage.id
-        : project.pages.find((page) => page.panels.some((panel) => panel.id === firstPanel.id))?.id;
-    if (!pageId) {
-      return;
-    }
-    await executeCommand("selectObject", {
+  const handleImportImageForPanel = (pageId: string, panelId: string) => {
+    setPendingImportTarget({ pageId, panelId });
+    void executeCommand("selectObject", {
       pageId,
       objectType: "panel",
-      objectId: firstPanel.id,
+      objectId: panelId,
     });
     fileInputRef.current?.click();
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file || !selectedPage) {
+    if (!file) {
       return;
     }
-    const panel =
-      selectedPanel ??
-      selectedPage.panels[0] ??
-      project.pages.flatMap((page) => page.panels)[0] ??
-      null;
-    if (!panel) {
+    const fallbackPage =
+      selectedPage ??
+      (selection
+        ? project.pages.find((page) => page.id === selection.pageId) ?? null
+        : project.pages[0] ?? null);
+    const fallbackPanel =
+      pendingImportTarget
+        ? null
+        : selectedPanel ??
+          fallbackPage?.panels[0] ??
+          project.pages.flatMap((page) => page.panels)[0] ??
+          null;
+    const target =
+      pendingImportTarget ??
+      (fallbackPage && fallbackPanel ? { pageId: fallbackPage.id, panelId: fallbackPanel.id } : null);
+    if (!target) {
+      setPendingImportTarget(null);
+      event.target.value = "";
       return;
     }
-    const pageId =
-      selectedPage.panels.some((entry) => entry.id === panel.id)
-        ? selectedPage.id
-        : project.pages.find((page) => page.panels.some((entry) => entry.id === panel.id))?.id;
-    if (!pageId) {
+    const page = project.pages.find((entry) => entry.id === target.pageId) ?? null;
+    const panel = page?.panels.find((entry) => entry.id === target.panelId) ?? null;
+    if (!page || !panel) {
+      setPendingImportTarget(null);
+      event.target.value = "";
       return;
     }
     const src = URL.createObjectURL(file);
     await executeCommand("placeImageInPanel", {
-      pageId,
+      pageId: page.id,
       panelId: panel.id,
       src,
       prompt: file.name,
     });
+    setPendingImportTarget(null);
     event.target.value = "";
   };
 
@@ -279,34 +282,6 @@ export const App = () => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [executeCommand, selectedPage, selectedPanel, selection]);
 
-  const onboardingAction = async () => {
-    if (onboardingStep === "createProject") {
-      await executeCommand("createProject", {
-        title: projectTitleInput.trim() || getDefaultProjectTitle(locale),
-      });
-      return;
-    }
-    if (onboardingStep === "addPage") {
-      await executeCommand("addPage", {});
-      return;
-    }
-    if (onboardingStep === "addPanel") {
-      await executeCommand("setTool", { tool: "panel" });
-      return;
-    }
-    if (onboardingStep === "importImage") {
-      await handleImportForOnboarding();
-      return;
-    }
-    if (onboardingStep === "addDialogue") {
-      await executeCommand("setTool", { tool: "text" });
-      return;
-    }
-    if (onboardingStep === "exportPage") {
-      await handleExportPage();
-    }
-  };
-
   return (
     <div className="app-shell">
       <Sidebar
@@ -394,8 +369,12 @@ export const App = () => {
           />
         ) : (
           <>
-            {bannerStep ? <OnboardingBanner step={bannerStep} onAction={() => void onboardingAction()} /> : null}
-            {selectedPage ? <CanvasView page={selectedPage} /> : null}
+            {selectedPage ? (
+              <CanvasView
+                page={selectedPage}
+                onRequestImportImage={(pageId, panelId) => handleImportImageForPanel(pageId, panelId)}
+              />
+            ) : null}
             <div className="status-bar">
               <span>{statusMessage?.text ?? t("status.ready")}</span>
               <span>
@@ -413,6 +392,9 @@ export const App = () => {
         page={selectedPage}
         onExportProjectPdf={() => void handleExportProjectPdf()}
         onImportImage={handleImportImage}
+        onCreatePanel={() =>
+          selectedPage ? void executeCommand("setTool", { tool: "panel" }) : undefined
+        }
       />
       <input
         ref={fileInputRef}

@@ -12,6 +12,7 @@ Read order:
 1. `README.md`
 2. `操作指南.md`
 3. `machineGuide.md`
+4. `testGuide.md`
 
 Required rule:
 
@@ -21,7 +22,7 @@ Required rule:
 - If behavior changes, update the documents first or in the same change.
 - `README.md` is the highest-priority contract.
 
-- 不要实现与这三份文件冲突的代码。
+- 不要实现与这四份文件冲突的代码。
 - 如果行为变化，必须先更新文档，或在同一改动中同步更新。
 - `README.md` 是最高优先级契约。
 
@@ -30,7 +31,7 @@ For any meaningful change, an agent must:
 
 对于任何有意义的改动，agent 必须：
 
-1. Read the three definition documents.
+1. Read the four definition documents.
 2. Inspect current code before making assumptions.
 3. Update the shared command/domain layer first when behavior changes.
 4. Update the UI and automation path so they stay aligned.
@@ -38,7 +39,7 @@ For any meaningful change, an agent must:
 6. Run validation commands when possible.
 7. Report any remaining gap between code and spec explicitly.
 
-1. 阅读三份定义文档。
+1. 阅读四份定义文档。
 2. 在做假设前先检查当前代码。
 3. 当行为变化时，优先更新共享命令层和领域层。
 4. 同步更新 UI 和自动化路径，保持一致。
@@ -155,11 +156,29 @@ Guidance:
 - Tests for panel images must also verify that dragging the image never changes the panel's own stage position.
 - Tests for panel images must also verify that the clipped panel content updates live during image drag before `dragEnd`.
 - Tests for panel geometry edits must verify that moving panel vertices or resize handles does not drag the bound image to a different stage position.
+- **Tests for panel drag behavior must verify**:
+  - Dragging a panel (mouse down, move, mouse up) moves the panel but does NOT auto-select it.
+  - The selection state before the drag must remain unchanged after the drag ends.
+  - A pure click (without drag) must select the clicked panel.
+- **Tests for selected panel with image must verify**:
+  - Left-drag on the semi-transparent image pans the crop region.
+  - Left-drag on the panel border moves the panel.
+  - The panel position remains unchanged during image crop panning.
 - 分镜图片测试还必须验证：在 `dragEnd` 之前，分镜内部的裁切图像就已经随拖拽实时更新。
 - 分镜几何编辑测试还必须验证：拖拽分镜顶点或尺寸手柄时，不能把绑定图片拖到不同的 stage 位置。
 - Tests for zoom must verify that the ribbon exposes a continuous slider, that changing it updates session zoom, and that the visible canvas size responds accordingly.
 - Tests for page background must verify that the ribbon control updates the current page background through the shared command layer.
+- Tests for the canvas context menu must verify that right-clicking a panel opens the custom menu, exposes panel shortcut actions, and suppresses the browser default context menu.
+- Tests for panel selection must verify that selecting a panel does not resize the editing surface and that the selected panel remains movable.
+- Tests for zoom must also verify that crossing 100% changes rendered scale continuously without suddenly resizing the editing surface itself.
+- Tests for zoom must also verify that higher zoom levels do not let the workspace frame itself stretch outside the editing surface.
+- Tests for layout must verify that next-step guidance remains available in the inspector without rendering a banner above the workspace.
 - 页面背景测试还必须验证：ribbon 中的背景色控件会通过共享命令层更新当前页面背景。
+- 画布右键菜单测试还必须验证：右键点击分镜会打开自定义菜单、显示分镜快捷操作，并且阻止浏览器默认右键菜单。
+- 分镜选中测试还必须验证：选中分镜不会让编辑区域重排变大，并且分镜在选中后仍然可以移动。
+- 缩放测试还必须验证：跨过 100% 时缩放连续变化，而不是让编辑区域本身突然变大。
+- 缩放测试还必须验证：较高缩放下 workspace 外框本身仍留在编辑区内，不会被拉出操作空间。
+- 布局测试还必须验证：推荐下一步提示仍在 inspector 中可见，同时 workspace 上方不再渲染横幅。
 - 缩放测试必须验证：ribbon 暴露的是连续滑杆，调整它会更新 session zoom，并让可见画布尺寸随之变化。
 分镜图片测试还必须验证：拖拽图片绝不能改变分镜本身在 stage 中的位置。
 
@@ -180,17 +199,43 @@ agent 必须保持以下不变量：
 - Adjusting the selected panel image must not move the panel itself in stage space.
 - Dragging the selected panel image must update the panel's visible crop live before the drag ends.
 - Changing panel vertices or panel size must not drag the bound image to a different stage position.
+- **Drag-to-Move without Auto-Select**: 
+  - Dragging a panel (mouse down, move, mouse up) must move the panel but must NOT auto-select it after the drag ends.
+  - This applies to both panels with and without images.
+  - Selection must only occur on a pure click without significant mouse movement.
+- **Panel with Image - Drag Behavior**:
+  - When a panel with image is selected, left-drag on the semi-transparent image pans the crop region.
+  - Left-drag on the panel border/edge moves the panel itself.
+  - Right-click always opens the context menu for the clicked panel.
 - 拖拽已选中分镜中的图片时，分镜可见裁切必须在拖拽结束前实时更新。
 - 改变分镜顶点或分镜尺寸时，不能把绑定图片拖到不同的 stage 位置。
 调整选中分镜的图片时，不能让分镜本身在 stage 空间内发生位移。
+- **拖拽移动不自动选中**：
+  - 拖拽分镜（按下、移动、释放）必须移动分镜，但不得在拖拽结束后自动选中该分镜。
+  - 此规则适用于有图和无图分镜。
+  - 选中仅在纯点击（无显著鼠标移动）时发生。
+- **带图分镜的拖拽行为**：
+  - 带图分镜被选中时，在半透明图片上左键拖拽平移裁切区域。
+  - 在分镜边框/边缘上左键拖拽移动分镜本身。
+  - 右键点击始终打开被点击分镜的上下文菜单。
 - Panel geometry supports polygons.
-- The page renders inside a larger workspace rather than consuming the full canvas.
+- The page renders inside a larger workspace (4x page area) rather than consuming the full canvas.
 - Objects may leave the page bounds while remaining inside the workspace bounds.
 - The default canvas view fits the page without scroll bars.
 - The comic-page boundary stays readable above selected overlapping panel/text content via a dashed overlay.
 - The current page background remains editable from the ribbon through a command-backed path.
+- The editing surface uses a custom context menu and suppresses the browser default context menu.
+- Selecting a panel does not resize the editing surface, and selected panels remain movable.
+- Zooming across 100% remains continuous and does not suddenly resize the editing surface itself.
+- The workspace frame stays inside the editing surface at every zoom level.
+- The workspace area above the canvas stays free of onboarding banner text.
 - 当已选中的分镜或文本框压到漫画页面边界时，页面边界必须通过虚线覆盖保持可读。
 - 当前页面背景必须能通过 ribbon 中受命令层驱动的路径持续编辑。
+- 编辑区域必须使用自定义右键菜单，并阻止浏览器默认右键菜单。
+- 选中分镜时不能让编辑区域突然变大，并且分镜在选中后仍然必须可以移动。
+- 缩放跨过 100% 时必须保持连续，不能让编辑区域本身突然变大。
+- workspace 外框在任何缩放级别下都必须保持在编辑区域内。
+- 画布上方的 workspace 区域必须保持干净，不能再渲染 onboarding 横幅文字。
 - Workspace zoom remains continuously adjustable instead of being limited to discrete presets.
 - 工作区缩放必须保持为连续可调，而不是退化回离散预设。
 - Text supports horizontal and vertical layout.
@@ -202,7 +247,7 @@ agent 必须保持以下不变量：
 - 分镜图片显示基于裁切，而不是整图缩放。
 - 选中带图分镜时，会显示绑定原图图层并高亮当前切出区域，直到选中被清除。
 - 分镜几何支持多边形。
-- 页面渲染在更大的工作区中，而不是占满整个画布。
+- 页面渲染在更大的工作区中（面积为页面的 4 倍），而不是占满整个画布。
 - 对象可以离开页面边界，但仍必须留在工作区边界内。
 - 默认画布视图无需滚动条即可看全页面。
 - 文字支持横排与竖排。
@@ -226,9 +271,9 @@ If a command cannot be run, the agent must say so explicitly.
 如果某条命令无法执行，agent 必须明确说明。
 
 ## 9. Spec Gap Reporting / 规格差距报告
-If implementation does not satisfy the three documents, the agent must report:
+If implementation does not satisfy the four documents, the agent must report:
 
-如果实现尚未满足三份文档，agent 必须报告：
+如果实现尚未满足四份文档，agent 必须报告：
 
 1. what is implemented
 2. what is missing

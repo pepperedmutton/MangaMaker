@@ -78,6 +78,9 @@ export const RibbonBar = ({
 }: RibbonBarProps) => {
   const t = (key: string, params?: Record<string, number | string>) =>
     translate(locale, key, params);
+  const handleZoomInput = (value: string) => {
+    onZoomChange(Number(value));
+  };
 
   return (
     <div className="ribbon-bar">
@@ -212,7 +215,8 @@ export const RibbonBar = ({
               max={MAX_ZOOM}
               step={ZOOM_STEP}
               value={zoom}
-              onChange={(event) => onZoomChange(Number(event.target.value))}
+              onInput={(event) => handleZoomInput(event.currentTarget.value)}
+              onChange={(event) => handleZoomInput(event.currentTarget.value)}
             />
             <span className="ribbon-zoom-value">{getToolbarZoomLabel(zoom)}</span>
           </label>

@@ -867,6 +867,12 @@ const commands = {
                     image: {
                       ...panel.image,
                       viewBox: nextViewBox,
+                      transform: {
+                        x: input.x,
+                        y: input.y,
+                        scaleX: input.scaleX,
+                        scaleY: input.scaleY,
+                      },
                     },
                   }
                 : panel,

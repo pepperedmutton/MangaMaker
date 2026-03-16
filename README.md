@@ -6,19 +6,20 @@ MangaMaker is a comic and manga page editor for assembling source images into re
 MangaMaker 是一个漫画页面编辑器，用于把源图片整理成可阅读的漫画页面。
 
 ## Constitutional Rule / 宪制规则
-This project is governed by exactly three definition documents:
+This project is governed by exactly four definition documents:
 
-本项目只受以下三份定义文档约束：
+本项目只受以下四份定义文档约束：
 
 1. `README.md`
 2. `操作指南.md`
 3. `machineGuide.md`
+4. `testGuide.md`
 
 First principle:
-The software must correctly implement all three documents. Any code change, UX change, command change, schema change, automation change, or test change must preserve the correctness of these three documents, or update the documents first or in the same change.
+The software must correctly implement all four documents. Any code change, UX change, command change, schema change, automation change, or test change must preserve the correctness of these four documents, or update the documents first or in the same change.
 
 第一原则：
-软件必须正确实现这三份文档。任何代码、交互、命令、数据结构、自动化接口或测试的改动，都必须先保证这三份文档仍然正确，或在同一改动中同步更新文档。
+软件必须正确实现这四份文档。任何代码、交互、命令、数据结构、自动化接口或测试的改动，都必须先保证这四份文档仍然正确，或在同一改动中同步更新文档。
 
 Authority order:
 
@@ -27,10 +28,12 @@ Authority order:
 1. `README.md` defines scope, required features, hard constraints, and acceptance criteria.
 2. `操作指南.md` defines how a human must be able to use the product.
 3. `machineGuide.md` defines how an agent or script must inspect, change, test, and drive the product through code.
+4. `testGuide.md` defines what tests must be run and how functionality is verified via APIs after any change.
 
 1. `README.md` 定义范围、必需功能、硬约束和验收标准。
 2. `操作指南.md` 定义人类用户必须能够如何使用产品。
 3. `machineGuide.md` 定义 agent 或脚本必须如何通过代码检查、修改、测试和驱动产品。
+4. `testGuide.md` 定义改动后必须运行的测试以及如何通过 API 验证功能。
 
 If code conflicts with these documents, the documents are correct and the code is incomplete.
 
@@ -56,6 +59,8 @@ Required scope:
 - 拖拽分镜顶点或分镜尺寸手柄时，必须只改变分镜形状，不能把绑定图片在 stage 中的位置一起带走。
 - 拖拽或缩放绑定图片时，不能改变分镜本身在 stage 中的位置。
 - 当已选中的分镜或文本框接近或越过漫画页面边界时，页面边界必须以虚线覆盖的方式显示在对象上方。
+- Selecting a panel must not cause the workspace itself to resize, and a selected panel must remain movable.
+- 选中分镜时，workspace 本身不能突然变大或重排，并且分镜在选中后仍然必须可以移动。
 - Workspace zoom must be controlled by a continuous slider, with 100% meaning the fit-to-workspace baseline.
 - The top ribbon must include a page background color control for the current page.
 - 工作区缩放必须由连续滑杆控制，其中 100% 表示适配工作区的基准比例。
@@ -81,7 +86,7 @@ Required scope:
 - 对象和分镜顶点可以越出漫画页边界，但必须仍然留在编辑工作区内。
 - 文本框必须同时支持横排和竖排。
 - 界面必须提供类似 Home Tab 的字体和字号编辑区。
-- UI 和三份根文档都必须同时支持中文与英文。
+- UI 和四份根文档都必须同时支持中文与英文。
 - 所有主要 GUI 操作都必须具备命令/API 对齐。
 
 Non-goals:
@@ -114,19 +119,35 @@ Panel and image / 分镜与图片：
 - Create, move, resize, delete, and style panels.
 - Bind one image file to one panel image slot.
 - Edit the visible image range through panel-local crop data.
-- Selecting a panel with an image must reveal the bound source image layer, highlight the active cut region, and allow direct drag-and-wheel adjustment.
-- Selected-panel image dragging must update the visible crop live during the drag, not only after drop.
-- 选中分镜后，拖拽图片时可见裁切必须在拖拽过程中实时更新，而不是只在松手后更新。
-- Direct image adjustment must not move the panel itself.
-- Panel vertex edits and panel resize edits must not drag the bound image to a different stage position.
-- 分镜顶点编辑和分镜尺寸编辑都不能把绑定图片拖到不同的 stage 位置。
-直接调整图片时，不能把分镜本身一起移动。
+- **Panel Selection Behavior**: Clicking a panel selects it. Double-clicking also selects it.
+- **Panel Drag Behavior**: 
+  - For panels without an image: Left-click-drag moves the panel. The panel is NOT auto-selected after the drag ends.
+  - For panels with an image: Left-click-drag on the panel border/edge moves the panel. The panel is NOT auto-selected after the drag ends.
+- **Selected Panel with Image Behavior**:
+  - When a panel with an image is selected, the full source image becomes visible (semi-transparent) outside the panel mask.
+  - Left-click-drag on the semi-transparent image pans the image crop region (adjusts which part of the image is visible inside the panel).
+  - Mouse wheel zooms the image crop region.
+  - The panel itself does NOT move during image drag.
+  - The panel border/edge can still be dragged to move the panel position.
+- **Drag-to-Select Prevention**: When a drag operation ends, the dragged object must NOT be auto-selected. Selection only occurs on a pure click without drag.
+- Right-clicking the canvas must open a custom context menu, suppress the browser default menu, and expose object-appropriate shortcut actions.
+- 在画布中右键点击时，必须打开自定义右键菜单、屏蔽浏览器默认菜单，并提供与当前对象对应的快捷操作。
 - Support polygon panels with editable vertices.
 
 - 创建、移动、缩放、删除并设置分镜样式。
 - 每个分镜图片槽都绑定一张图片文件。
 - 通过分镜本地裁切数据编辑可见图像范围。
-- 选中带图分镜时，必须显示绑定原图图层、高亮当前切出区域，并支持直接拖拽与滚轮调整。
+- **分镜选中行为**：点击分镜会选中它。双击也会选中它。
+- **分镜拖拽行为**：
+  - 无图片分镜：左键拖拽移动分镜。拖拽结束后不会自动选中该分镜。
+  - 有图片分镜：左键拖拽分镜边框/边缘移动分镜。拖拽结束后不会自动选中该分镜。
+- **带图分镜选中后的行为**：
+  - 选中带图分镜时，完整的源图（半透明）会在分镜遮罩外显示。
+  - 在半透明图片上左键拖拽会平移图片裁切区域（调整分镜内可见的图片部分）。
+  - 鼠标滚轮缩放图片裁切区域。
+  - 拖拽图片时，分镜本身不会移动。
+  - 仍然可以拖拽分镜边框/边缘来移动分镜位置。
+- **拖拽防选中机制**：拖拽操作结束时，被拖拽的对象不得自动被选中。选中仅在纯点击（无拖拽）时发生。
 - 支持可编辑顶点的多边形分镜。
 
 Text and bubble / 文字与气泡：
@@ -156,18 +177,26 @@ System and automation / 系统与自动化：
 ## Required UX Rules / 必需易用性规则
 - A new user must be able to create a project, add a page, add a panel, import an image, add dialogue, and export without external help.
 - The canvas must fit on screen without requiring scroll bars for the default full-page view.
-- The comic page must not fill the entire canvas; it must remain centered inside a visibly larger workspace.
+- The comic page must not fill the entire canvas; it must remain centered inside a visibly larger workspace (4x page area).
 - The zoom UI must be a continuous slider rather than discrete presets.
 - The comic-page boundary must be readable above selected overlapping content via a dashed overlay.
 - 缩放界面必须是连续滑杆，而不是离散预设。
 - 当已选中的文本框或分镜压到漫画页面边界时，页面边界必须通过虚线覆盖保持清晰可读。
+- The workspace frame must stay inside the editing surface at every zoom level; zoom changes the rendered content inside that frame instead of stretching the workspace beyond it.
+- Next-step guidance must live in the inspector or side panels, not in a banner above the workspace.
+- workspace 外框在任何缩放级别下都必须保持在编辑区域内；缩放只能改变其中内容的渲染比例，不能把 workspace 本身拉出操作区。
+- “下一步”提示必须放在 inspector 或侧边区域中，不能再占用 workspace 上方空间。
+- The canvas context menu must feel immediate, context-sensitive, and must replace the browser default menu inside the editing surface.
+- 画布右键菜单必须即时出现、随对象类型变化，并在编辑区域内取代浏览器默认右键菜单。
+- Crossing 100% on the zoom slider must remain continuous; it must scale the rendered workspace without suddenly resizing the editing surface itself.
+- 缩放滑杆跨过 100% 时必须保持连续；它只能改变渲染比例，不能让编辑区域本身突然变大。
 - The primary workflow must stay visible and low-friction.
 - Advanced controls may exist, but basic page assembly must remain obvious.
 - The product must prefer clarity over feature density.
 
 - 新用户必须能在无需外部帮助的情况下完成创建项目、添加页面、添加分镜、导入图片、加入对白和导出。
 - 默认全页视图下，画布必须无需滚动条即可看全当前页面。
-- 漫画页面不能填满整个画布；它必须居中放在一个明显更大的工作区中。
+- 漫画页面不能填满整个画布；它必须居中放在一个明显更大的工作区中（面积为页面的 4 倍）。
 - 主流程必须保持可见且低摩擦。
 - 可以有高级控制，但基础页面装配流程必须一眼可懂。
 - 产品必须优先追求清晰，而不是堆功能。
@@ -190,15 +219,15 @@ The project is acceptable only if all of the following are true:
 
 项目只有在以下条件全部成立时才算可接受：
 
-- The code matches `README.md`, `操作指南.md`, and `machineGuide.md`.
+- The code matches `README.md`, `操作指南.md`, `machineGuide.md`, and `testGuide.md`.
 - A human can complete the workflow defined in `操作指南.md`.
-- An agent can operate and validate the project as defined in `machineGuide.md`.
+- An agent can operate and validate the project as defined in `machineGuide.md` and `testGuide.md`.
 - The command layer exposes the same core actions that the GUI exposes.
 - Tests verify the claimed behavior.
 
-- 代码与 `README.md`、`操作指南.md` 和 `machineGuide.md` 一致。
+- 代码与 `README.md`、`操作指南.md`、`machineGuide.md` 和 `testGuide.md` 一致。
 - 人类用户可以完成 `操作指南.md` 定义的流程。
-- Agent 可以按 `machineGuide.md` 的定义操作和验证项目。
+- Agent 可以按 `machineGuide.md` 和 `testGuide.md` 的定义操作和验证项目。
 - 命令层暴露的核心行为与 GUI 暴露的核心行为一致。
 - 测试验证了项目声称具备的行为。
 
@@ -214,15 +243,17 @@ Current status:
 - The required scope in this document is implemented in the current repository state.
 - Crop-based panel images, selection-driven source-image preview, live in-panel image dragging feedback, polygon vertex editing that keeps the image stage position stable, fit-to-view canvas behavior, a continuous zoom slider, Home-tab font controls, vertical text, export, autosave, automation API, and bilingual UI are present.
 - Page-boundary dashed overlays for selected overlapping content and ribbon-based page background color controls are present.
+- A custom canvas context menu is present and replaces the browser default menu inside the editing surface.
 - 当前已具备页面边界虚线覆盖提示与 ribbon 页面背景色控制。
+- 当前已具备自定义右键菜单，并会在画布区域屏蔽浏览器默认右键菜单。
 - 当前已具备基于裁切的分镜图片、选中驱动的原图预览、分镜内实时拖图反馈、保持图片 stage 位置稳定的多边形顶点编辑、适配视图画布行为、连续缩放滑杆、Home Tab 字体控制、竖排文字、导出、自动保存、自动化 API 和双语界面。
 - 当前已具备基于裁切的分镜图片、选中驱动的原图预览、多边形顶点编辑、适配视图画布行为、连续缩放滑杆、Home Tab 字体控制、竖排文字、导出、自动保存、自动化 API 和双语界面。
-- The page renders inside a larger workspace, with margins around the page and support for moving objects beyond the page edge while staying in the workspace.
+- The page renders inside a larger workspace (4x page area), with margins around the page and support for moving objects beyond the page edge while staying in the workspace.
 - Validation currently passes with `npm test`, `npm run test:e2e`, and `npm run build`.
 
 - 本文档要求的范围已在当前仓库状态中实现。
 - 当前已具备基于裁切的分镜图片、选中即显示原图层的预览与拖拽/滚轮调整、多边形顶点编辑、全页适配画布、Home Tab 字体控制、竖排文字、导出、自动保存、自动化 API 和双语界面。
-- 页面当前渲染在更大的工作区中，页面四周有留白，并支持对象越过页边但仍留在工作区内。
+- 页面当前渲染在更大的工作区中（面积为页面的 4 倍），页面四周有留白，并支持对象越过页边但仍留在工作区内。
 - 当前已通过 `npm test`、`npm run test:e2e` 和 `npm run build` 验证。
 
 ## Repository Map / 仓库结构
