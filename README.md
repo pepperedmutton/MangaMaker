@@ -133,8 +133,10 @@ Panel and image / 分镜与图片：
 - Right-clicking the canvas must open a custom context menu, suppress the browser default menu, and expose object-appropriate shortcut actions.
 - 在画布中右键点击时，必须打开自定义右键菜单、屏蔽浏览器默认菜单，并提供与当前对象对应的快捷操作。
 - Support polygon panels with editable vertices.
+- **Vertex Drag Live Preview**: Dragging a panel vertex must immediately reshape the panel in real-time before mouse release.
 
 - 创建、移动、缩放、删除并设置分镜样式。
+- **顶点拖拽实时预览**：拖拽分镜顶点时，必须在松开鼠标前即时显示分镜形状变化。
 - 每个分镜图片槽都绑定一张图片文件。
 - 通过分镜本地裁切数据编辑可见图像范围。
 - **分镜选中行为**：点击分镜会选中它。双击也会选中它。
@@ -154,13 +156,17 @@ Text and bubble / 文字与气泡：
 
 - Create, edit, move, resize, and delete text boxes.
 - Support horizontal and vertical text.
-- Support font family, font size, and color selection.
+- Support font family, font size, color, text alignment, and vertical alignment selection.
+- Text formatting controls (font, size, direction, alignment) appear in the right sidebar Inspector when a text object is selected.
 - Create, edit, move, resize, and delete speech bubbles.
+- Bubble formatting controls (font, size, alignment) appear in the right sidebar Inspector when a bubble is selected.
 
 - 创建、编辑、移动、缩放和删除文本框。
 - 支持横排和竖排文字。
-- 支持字体、字号和颜色选择。
+- 支持字体、字号、颜色、文字对齐和垂直对齐选择。
+- 选中文字对象时，文字格式控制（字体、字号、方向、对齐）显示在右侧边栏 Inspector 中。
 - 创建、编辑、移动、缩放和删除气泡。
+- 选中气泡时，气泡格式控制（字体、字号、对齐）显示在右侧边栏 Inspector 中。
 
 System and automation / 系统与自动化：
 

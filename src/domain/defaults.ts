@@ -65,6 +65,8 @@ export const createDefaultText = (
   fontFamily: "Georgia",
   color: "#121212",
   direction: "horizontal",
+  textAlign: "left",
+  verticalAlign: "top",
   ...overrides,
 });
 
@@ -78,6 +80,9 @@ export const createDefaultBubble = (
   tailTip: { x: 310, y: 390 },
   text: "Dialogue",
   fontSize: 26,
+  fontFamily: "system-ui",
+  textAlign: "center",
+  verticalAlign: "middle",
   ...overrides,
 });
 

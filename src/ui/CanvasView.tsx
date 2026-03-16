@@ -21,7 +21,7 @@ import {
   snapValue,
   zoomImageViewBox,
 } from "../domain/helpers";
-import type { Bubble, Page, Panel, Rect as PanelRect, TextItem } from "../domain/schema";
+import type { Bubble, Page, Panel, Point, Rect as PanelRect, TextItem } from "../domain/schema";
 import { useI18n } from "../i18n/useI18n";
 import { useEditorStore } from "../state/editorStore";
 
@@ -441,9 +441,12 @@ const PanelNode = ({
   const activeTool = useEditorStore((state) => state.activeTool);
   const image = useImageElement(panel.image?.src);
   const { t } = useI18n();
-  const clipPoints = panel.points.flatMap((point) => [point.x * scale, point.y * scale]);
   // Track if a drag operation is in progress to prevent click after drag
   const isDraggingRef = useRef(false);
+  // Live points for real-time preview during vertex drag
+  const [livePoints, setLivePoints] = useState<Point[] | null>(null);
+  const displayPoints = livePoints ?? panel.points;
+  const clipPoints = displayPoints.flatMap((point) => [point.x * scale, point.y * scale]);
   
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
     // Don't select if this click is the end of a drag operation
@@ -482,9 +485,9 @@ const PanelNode = ({
       <Group
         clipFunc={(ctx) => {
           ctx.beginPath();
-          ctx.moveTo(panel.points[0].x * scale, panel.points[0].y * scale);
-          for (let index = 1; index < panel.points.length; index += 1) {
-            ctx.lineTo(panel.points[index].x * scale, panel.points[index].y * scale);
+          ctx.moveTo(displayPoints[0].x * scale, displayPoints[0].y * scale);
+          for (let index = 1; index < displayPoints.length; index += 1) {
+            ctx.lineTo(displayPoints[index].x * scale, displayPoints[index].y * scale);
           }
           ctx.closePath();
         }}
@@ -568,9 +571,9 @@ const PanelNode = ({
         <Group
           clipFunc={(ctx) => {
             ctx.beginPath();
-            ctx.moveTo(panel.points[0].x * scale, panel.points[0].y * scale);
-            for (let index = 1; index < panel.points.length; index += 1) {
-              ctx.lineTo(panel.points[index].x * scale, panel.points[index].y * scale);
+            ctx.moveTo(displayPoints[0].x * scale, displayPoints[0].y * scale);
+            for (let index = 1; index < displayPoints.length; index += 1) {
+              ctx.lineTo(displayPoints[index].x * scale, displayPoints[index].y * scale);
             }
             ctx.closePath();
           }}
@@ -604,7 +607,7 @@ const PanelNode = ({
       {selected ? (
         <>
           <Line
-            points={panel.points.flatMap((point) => [
+            points={displayPoints.flatMap((point) => [
               (panel.x + point.x) * scale,
               (panel.y + point.y) * scale,
             ])}
@@ -662,7 +665,7 @@ const PanelNode = ({
             }}
           />
           <Line
-            points={panel.points.flatMap((point) => [
+            points={displayPoints.flatMap((point) => [
               (panel.x + point.x) * scale,
               (panel.y + point.y) * scale,
             ])}
@@ -689,7 +692,7 @@ const PanelNode = ({
               });
             }}
           />
-          {panel.points.map((point, index) => (
+          {displayPoints.map((point, index) => (
             <Circle
               key={`${panel.id}-point-${index}`}
               x={(panel.x + point.x) * scale}
@@ -707,6 +710,16 @@ const PanelNode = ({
                   x: snapValue(event.target.x() / scale) * scale,
                   y: snapValue(event.target.y() / scale) * scale,
                 });
+                // Real-time preview: update live points during drag
+                const absoluteX = snapValue(event.target.x() / scale);
+                const absoluteY = snapValue(event.target.y() / scale);
+                setLivePoints(
+                  panel.points.map((entry, pointIndex) =>
+                    pointIndex === index
+                      ? { x: absoluteX - panel.x, y: absoluteY - panel.y }
+                      : entry,
+                  ),
+                );
               }}
               onDragEnd={(event) => {
                 const absoluteX = snapValue(event.target.x() / scale);
@@ -716,6 +729,7 @@ const PanelNode = ({
                     ? { x: absoluteX - panel.x, y: absoluteY - panel.y }
                     : entry,
                 );
+                setLivePoints(null);
                 void executeCommand("setPanelPoints", {
                   pageId: page.id,
                   panelId: panel.id,
@@ -834,6 +848,8 @@ const TextNode = ({
           fill={item.color}
           width={item.width * scale}
           height={item.height * scale}
+          align={item.textAlign}
+          verticalAlign={item.verticalAlign}
           wrap={item.direction === "vertical" ? "char" : "word"}
           lineHeight={item.direction === "vertical" ? 1.1 : 1.35}
         />
@@ -945,9 +961,13 @@ const BubbleNode = ({
           x={24 * scale}
           y={20 * scale}
           width={(bubble.width - 48) * scale}
+          height={(bubble.height - 40) * scale}
           text={bubble.text}
           fontSize={bubble.fontSize * scale}
+          fontFamily={bubble.fontFamily}
           fill="#111111"
+          align={bubble.textAlign}
+          verticalAlign={bubble.verticalAlign}
         />
       </Group>
 

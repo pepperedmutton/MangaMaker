@@ -91,8 +91,8 @@ Required examples:
 - movement and resizing inside a larger workspace around the page
 - continuous workspace zoom through the shared `setZoom` command
 - 通过共享 `setZoom` 命令实现连续工作区缩放
-- text create/update/move/resize/direction/font
-- bubble create/update/delete
+- text create/update/move/resize/direction/font/alignment
+- bubble create/update/delete/font/alignment
 - undo/redo
 - save/load
 - export
@@ -104,8 +104,8 @@ Required examples:
 - 分镜图片绑定与基于选中的裁切调整
 - 多边形顶点编辑
 - 页面外侧更大工作区内的移动与缩放
-- 文字创建、更新、移动、缩放、方向和字体控制
-- 气泡创建、更新和删除
+- 文字创建、更新、移动、缩放、方向、字体和对齐控制
+- 气泡创建、更新、字体和对齐控制
 - 撤销与重做
 - 保存与加载
 - 导出
@@ -156,6 +156,7 @@ Guidance:
 - Tests for panel images must also verify that dragging the image never changes the panel's own stage position.
 - Tests for panel images must also verify that the clipped panel content updates live during image drag before `dragEnd`.
 - Tests for panel geometry edits must verify that moving panel vertices or resize handles does not drag the bound image to a different stage position.
+- **Tests for panel vertex drag must verify**: Dragging a panel vertex updates the panel shape live before `dragEnd`; the visual feedback must be immediate.
 - **Tests for panel drag behavior must verify**:
   - Dragging a panel (mouse down, move, mouse up) moves the panel but does NOT auto-select it.
   - The selection state before the drag must remain unchanged after the drag ends.
@@ -166,6 +167,7 @@ Guidance:
   - The panel position remains unchanged during image crop panning.
 - 分镜图片测试还必须验证：在 `dragEnd` 之前，分镜内部的裁切图像就已经随拖拽实时更新。
 - 分镜几何编辑测试还必须验证：拖拽分镜顶点或尺寸手柄时，不能把绑定图片拖到不同的 stage 位置。
+- **分镜顶点拖拽测试还必须验证**：拖拽分镜顶点时，在 `dragEnd` 之前分镜形状就已经实时更新；视觉反馈必须是即时的。
 - Tests for zoom must verify that the ribbon exposes a continuous slider, that changing it updates session zoom, and that the visible canvas size responds accordingly.
 - Tests for page background must verify that the ribbon control updates the current page background through the shared command layer.
 - Tests for the canvas context menu must verify that right-clicking a panel opens the custom menu, exposes panel shortcut actions, and suppresses the browser default context menu.
@@ -239,7 +241,10 @@ agent 必须保持以下不变量：
 - Workspace zoom remains continuously adjustable instead of being limited to discrete presets.
 - 工作区缩放必须保持为连续可调，而不是退化回离散预设。
 - Text supports horizontal and vertical layout.
-- Font controls operate on the selected text box.
+- Text supports horizontal alignment (left/center/right) and vertical alignment (top/middle/bottom).
+- Font controls (font family, size, direction, alignment) appear in the right sidebar Inspector when a text object is selected.
+- Bubble supports font family, size, and alignment controls in the right sidebar Inspector.
+- Font and typography controls are located in the Inspector sidebar, not in the ribbon.
 - Chinese and English remain available.
 - Undo/redo remains coherent after object edits.
 
@@ -251,7 +256,10 @@ agent 必须保持以下不变量：
 - 对象可以离开页面边界，但仍必须留在工作区边界内。
 - 默认画布视图无需滚动条即可看全页面。
 - 文字支持横排与竖排。
-- 字体控制直接作用于选中的文本框。
+- 文字支持水平对齐（左对齐/居中/右对齐）和垂直对齐（顶部/中部/底部）。
+- 字体控制（字体、字号、方向、对齐）在选中文本对象时显示在右侧边栏 Inspector 中。
+- 气泡支持在右侧边栏 Inspector 中调整字体、字号和对齐。
+- 字体和排版控制位于 Inspector 侧边栏中，而不是 ribbon 中。
 - 中文和英文始终可用。
 - 对象编辑后的撤销/重做保持一致。
 

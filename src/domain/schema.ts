@@ -112,6 +112,8 @@ export const panelSchema = basePanelSchema.transform((value) => ({
 }));
 
 export const textDirectionSchema = z.enum(["horizontal", "vertical"]);
+export const textAlignSchema = z.enum(["left", "center", "right"]);
+export const verticalAlignSchema = z.enum(["top", "middle", "bottom"]);
 
 export const textItemSchema = z.object({
   id: z.string(),
@@ -124,6 +126,8 @@ export const textItemSchema = z.object({
   fontFamily: z.string(),
   color: z.string(),
   direction: textDirectionSchema.default("horizontal"),
+  textAlign: textAlignSchema.default("left"),
+  verticalAlign: verticalAlignSchema.default("top"),
 });
 
 export const bubbleSchema = z.object({
@@ -135,6 +139,9 @@ export const bubbleSchema = z.object({
   tailTip: pointSchema,
   text: z.string(),
   fontSize: z.number().positive(),
+  fontFamily: z.string().default("system-ui"),
+  textAlign: textAlignSchema.default("center"),
+  verticalAlign: verticalAlignSchema.default("middle"),
 });
 
 export const objectTypeSchema = z.enum(["panel", "text", "bubble"]);

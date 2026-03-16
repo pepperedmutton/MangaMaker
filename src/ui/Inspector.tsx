@@ -277,6 +277,46 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
       </section>
 
       <section>
+        <p className="eyebrow">{t("inspector.fontSection")}</p>
+        <div className="field-grid">
+          <label>
+            <span>{t("inspector.fontFamily")}</span>
+            <select
+              value={text.fontFamily}
+              style={{ fontFamily: text.fontFamily }}
+              onChange={(event) =>
+                void executeCommand("updateText", {
+                  pageId: page.id,
+                  textId: text.id,
+                  fontFamily: event.target.value,
+                })
+              }
+            >
+              {LOCAL_FONTS.map((font) => (
+                <option key={font} value={font} style={{ fontFamily: font }}>
+                  {font}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{t("common.fontSize")}</span>
+            <input
+              type="number"
+              value={text.fontSize}
+              onChange={(event) =>
+                void executeCommand("updateText", {
+                  pageId: page.id,
+                  textId: text.id,
+                  fontSize: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+        </div>
+      </section>
+
+      <section>
         <p className="eyebrow">{t("inspector.textDirection")}</p>
         <div className="insp-seg">
           <button
@@ -307,24 +347,87 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
       </section>
 
       <section>
-        <p className="eyebrow">{t("inspector.fontFamily")}</p>
-        <select
-          value={text.fontFamily}
-          style={{ fontFamily: text.fontFamily }}
-          onChange={(event) =>
-            void executeCommand("updateText", {
-              pageId: page.id,
-              textId: text.id,
-              fontFamily: event.target.value,
-            })
-          }
-        >
-          {LOCAL_FONTS.map((font) => (
-            <option key={font} value={font} style={{ fontFamily: font }}>
-              {font}
-            </option>
-          ))}
-        </select>
+        <p className="eyebrow">{t("inspector.textAlign")}</p>
+        <div className="insp-seg">
+          <button
+            className={text.textAlign === "left" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateText", {
+                pageId: page.id,
+                textId: text.id,
+                textAlign: "left",
+              })
+            }
+          >
+            {t("inspector.textAlignLeft")}
+          </button>
+          <button
+            className={text.textAlign === "center" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateText", {
+                pageId: page.id,
+                textId: text.id,
+                textAlign: "center",
+              })
+            }
+          >
+            {t("inspector.textAlignCenter")}
+          </button>
+          <button
+            className={text.textAlign === "right" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateText", {
+                pageId: page.id,
+                textId: text.id,
+                textAlign: "right",
+              })
+            }
+          >
+            {t("inspector.textAlignRight")}
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.verticalAlign")}</p>
+        <div className="insp-seg">
+          <button
+            className={text.verticalAlign === "top" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateText", {
+                pageId: page.id,
+                textId: text.id,
+                verticalAlign: "top",
+              })
+            }
+          >
+            {t("inspector.verticalAlignTop")}
+          </button>
+          <button
+            className={text.verticalAlign === "middle" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateText", {
+                pageId: page.id,
+                textId: text.id,
+                verticalAlign: "middle",
+              })
+            }
+          >
+            {t("inspector.verticalAlignMiddle")}
+          </button>
+          <button
+            className={text.verticalAlign === "bottom" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateText", {
+                pageId: page.id,
+                textId: text.id,
+                verticalAlign: "bottom",
+              })
+            }
+          >
+            {t("inspector.verticalAlignBottom")}
+          </button>
+        </div>
       </section>
 
       <section>
@@ -354,20 +457,6 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
                   pageId: page.id,
                   textId: text.id,
                   height: Number(event.target.value),
-                })
-              }
-            />
-          </label>
-          <label>
-            <span>{t("common.fontSize")}</span>
-            <input
-              type="number"
-              value={text.fontSize}
-              onChange={(event) =>
-                void executeCommand("updateText", {
-                  pageId: page.id,
-                  textId: text.id,
-                  fontSize: Number(event.target.value),
                 })
               }
             />
@@ -450,7 +539,28 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
       </section>
 
       <section>
+        <p className="eyebrow">{t("inspector.fontSection")}</p>
         <div className="field-grid">
+          <label>
+            <span>{t("inspector.fontFamily")}</span>
+            <select
+              value={bubble.fontFamily}
+              style={{ fontFamily: bubble.fontFamily }}
+              onChange={(event) =>
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  fontFamily: event.target.value,
+                })
+              }
+            >
+              {LOCAL_FONTS.map((font) => (
+                <option key={font} value={font} style={{ fontFamily: font }}>
+                  {font}
+                </option>
+              ))}
+            </select>
+          </label>
           <label>
             <span>{t("common.fontSize")}</span>
             <input
@@ -465,6 +575,96 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
               }
             />
           </label>
+        </div>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.textAlign")}</p>
+        <div className="insp-seg">
+          <button
+            className={bubble.textAlign === "left" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                textAlign: "left",
+              })
+            }
+          >
+            {t("inspector.textAlignLeft")}
+          </button>
+          <button
+            className={bubble.textAlign === "center" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                textAlign: "center",
+              })
+            }
+          >
+            {t("inspector.textAlignCenter")}
+          </button>
+          <button
+            className={bubble.textAlign === "right" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                textAlign: "right",
+              })
+            }
+          >
+            {t("inspector.textAlignRight")}
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.verticalAlign")}</p>
+        <div className="insp-seg">
+          <button
+            className={bubble.verticalAlign === "top" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                verticalAlign: "top",
+              })
+            }
+          >
+            {t("inspector.verticalAlignTop")}
+          </button>
+          <button
+            className={bubble.verticalAlign === "middle" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                verticalAlign: "middle",
+              })
+            }
+          >
+            {t("inspector.verticalAlignMiddle")}
+          </button>
+          <button
+            className={bubble.verticalAlign === "bottom" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                verticalAlign: "bottom",
+              })
+            }
+          >
+            {t("inspector.verticalAlignBottom")}
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.sizeSection")}</p>
+        <div className="field-grid">
           <label>
             <span>{t("common.width")}</span>
             <input
@@ -600,7 +800,7 @@ export const Inspector = ({ page, onExportProjectPdf, onImportImage, onCreatePan
         </>
       ) : "style" in selectedObject ? (
         <PanelInspector page={page} panel={selectedObject} onImportImage={onImportImage} />
-      ) : "fontFamily" in selectedObject ? (
+      ) : "direction" in selectedObject ? (
         <TextInspector page={page} text={selectedObject} />
       ) : (
         <BubbleInspector page={page} bubble={selectedObject as Bubble} />

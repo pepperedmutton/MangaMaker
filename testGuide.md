@@ -59,7 +59,7 @@ If the change affects human interaction, the following steps must be manually ve
 如果改动影响到人类交互，必须（手动或通过模拟 E2E 测试）验证以下步骤：
 
 1. **Project & Page**: Creating a new project, adding/deleting pages, and changing page backgrounds.
-2. **Panels**: Creating polygon panels, moving vertices, and ensuring panels outside the main page edge behave correctly within the workspace.
+2. **Panels**: Creating polygon panels, moving vertices, and ensuring panels outside the main page edge behave correctly within the workspace. When dragging a panel vertex, the panel shape must update live before mouse release.
 3. **Panel Drag Behavior**: 
    - Dragging a panel must move it without auto-selecting it after the drag ends.
    - The selection state must remain unchanged after a drag operation.
@@ -69,7 +69,8 @@ If the change affects human interaction, the following steps must be manually ve
    - Left-drag on the semi-transparent image must pan the crop region.
    - Left-drag on the panel border must move the panel.
    - The panel must not move during image crop panning.
-6. **Text**: Adding text, switching between horizontal/vertical directions, and applying font changes from the ribbon.
+6. **Text**: Adding text, switching between horizontal/vertical directions, setting horizontal alignment (left/center/right), setting vertical alignment (top/middle/bottom), and applying font changes from the Inspector sidebar.
+7. **Bubble**: Adding bubbles, setting text alignment, and applying font changes from the Inspector sidebar.
 7. **Context Menus**: Right-clicking on objects must bring up custom custom menus, suppressing the default browser menu.
 8. **Zooming**: Using the continuous zoom slider must smoothly scale the workspace, without suddenly resizing the canvas window boundaries.
 

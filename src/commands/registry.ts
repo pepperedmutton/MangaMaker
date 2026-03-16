@@ -1159,6 +1159,8 @@ const commands = {
       fontFamily: z.string().optional(),
       color: z.string().optional(),
       direction: z.enum(["horizontal", "vertical"]).optional(),
+      textAlign: z.enum(["left", "center", "right"]).optional(),
+      verticalAlign: z.enum(["top", "middle", "bottom"]).optional(),
     }),
     execute: (context, input) => {
       const page = getPageById(context.getProject(), input.pageId);
@@ -1186,6 +1188,8 @@ const commands = {
                     ...(input.fontFamily !== undefined ? { fontFamily: input.fontFamily } : {}),
                     ...(input.color !== undefined ? { color: input.color } : {}),
                     ...(input.direction !== undefined ? { direction: input.direction } : {}),
+                    ...(input.textAlign !== undefined ? { textAlign: input.textAlign } : {}),
+                    ...(input.verticalAlign !== undefined ? { verticalAlign: input.verticalAlign } : {}),
                   }
                 : text,
             ),
@@ -1266,6 +1270,9 @@ const commands = {
       tailTip: pointSchema.optional(),
       text: z.string().optional(),
       fontSize: z.number().positive().optional(),
+      fontFamily: z.string().optional(),
+      textAlign: z.enum(["left", "center", "right"]).optional(),
+      verticalAlign: z.enum(["top", "middle", "bottom"]).optional(),
     }),
     execute: (context, input) => {
       const page = getPageById(context.getProject(), input.pageId);
@@ -1301,6 +1308,9 @@ const commands = {
                     tailTip,
                     ...(input.text !== undefined ? { text: input.text } : {}),
                     ...(input.fontSize !== undefined ? { fontSize: input.fontSize } : {}),
+                    ...(input.fontFamily !== undefined ? { fontFamily: input.fontFamily } : {}),
+                    ...(input.textAlign !== undefined ? { textAlign: input.textAlign } : {}),
+                    ...(input.verticalAlign !== undefined ? { verticalAlign: input.verticalAlign } : {}),
                   }
                 : item,
             ),
