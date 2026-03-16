@@ -681,6 +681,76 @@ const PanelNode = ({
             fillEnabled={false}
             listening={false}
           />
+          {!showImagePreview ? (
+            <Circle
+              x={(panel.x + panel.width * 0.5) * scale}
+              y={(panel.y + panel.height * 0.5) * scale}
+              radius={POINT_HANDLE_RADIUS * 1.5}
+              fill="#ffffff"
+              stroke="#c36d2f"
+              strokeWidth={3}
+              draggable={activeTool === "select"}
+              onMouseEnter={(event) => {
+                const stage = event.target.getStage();
+                if (stage) {
+                  stage.container().style.cursor = "move";
+                }
+              }}
+              onMouseLeave={(event) => {
+                const stage = event.target.getStage();
+                if (stage) {
+                  stage.container().style.cursor = "default";
+                }
+              }}
+              onMouseDown={(event) => {
+                event.cancelBubble = true;
+              }}
+              onContextMenu={(event) => {
+                onOpenContextMenu(event, {
+                  kind: "panel",
+                  panelId: panel.id,
+                });
+              }}
+              onDragStart={() => {
+                onBoundaryPreviewChange({
+                  objectType: "panel",
+                  objectId: panel.id,
+                  rect: {
+                    x: panel.x,
+                    y: panel.y,
+                    width: panel.width,
+                    height: panel.height,
+                  },
+                });
+              }}
+              onDragMove={(event) => {
+                onBoundaryPreviewChange({
+                  objectType: "panel",
+                  objectId: panel.id,
+                  rect: {
+                    x: panel.x + event.target.x() / scale,
+                    y: panel.y + event.target.y() / scale,
+                    width: panel.width,
+                    height: panel.height,
+                  },
+                });
+              }}
+              onDragEnd={(event) => {
+                const deltaX = event.target.x() / scale;
+                const deltaY = event.target.y() / scale;
+                event.target.position({ x: 0, y: 0 });
+                void executeCommand("movePanel", {
+                  pageId: page.id,
+                  panelId: panel.id,
+                  x: panel.x + deltaX,
+                  y: panel.y + deltaY,
+                  selectAfterMove: false,
+                }).finally(() => {
+                  onBoundaryPreviewChange(null);
+                });
+              }}
+            />
+          ) : null}
           <ResizeHandles
             rect={panel}
             scale={scale}
@@ -976,8 +1046,9 @@ const getBubbleTailPath = (bubble: Bubble, scale: number): string => {
   const h = bubble.height * scale;
   const base = getBubbleBasePoints(bubble);
   
-  // tailTip and base are in absolute page coordinates. 
-  // We need them relative to the bubble's top-left corner (bubble.x, bubble.y)
+  // The Path data needs coordinates relative to the bubble's x,y position
+  // getBubbleBasePoints returns absolute page coordinates, so we subtract bubble x/y
+  // bubble.tailTip is already an absolute page coordinate, so we subtract bubble.x/y as well
   const tailTipX = (bubble.tailTip.x - bubble.x) * scale;
   const tailTipY = (bubble.tailTip.y - bubble.y) * scale;
   const baseLeftX = (base.left.x - bubble.x) * scale;
