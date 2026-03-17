@@ -174,13 +174,79 @@ export const getBubbleBasePoints = (bubble: Bubble) => {
   const centerY = bubble.y + bubble.height * 0.5;
   const angleRad = ((bubble.tailBaseAngle - 90) * Math.PI) / 180;
   
-  // Calculate the point on the bubble edge based on angle
+  // Calculate the point on the bubble edge based on angle and bubble type
   const getEdgePoint = (angle: number) => {
     const rad = ((angle - 90) * Math.PI) / 180;
-    // For rectangle approximation, find intersection with edge
     const dx = Math.cos(rad);
     const dy = Math.sin(rad);
-    const scale = Math.min(bubble.width / 2 / Math.abs(dx || 0.001), bubble.height / 2 / Math.abs(dy || 0.001));
+    
+    let scale: number;
+    
+    switch (bubble.bubbleType) {
+      case "ellipse":
+        // Ellipse boundary: (x/a)^2 + (y/b)^2 = 1
+        scale = Math.min(
+          (bubble.width / 2) / Math.abs(dx || 0.001),
+          (bubble.height / 2) / Math.abs(dy || 0.001)
+        );
+        break;
+        
+      case "bubbleRound":
+        // Circle boundary
+        const radius = Math.min(bubble.width, bubble.height) * 0.5;
+        scale = radius / Math.sqrt(dx * dx + dy * dy);
+        break;
+        
+      case "oval":
+        // Similar to ellipse but taller
+        scale = Math.min(
+          (bubble.width * 0.5) / Math.abs(dx || 0.001),
+          (bubble.height * 0.5) / Math.abs(dy || 0.001)
+        );
+        break;
+        
+      case "cloud":
+      case "thought": {
+        // Cloud shapes extend slightly beyond bounding box
+        const cloudScale = 0.85; // Cloud fills about 85% of bounding box
+        scale = Math.min(
+          (bubble.width * cloudScale / 2) / Math.abs(dx || 0.001),
+          (bubble.height * cloudScale / 2) / Math.abs(dy || 0.001)
+        );
+        break;
+      }
+      
+      case "explosion": {
+        // Explosion extends to corners
+        const spikeScale = 0.45 + (bubble.spikeDepth * 0.05);
+        scale = Math.min(
+          (bubble.width * spikeScale) / Math.abs(dx || 0.001),
+          (bubble.height * spikeScale) / Math.abs(dy || 0.001)
+        );
+        break;
+      }
+      
+      case "jagged":
+        // Jagged shape stays close to rectangle but with zigzag
+        scale = Math.min(
+          (bubble.width * 0.48) / Math.abs(dx || 0.001),
+          (bubble.height * 0.48) / Math.abs(dy || 0.001)
+        );
+        break;
+        
+      case "round":
+      case "roundedSquare":
+      case "square":
+      default: {
+        // Rectangle with optional rounding - use standard rectangle intersection
+        scale = Math.min(
+          (bubble.width / 2) / Math.abs(dx || 0.001),
+          (bubble.height / 2) / Math.abs(dy || 0.001)
+        );
+        break;
+      }
+    }
+    
     return {
       x: centerX + dx * scale,
       y: centerY + dy * scale,

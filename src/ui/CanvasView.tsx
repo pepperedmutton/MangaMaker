@@ -1044,20 +1044,20 @@ const BubbleNode = ({
         />
         {/* Bubble tail - regular tail or thought circles */}
         {bubble.bubbleType === "thought" ? (() => {
+          const base = getBubbleBasePoints(bubble);
           const tailTipX = (bubble.tailTip.x - bubble.x) * scale;
           const tailTipY = (bubble.tailTip.y - bubble.y) * scale;
-          const tailBaseX = bubble.width * 0.5 * scale;
-          const tailBaseY = bubble.height * 0.85 * scale; // Assuming thought clouds have base at ~0.85h
+          const tailBaseX = (base.center.x - bubble.x) * scale;
+          const tailBaseY = (base.center.y - bubble.y) * scale;
           
           const circles = [];
           const numCircles = bubble.thoughtCircles ?? 3;
           
           for (let i = 0; i < numCircles; i++) {
-            const t = (i + 1) / (numCircles + 1); // Parameter along the line (0 to 1)
+            const t = (i + 1) / (numCircles + 1);
             const cx = tailBaseX + (tailTipX - tailBaseX) * t;
             const cy = tailBaseY + (tailTipY - tailBaseY) * t;
-            // Radius gets smaller towards the tip
-            const radius = Math.max(4 * scale, (15 - i * 3) * scale);
+            const radius = Math.max(4 * scale, (12 - i * 2) * scale);
             
             circles.push(
               <Circle
@@ -1078,6 +1078,8 @@ const BubbleNode = ({
             fill={bubble.backgroundColor}
             stroke={strokeColor}
             strokeWidth={bubble.strokeWidth}
+            scaleX={scale}
+            scaleY={scale}
           />
         )}
         {/* Text */}
