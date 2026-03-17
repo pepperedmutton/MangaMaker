@@ -159,16 +159,52 @@ Text and bubble / 文字与气泡：
 - Support font family, font size, color, text alignment, and vertical alignment selection.
 - Text formatting controls (font, size, direction, alignment) appear in the right sidebar Inspector when a text object is selected.
 - Create, edit, move, resize, and delete speech bubbles.
-- **Ten bubble types**: round, ellipse, cloud, square, rounded square, oval, explosion, thought, jagged, circle.
-- Bubble formatting controls (font, size, alignment, bubble type, border width, background color, border color) appear in the right sidebar Inspector when a bubble is selected.
+- **Ten bubble types** with unique adjustable features:
+  - **round**: Rounded rectangle with adjustable corner radius
+  - **ellipse**: Standard ellipse
+  - **cloud**: Puffy cloud shape with adjustable bumpiness
+  - **square**: Simple rectangle
+  - **roundedSquare**: Square with larger adjustable corner radius
+  - **oval**: Tall oval shape
+  - **explosion**: Starburst shape with adjustable spike count and depth
+  - **thought**: Cloud shape with trailing circles (adjustable count)
+  - **jagged**: Sharp zigzag edges with adjustable jaggedness
+  - **circle**: Perfect circle
+- **Arrow/Tail Control**: Draggable tail tip to point at speaker; adjustable tail width and angle (0-360 degrees)
+- **Type-specific controls** in right sidebar Inspector:
+  - Corner radius (round, roundedSquare)
+  - Bumpiness (cloud)
+  - Spike count & depth (explosion)
+  - Jaggedness (jagged)
+  - Thought circles (thought)
+  - Tail width (all types)
+  - Border width, background color, border color (all types)
 
 - 创建、编辑、移动、缩放和删除文本框。
 - 支持横排和竖排文字。
 - 支持字体、字号、颜色、文字对齐和垂直对齐选择。
 - 选中文字对象时，文字格式控制（字体、字号、方向、对齐）显示在右侧边栏 Inspector 中。
 - 创建、编辑、移动、缩放和删除气泡。
-- **十种气泡类型**：圆角矩形、椭圆、云朵、方形、大圆角方形、长椭圆、爆炸形、思考气泡、锯齿形、圆形。
-- 选中气泡时，气泡格式控制（字体、字号、对齐、气泡类型、边框宽度、背景颜色、边框颜色）显示在右侧边栏 Inspector 中。
+- **十种气泡类型**，每种都有独特的可调节属性：
+  - **圆角矩形**：可调节圆角半径
+  - **椭圆**：标准椭圆
+  - **云朵**：蓬松云朵形状，可调节凹凸度
+  - **方形**：简单矩形
+  - **大圆角方形**：方形带更大的可调节圆角半径
+  - **长椭圆**：长高椭圆形状
+  - **爆炸形**：星爆形状，可调节尖刺数量和深度
+  - **思考气泡**：云朵形状带尾随小圆圈（可调节数量）
+  - **锯齿形**：尖锐锯齿边缘，可调节锯齿度
+  - **圆形**：完美圆形
+- **箭头/尾巴控制**：可拖拽尾巴端点指向说话者；可调节尾巴宽度和角度（0-360度）
+- **类型特定控制**显示在右侧边栏 Inspector：
+  - 圆角半径（圆角矩形、大圆角方形）
+  - 凹凸度（云朵）
+  - 尖刺数量和深度（爆炸形）
+  - 锯齿度（锯齿形）
+  - 思考圆圈数（思考气泡）
+  - 尾巴宽度（所有类型）
+  - 边框宽度、背景颜色、边框颜色（所有类型）
 
 System and automation / 系统与自动化：
 
