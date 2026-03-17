@@ -166,7 +166,7 @@ Text and bubble / 文字与气泡：
   - **square**: Simple rectangle
   - **roundedSquare**: Square with larger adjustable corner radius
   - **oval**: Tall oval shape
-  - **explosion**: Starburst shape with adjustable spike count and depth
+  - **explosion**: Starburst shape where each spike can be individually dragged to adjust its length; no separate tail
   - **thought**: Cloud shape with trailing circles (adjustable count)
   - **jagged**: Sharp zigzag edges with adjustable jaggedness
   - **circle**: Perfect circle
@@ -192,7 +192,7 @@ Text and bubble / 文字与气泡：
   - **方形**：简单矩形
   - **大圆角方形**：方形带更大的可调节圆角半径
   - **长椭圆**：长高椭圆形状
-  - **爆炸形**：星爆形状，可调节尖刺数量和深度
+  - **爆炸形**：星爆形状，每个尖刺可单独拖拽调节长度；无单独尾巴
   - **思考气泡**：云朵形状带尾随小圆圈（可调节数量）
   - **锯齿形**：尖锐锯齿边缘，可调节锯齿度
   - **圆形**：完美圆形

@@ -73,10 +73,10 @@ If the change affects human interaction, the following steps must be manually ve
 7. **Bubble**: Adding bubbles, switching between ten bubble types with unique adjustable features:
    - Round: adjustable corner radius
    - Cloud: adjustable bumpiness
-   - Explosion: adjustable spike count and depth
+   - Explosion: each spike individually draggable to adjust depth, no separate tail
    - Jagged: adjustable jaggedness
    - Thought: adjustable trailing circles
-   Draggable tail tip to point at speaker, adjustable tail width and angle, setting text alignment, adjusting border width, background color, border color, and applying font changes from the Inspector sidebar.
+   Draggable tail tip to point at speaker (except explosion), adjustable tail width and angle, setting text alignment, adjusting border width, background color, border color, and applying font changes from the Inspector sidebar.
 7. **Context Menus**: Right-clicking on objects must bring up custom custom menus, suppressing the default browser menu.
 8. **Zooming**: Using the continuous zoom slider must smoothly scale the workspace, without suddenly resizing the canvas window boundaries.
 
