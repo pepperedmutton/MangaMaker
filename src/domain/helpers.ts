@@ -171,10 +171,41 @@ export const getRenderableLayers = (page: Page): RenderableLayer[] =>
 
 export const getBubbleBasePoints = (bubble: Bubble) => {
   const centerX = bubble.x + bubble.width * 0.5;
-  const baseY = bubble.y + bubble.height;
+  const centerY = bubble.y + bubble.height * 0.5;
+  const angleRad = ((bubble.tailBaseAngle - 90) * Math.PI) / 180;
+  
+  // Calculate the point on the bubble edge based on angle
+  const getEdgePoint = (angle: number) => {
+    const rad = ((angle - 90) * Math.PI) / 180;
+    // For rectangle approximation, find intersection with edge
+    const dx = Math.cos(rad);
+    const dy = Math.sin(rad);
+    const scale = Math.min(bubble.width / 2 / Math.abs(dx || 0.001), bubble.height / 2 / Math.abs(dy || 0.001));
+    return {
+      x: centerX + dx * scale,
+      y: centerY + dy * scale,
+    };
+  };
+  
+  // Calculate tail base points perpendicular to the angle
+  const perpAngle1 = bubble.tailBaseAngle + 90;
+  const perpAngle2 = bubble.tailBaseAngle - 90;
+  const perpRad1 = ((perpAngle1 - 90) * Math.PI) / 180;
+  const perpRad2 = ((perpAngle2 - 90) * Math.PI) / 180;
+  const halfWidth = bubble.tailWidth / 2;
+  
+  const edgePoint = getEdgePoint(bubble.tailBaseAngle);
+  
   return {
-    left: { x: centerX - 20, y: baseY },
-    right: { x: centerX + 20, y: baseY },
+    left: {
+      x: edgePoint.x + Math.cos(perpRad1) * halfWidth,
+      y: edgePoint.y + Math.sin(perpRad1) * halfWidth,
+    },
+    right: {
+      x: edgePoint.x + Math.cos(perpRad2) * halfWidth,
+      y: edgePoint.y + Math.sin(perpRad2) * halfWidth,
+    },
+    center: edgePoint,
   };
 };
 
@@ -203,6 +234,23 @@ export const clampPointToPanel = (point: Point, panel: Pick<Panel, "width" | "he
   x: clamp(snapValue(point.x), 0, panel.width),
   y: clamp(snapValue(point.y), 0, panel.height),
 });
+
+export const isPointInPolygon = (point: Point, polygon: Point[]): boolean => {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersect =
+      yi > point.y !== yj > point.y &&
+      point.x < ((xj - xi) * (point.y - yi)) / (yj - yi) + xi;
+    if (intersect) {
+      inside = !inside;
+    }
+  }
+  return inside;
+};
 
 export const insertPanelPoint = (panel: Panel, afterIndex?: number) => {
   const index =

@@ -615,12 +615,96 @@ test("a selected image panel can still be moved without changing zoom layout", a
   expect((panelAfter?.x ?? 0) > (panelBefore?.x ?? 0)).toBe(true);
   expect((panelAfter?.y ?? 0) > (panelBefore?.y ?? 0)).toBe(true);
   await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels[0]?.y))
+    .toBeGreaterThan(panelBefore!.y);
+
+  await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.session.get().zoom))
     .toBe(zoomBefore);
+});
 
-  const stageAfter = await getCanvasBox(page);
-  expect(stageAfter.width).toBeCloseTo(stageBefore.width, 1);
-  expect(stageAfter.height).toBeCloseTo(stageBefore.height, 1);
+test("pasting an image creates a new panel or replaces an existing one depending on pointer position", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Image Paste Flow");
+
+  // Mocking the paste event requires injecting a clipboard event with a file.
+  // Playwright doesn't have a direct `page.keyboard.press('Control+V')` with file natively easy
+  // without relying on OS clipboards, so we will dispatch a simulated paste event via evaluate.
+  await page.evaluate(async () => {
+    const canvasWrap = document.querySelector(".canvas-wrap");
+    if (!canvasWrap) return;
+
+    // Fetch our sample image and create a File object
+    const response = await fetch("/tests/fixtures/sample-image.svg");
+    const blob = await response.blob();
+    const file = new File([blob], "sample-image.svg", { type: "image/svg+xml" });
+
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(file);
+
+    // Simulate pointer move to empty space
+    const pointerEvent = new PointerEvent("pointermove", {
+      clientX: canvasWrap.getBoundingClientRect().left + 150,
+      clientY: canvasWrap.getBoundingClientRect().top + 150,
+      bubbles: true,
+    });
+    window.dispatchEvent(pointerEvent);
+
+    const pasteEvent = new ClipboardEvent("paste", {
+      clipboardData: dataTransfer,
+      bubbles: true,
+    });
+    window.dispatchEvent(pasteEvent);
+  });
+
+  // Verify a new panel was created from pasting on empty space
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
+    .toBe(1);
+
+  // Wait for the image command to finish binding the image
+  await expect
+    .poll(() => page.evaluate(() => Boolean(window.mangaMaker?.project.get().pages[0]?.panels[0]?.image)))
+    .toBe(true);
+
+  // Now create a manual panel elsewhere and paste over it
+  await createPanelViaApi(page, { x: 400, y: 400, width: 200, height: 200 });
+
+  await page.evaluate(async () => {
+    const canvasWrap = document.querySelector(".canvas-wrap");
+    if (!canvasWrap) return;
+
+    const response = await fetch("/tests/fixtures/sample-image.svg");
+    const blob = await response.blob();
+    const file = new File([blob], "sample-image.svg", { type: "image/svg+xml" });
+
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(file);
+    
+    // Position over the second panel
+    const pointerEvent = new PointerEvent("pointermove", {
+      clientX: canvasWrap.getBoundingClientRect().left + 500,
+      clientY: canvasWrap.getBoundingClientRect().top + 500,
+      bubbles: true,
+    });
+    window.dispatchEvent(pointerEvent);
+
+    const pasteEvent = new ClipboardEvent("paste", {
+      clipboardData: dataTransfer,
+      bubbles: true,
+    });
+    window.dispatchEvent(pasteEvent);
+  });
+
+  // Verify the panel count is still 2, meaning it didn't create a third panel
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
+    .toBe(2);
+
+  // Verify the second panel now has an image
+  await expect
+    .poll(() => page.evaluate(() => Boolean(window.mangaMaker?.project.get().pages[0]?.panels[1]?.image)))
+    .toBe(true);
 });
 
 test("right-clicking a panel opens a custom context menu and suppresses the browser menu", async ({

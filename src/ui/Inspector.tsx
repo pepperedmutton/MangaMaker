@@ -590,6 +590,98 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
               }
             />
           </label>
+          {(bubble.bubbleType === "round" || bubble.bubbleType === "roundedSquare") && (
+            <label>
+              <span>{t("inspector.cornerRadius")}</span>
+              <input
+                type="number"
+                min={0}
+                max={60}
+                value={bubble.cornerRadius}
+                onChange={(event) =>
+                  void executeCommand("updateBubble", {
+                    pageId: page.id,
+                    bubbleId: bubble.id,
+                    cornerRadius: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+          )}
+          {bubble.bubbleType === "cloud" && (
+            <label>
+              <span>{t("inspector.bumpiness")}</span>
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.1}
+                value={bubble.bumpiness}
+                onChange={(event) =>
+                  void executeCommand("updateBubble", {
+                    pageId: page.id,
+                    bubbleId: bubble.id,
+                    bumpiness: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+          )}
+          {bubble.bubbleType === "explosion" && (
+            <>
+              <label>
+                <span>{t("inspector.spikeCount")}</span>
+                <input
+                  type="number"
+                  min={4}
+                  max={16}
+                  value={bubble.spikeCount}
+                  onChange={(event) =>
+                    void executeCommand("updateBubble", {
+                      pageId: page.id,
+                      bubbleId: bubble.id,
+                      spikeCount: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+              <label>
+                <span>{t("inspector.spikeDepth")}</span>
+                <input
+                  type="number"
+                  min={0.2}
+                  max={0.8}
+                  step={0.1}
+                  value={bubble.spikeDepth}
+                  onChange={(event) =>
+                    void executeCommand("updateBubble", {
+                      pageId: page.id,
+                      bubbleId: bubble.id,
+                      spikeDepth: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+            </>
+          )}
+          {bubble.bubbleType === "jagged" && (
+            <label>
+              <span>{t("inspector.jaggedness")}</span>
+              <input
+                type="number"
+                min={2}
+                max={12}
+                value={bubble.jaggedness}
+                onChange={(event) =>
+                  void executeCommand("updateBubble", {
+                    pageId: page.id,
+                    bubbleId: bubble.id,
+                    jaggedness: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+          )}
           {bubble.bubbleType === "thought" && (
             <label>
               <span>{t("inspector.thoughtCircles")}</span>
@@ -597,7 +689,7 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
                 type="number"
                 min={2}
                 max={5}
-                value={bubble.thoughtCircles ?? 3}
+                value={bubble.thoughtCircles}
                 onChange={(event) =>
                   void executeCommand("updateBubble", {
                     pageId: page.id,
@@ -608,6 +700,22 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
               />
             </label>
           )}
+          <label>
+            <span>{t("inspector.tailWidth")}</span>
+            <input
+              type="number"
+              min={8}
+              max={48}
+              value={bubble.tailWidth}
+              onChange={(event) =>
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  tailWidth: Number(event.target.value),
+                })
+              }
+            />
+          </label>
           <label>
             <span>{t("inspector.backgroundColor")}</span>
             <input
