@@ -217,12 +217,23 @@ export const getBubbleBasePoints = (bubble: Bubble) => {
       }
       
       case "explosion": {
-        // Explosion extends to corners
-        const spikeScale = 0.45 + (bubble.spikeDepth * 0.05);
-        scale = Math.min(
-          (bubble.width * spikeScale) / Math.abs(dx || 0.001),
-          (bubble.height * spikeScale) / Math.abs(dy || 0.001)
-        );
+        // Explosion shape uses outerRadius = min(w, h) * 0.48
+        // The outer points are at distance 0.48 * min(w, h) from center
+        // We need to find where the ray at given angle intersects the star shape
+        const outerRadius = Math.min(bubble.width, bubble.height) * 0.48;
+        const innerRadius = outerRadius * (1 - bubble.spikeDepth);
+        const spikes = bubble.spikeCount;
+        
+        // Calculate which spike segment this angle falls into
+        const angleDeg = bubble.tailBaseAngle;
+        const spikeAngle = 360 / (spikes * 2); // Angle per point (outer and inner)
+        const normalizedAngle = ((angleDeg % 360) + 360) % 360;
+        const segmentIndex = Math.floor(normalizedAngle / spikeAngle);
+        const isOuter = segmentIndex % 2 === 0;
+        
+        // For simplicity, use the outer radius as the boundary
+        // The tail will be slightly inside the outermost points
+        scale = outerRadius / Math.sqrt(dx * dx + dy * dy);
         break;
       }
       
