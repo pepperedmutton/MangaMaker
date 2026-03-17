@@ -700,22 +700,38 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
               />
             </label>
           )}
-          <label>
-            <span>{t("inspector.tailWidth")}</span>
-            <input
-              type="number"
-              min={8}
-              max={48}
-              value={bubble.tailWidth}
-              onChange={(event) =>
+          {bubble.bubbleType !== "explosion" && (
+            <label>
+              <span>{t("inspector.tailWidth")}</span>
+              <input
+                type="number"
+                min={8}
+                max={48}
+                value={bubble.tailWidth}
+                onChange={(event) =>
+                  void executeCommand("updateBubble", {
+                    pageId: page.id,
+                    bubbleId: bubble.id,
+                    tailWidth: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+          )}
+          {bubble.bubbleType === "explosion" && (
+            <button
+              className="primary-button"
+              onClick={() =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  tailWidth: Number(event.target.value),
+                  spikeDepths: [], // Reset to empty array, will use base spikeDepth
                 })
               }
-            />
-          </label>
+            >
+              {t("inspector.resetSpikeDepths")}
+            </button>
+          )}
           <label>
             <span>{t("inspector.backgroundColor")}</span>
             <input

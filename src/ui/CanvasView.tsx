@@ -27,7 +27,7 @@ import {
 import type { Bubble, Page, Panel, Point, Rect as PanelRect, TextItem } from "../domain/schema";
 import { useI18n } from "../i18n/useI18n";
 import { useEditorStore } from "../state/editorStore";
-import { getBubbleBodyPath, getBubbleTailPath, getThoughtCircles } from "./bubbleShapes";
+import { getBubbleBodyPath, getBubbleTailPath, getExplosionSpikePoints, getThoughtCircles } from "./bubbleShapes";
 
 type DraftShape =
   | {
@@ -998,6 +998,7 @@ const BubbleNode = ({
   const bodyPath = getBubbleBodyPath(bubble);
   const tailPath = getBubbleTailPath(bubble);
   const thoughtCircles = bubble.bubbleType === "thought" ? getThoughtCircles(bubble) : [];
+  const explosionSpikes = bubble.bubbleType === "explosion" ? getExplosionSpikePoints(bubble) : [];
   const strokeColor = selected ? "#c36d2f" : bubble.strokeColor;
   const padding = 24;
 
@@ -1042,7 +1043,7 @@ const BubbleNode = ({
           scaleX={scale}
           scaleY={scale}
         />
-        {/* Bubble tail - regular tail or thought circles */}
+        {/* Bubble tail - regular tail, thought circles, or explosion spikes (none for explosion) */}
         {bubble.bubbleType === "thought" ? (() => {
           const base = getBubbleBasePoints(bubble);
           const tailTipX = (bubble.tailTip.x - bubble.x) * scale;
@@ -1072,7 +1073,7 @@ const BubbleNode = ({
             );
           }
           return circles;
-        })() : (
+        })() : bubble.bubbleType !== "explosion" ? (
           <Path
             data={tailPath}
             fill={bubble.backgroundColor}
@@ -1081,7 +1082,7 @@ const BubbleNode = ({
             scaleX={scale}
             scaleY={scale}
           />
-        )}
+        ) : null}
         {/* Text */}
         <Text
           x={padding * scale}
@@ -1115,26 +1116,79 @@ const BubbleNode = ({
               });
             }}
           />
-          <Circle
-            x={bubble.tailTip.x * scale}
-            y={bubble.tailTip.y * scale}
-            radius={8}
-            fill="#c36d2f"
-            draggable
-            onMouseDown={(event) => {
-              event.cancelBubble = true;
-            }}
-            onDragEnd={(event) => {
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                tailTip: {
-                  x: event.target.x() / scale,
-                  y: event.target.y() / scale,
-                },
-              });
-            }}
-          />
+          {bubble.bubbleType === "explosion" ? (
+            // Explosion bubble: each spike tip is draggable
+            explosionSpikes.map((spike) => (
+              <Circle
+                key={`spike-${spike.index}`}
+                x={(bubble.x + spike.x) * scale}
+                y={(bubble.y + spike.y) * scale}
+                radius={6}
+                fill="#c36d2f"
+                stroke="#ffffff"
+                strokeWidth={2}
+                draggable
+                onMouseDown={(event) => {
+                  event.cancelBubble = true;
+                }}
+                onDragMove={(event) => {
+                  // Calculate distance from center to determine spike depth
+                  const centerX = bubble.x + bubble.width * 0.5;
+                  const centerY = bubble.y + bubble.height * 0.5;
+                  const newX = event.target.x() / scale;
+                  const newY = event.target.y() / scale;
+                  const distance = Math.sqrt(
+                    Math.pow(newX - centerX, 2) + Math.pow(newY - centerY, 2)
+                  );
+                  const outerRadius = Math.min(bubble.width, bubble.height) * 0.48;
+                  const maxDepthRadius = outerRadius * 0.7;
+                  const minDepthRadius = outerRadius * 0.3;
+                  // Map distance to depth (0.1 to 1.0)
+                  const newDepth = Math.max(0.1, Math.min(1.0, 
+                    (distance - minDepthRadius) / (maxDepthRadius - minDepthRadius)
+                  ));
+                  
+                  // Update the specific spike depth
+                  const newDepths = [...(bubble.spikeDepths || Array(bubble.spikeCount).fill(bubble.spikeDepth))];
+                  newDepths[spike.index] = newDepth;
+                  
+                  void executeCommand("updateBubble", {
+                    pageId: page.id,
+                    bubbleId: bubble.id,
+                    spikeDepths: newDepths,
+                  });
+                }}
+                onDragEnd={(event) => {
+                  event.target.position({
+                    x: (bubble.x + spike.x) * scale,
+                    y: (bubble.y + spike.y) * scale,
+                  });
+                }}
+              />
+            ))
+          ) : (
+            // Regular tail tip for other bubble types
+            <Circle
+              x={bubble.tailTip.x * scale}
+              y={bubble.tailTip.y * scale}
+              radius={8}
+              fill="#c36d2f"
+              draggable
+              onMouseDown={(event) => {
+                event.cancelBubble = true;
+              }}
+              onDragEnd={(event) => {
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  tailTip: {
+                    x: event.target.x() / scale,
+                    y: event.target.y() / scale,
+                  },
+                });
+              }}
+            />
+          )}
         </>
       ) : null}
     </>

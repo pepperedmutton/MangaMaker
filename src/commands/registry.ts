@@ -1283,6 +1283,8 @@ const commands = {
       bumpiness: z.number().min(0).max(1).optional(),
       spikeCount: z.number().int().min(4).max(16).optional(),
       spikeDepth: z.number().min(0.2).max(0.8).optional(),
+      spikeDepths: z.array(z.number().min(0.1).max(1)).optional(),
+      activeSpikeIndex: z.number().int().min(-1).max(15).optional(),
       jaggedness: z.number().min(2).max(12).optional(),
       thoughtCircles: z.number().int().min(2).max(5).optional(),
     }),
@@ -1333,6 +1335,8 @@ const commands = {
                     ...(input.bumpiness !== undefined ? { bumpiness: input.bumpiness } : {}),
                     ...(input.spikeCount !== undefined ? { spikeCount: input.spikeCount } : {}),
                     ...(input.spikeDepth !== undefined ? { spikeDepth: input.spikeDepth } : {}),
+                    ...(input.spikeDepths !== undefined ? { spikeDepths: input.spikeDepths } : {}),
+                    ...(input.activeSpikeIndex !== undefined ? { activeSpikeIndex: input.activeSpikeIndex } : {}),
                     ...(input.jaggedness !== undefined ? { jaggedness: input.jaggedness } : {}),
                     ...(input.thoughtCircles !== undefined ? { thoughtCircles: input.thoughtCircles } : {}),
                   }

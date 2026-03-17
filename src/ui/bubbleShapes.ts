@@ -51,15 +51,24 @@ export const getBubbleBodyPath = (bubble: Bubble): string => {
       return `M ${w * 0.5} 0 C ${w * 0.85} 0 ${w} ${h * 0.25} ${w} ${h * 0.5} C ${w} ${h * 0.75} ${w * 0.85} ${h} ${w * 0.5} ${h} C ${w * 0.15} ${h} 0 ${h * 0.75} 0 ${h * 0.5} C 0 ${h * 0.25} ${w * 0.15} 0 ${w * 0.5} 0 Z`;
 
     case "explosion": {
-      // Star/explosion shape with adjustable spikes
+      // Star/explosion shape with individually adjustable spikes
       const spikes = bubble.spikeCount;
-      const depth = bubble.spikeDepth;
+      const baseDepth = bubble.spikeDepth;
       const outerRadius = Math.min(w, h) * 0.48;
-      const innerRadius = outerRadius * (1 - depth);
+      const individualDepths = bubble.spikeDepths || [];
       let path = "";
       for (let i = 0; i < spikes * 2; i++) {
         const angle = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
-        const radius = i % 2 === 0 ? outerRadius : innerRadius;
+        let radius: number;
+        if (i % 2 === 0) {
+          // Outer point (spike tip)
+          const spikeIndex = i / 2;
+          const spikeDepth = individualDepths[spikeIndex] ?? baseDepth;
+          radius = outerRadius * (0.3 + spikeDepth * 0.7);
+        } else {
+          // Inner point (valley)
+          radius = outerRadius * 0.25;
+        }
         const x = w * 0.5 + Math.cos(angle) * radius;
         const y = h * 0.5 + Math.sin(angle) * radius;
         path += (i === 0 ? "M " : "L ") + `${x} ${y} `;
@@ -160,4 +169,33 @@ export const getThoughtCircles = (
   }
 
   return circles;
+};
+
+// Get explosion bubble spike control points for dragging
+export const getExplosionSpikePoints = (bubble: Bubble): Array<{ x: number; y: number; index: number; angle: number }> => {
+  if (bubble.bubbleType !== "explosion") return [];
+  
+  const spikes = bubble.spikeCount;
+  const w = bubble.width;
+  const h = bubble.height;
+  const outerRadius = Math.min(w, h) * 0.48;
+  const baseDepth = bubble.spikeDepth;
+  const individualDepths = bubble.spikeDepths || [];
+  
+  const points: Array<{ x: number; y: number; index: number; angle: number }> = [];
+  
+  for (let i = 0; i < spikes; i++) {
+    const angle = (i / spikes) * Math.PI * 2 - Math.PI / 2;
+    const spikeDepth = individualDepths[i] ?? baseDepth;
+    const radius = outerRadius * (0.3 + spikeDepth * 0.7);
+    
+    points.push({
+      x: w * 0.5 + Math.cos(angle) * radius,
+      y: h * 0.5 + Math.sin(angle) * radius,
+      index: i,
+      angle: (angle * 180) / Math.PI + 90, // Convert to degrees, adjust to match tailBaseAngle convention
+    });
+  }
+  
+  return points;
 };
