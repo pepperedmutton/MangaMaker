@@ -91,6 +91,109 @@ textarea {
   padding: 1rem;
 }
 
+.welcome-shell {
+  min-height: 100vh;
+  padding: 1rem;
+  display: flex;
+}
+
+.welcome-card {
+  width: min(1240px, 100%);
+  margin: auto;
+  padding: 1.25rem;
+  background: var(--panel-muted);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+
+.welcome-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.welcome-header h1 {
+  margin: 0;
+}
+
+.welcome-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.welcome-create {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid rgba(185, 172, 155, 0.35);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.welcome-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.welcome-projects {
+  min-height: 0;
+  padding: 1rem;
+  border: 1px solid rgba(185, 172, 155, 0.35);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.75);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.welcome-projects-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.welcome-project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.75rem;
+  overflow: auto;
+  padding-right: 0.2rem;
+}
+
+.welcome-project-card {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  text-align: left;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.welcome-project-card:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.welcome-project-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.welcome-project-meta span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
 .left-sidebar,
 .right-sidebar,
 .canvas-zone,
@@ -456,6 +559,17 @@ textarea {
   overflow: hidden;
 }
 
+.page-thumbnail.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f7f3ec;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
+  padding: 0.4rem;
+}
+
 .thumb-panel,
 .thumb-bubble {
   position: absolute;
@@ -711,6 +825,23 @@ textarea {
   width: 100%;
 }
 
+.panel-description-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.panel-description-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.panel-description-item span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .insp-seg {
   display: flex;
   gap: 0;
@@ -755,6 +886,10 @@ textarea {
       "right";
   }
 
+  .welcome-layout {
+    grid-template-columns: 1fr;
+  }
+
   .status-bar {
     flex-direction: column;
     align-items: flex-start;
@@ -764,6 +899,19 @@ textarea {
 @media (max-width: 720px) {
   .app-shell {
     padding: 0.75rem;
+  }
+
+  .welcome-shell {
+    padding: 0.75rem;
+  }
+
+  .welcome-card {
+    padding: 1rem;
+  }
+
+  .welcome-header {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .field-grid,

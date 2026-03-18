@@ -97,6 +97,7 @@ const basePanelSchema = z.object({
   points: z.array(pointSchema).min(3).optional(),
   style: panelStyleSchema,
   image: imagePlacementSchema.nullable().default(null),
+  description: z.string().optional().default(""),
 });
 
 export const panelSchema = basePanelSchema.transform((value) => ({

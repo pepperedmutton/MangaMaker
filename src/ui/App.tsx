@@ -1,10 +1,18 @@
 import type { ChangeEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { installAutomationApi } from "../automation/api";
+import type { ClipboardEnvelope, ClipboardItem } from "../domain/clipboard";
+import {
+  MANGAMAKER_CLIPBOARD_SIGNATURE,
+  parseClipboardEnvelope,
+  serializeClipboardEnvelope,
+} from "../domain/clipboard";
+import type { Page, Panel, Project } from "../domain/schema";
 import { downloadDataUrl } from "../export/download";
 import { formatLocaleTime, getDefaultProjectTitle, translate } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
-import { hasLocalDraft } from "../storage/localDraft";
+import { hasLocalDraft, listLocalProjects } from "../storage/localDraft";
+import { persistImportedImageForProject } from "../storage/projectFiles";
 import { useEditorStore } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
 import { CanvasView } from "./CanvasView";
@@ -12,6 +20,7 @@ import { Inspector } from "./Inspector";
 import { FirstRunGuide } from "./Onboarding";
 import { RibbonBar } from "./RibbonBar";
 import { Sidebar } from "./Sidebar";
+import { WelcomeScreen } from "./WelcomeScreen";
 
 const isTextEditingElement = (target: EventTarget | null) => {
   if (!(target instanceof HTMLElement)) {
@@ -25,6 +34,153 @@ const isTextEditingElement = (target: EventTarget | null) => {
     tagName === "select" ||
     target.isContentEditable
   );
+};
+
+const blobToDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+
+const inferImageExtension = (mimeType: string | null) => {
+  if (!mimeType) {
+    return "png";
+  }
+  const [, subtype] = mimeType.split("/");
+  return subtype ? subtype.replace(/[^a-z0-9]/gi, "").toLowerCase() : "png";
+};
+
+const srcToDataUrl = async (src: string) => {
+  if (src.startsWith("data:")) {
+    return src;
+  }
+  const response = await fetch(src);
+  const blob = await response.blob();
+  return blobToDataUrl(blob);
+};
+
+const inlinePanelImageForClipboard = async (panel: Panel) => {
+  if (!panel.image) {
+    return panel;
+  }
+  try {
+    const inlinedSrc = await srcToDataUrl(panel.image.src);
+    return {
+      ...panel,
+      image: {
+        ...panel.image,
+        src: inlinedSrc,
+      },
+    };
+  } catch (error) {
+    console.warn("Failed to inline panel image for clipboard payload:", error);
+    return panel;
+  }
+};
+
+const inlinePageForClipboard = async (page: Page) => {
+  const panels = await Promise.all(page.panels.map((panel) => inlinePanelImageForClipboard(panel)));
+  return {
+    ...page,
+    panels,
+  };
+};
+
+const persistClipboardImageForProject = async (
+  projectId: string,
+  imageSrc: string,
+  fileHint: string,
+) => {
+  try {
+    const response = await fetch(imageSrc);
+    const blob = await response.blob();
+    const extension = inferImageExtension(blob.type || null);
+    const file = new File([blob], `${fileHint}.${extension}`, {
+      type: blob.type || "image/png",
+    });
+    return await persistImportedImageForProject(projectId, file);
+  } catch (error) {
+    console.warn("Failed to persist clipboard image into target project assets:", error);
+    return imageSrc;
+  }
+};
+
+const fallbackCopyText = (text: string) => {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  return copied;
+};
+
+const writeTextToClipboard = async (text: string) => {
+  if (window.navigator.clipboard?.writeText) {
+    await window.navigator.clipboard.writeText(text);
+    return true;
+  }
+  return fallbackCopyText(text);
+};
+
+const normalizeClipboardItemForPaste = async (projectId: string, item: ClipboardItem) => {
+  if (item.kind === "panel") {
+    if (!item.panel.image) {
+      return item;
+    }
+    const persistedSrc = await persistClipboardImageForProject(
+      projectId,
+      item.panel.image.src,
+      "clipboard-panel",
+    );
+    return {
+      kind: "panel" as const,
+      panel: {
+        ...item.panel,
+        image: {
+          ...item.panel.image,
+          src: persistedSrc,
+        },
+      },
+    };
+  }
+
+  if (item.kind === "page") {
+    const panels = await Promise.all(
+      item.page.panels.map(async (panel, index) => {
+        if (!panel.image) {
+          return panel;
+        }
+        const persistedSrc = await persistClipboardImageForProject(
+          projectId,
+          panel.image.src,
+          `clipboard-page-panel-${index + 1}`,
+        );
+        return {
+          ...panel,
+          image: {
+            ...panel.image,
+            src: persistedSrc,
+          },
+        };
+      }),
+    );
+    return {
+      kind: "page" as const,
+      page: {
+        ...item.page,
+        panels,
+      },
+    };
+  }
+
+  return item;
 };
 
 export const App = () => {
@@ -42,10 +198,29 @@ export const App = () => {
   const { t } = useI18n();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [projectTitleInput, setProjectTitleInput] = useState("");
+  const [view, setView] = useState<"welcome" | "editor">("welcome");
+  const [projectsCatalog, setProjectsCatalog] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
   const [pendingImportTarget, setPendingImportTarget] = useState<{
     pageId: string;
     panelId: string;
   } | null>(null);
+
+  const selectedPage =
+    project.pages.find((page) => page.id === selectedPageId) ?? project.pages[0] ?? null;
+  const selectedPanel =
+    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "panel"
+      ? selectedPage.panels.find((panel) => panel.id === selection.objectId) ?? null
+      : null;
+  const selectedText =
+    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "text"
+      ? selectedPage.texts.find((text) => text.id === selection.objectId) ?? null
+      : null;
+  const selectedBubble =
+    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "bubble"
+      ? selectedPage.bubbles.find((bubble) => bubble.id === selection.objectId) ?? null
+      : null;
+  const draftAvailable = hasLocalDraft();
 
   useEffect(() => {
     installAutomationApi();
@@ -63,30 +238,27 @@ export const App = () => {
   }, [project.title]);
 
   useEffect(() => {
-    if (project.title.trim().length === 0 && project.pages.length === 0) {
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      void executeCommand("saveProject", {});
-    }, 500);
-    return () => window.clearTimeout(timeout);
-  }, [project, executeCommand]);
+    const loadCatalog = async () => {
+      setProjectsLoading(true);
+      try {
+        const projects = await listLocalProjects();
+        setProjectsCatalog(projects);
+      } finally {
+        setProjectsLoading(false);
+      }
+    };
+    void loadCatalog();
+  }, []);
 
-  const selectedPage =
-    project.pages.find((page) => page.id === selectedPageId) ?? project.pages[0] ?? null;
-  const selectedPanel =
-    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "panel"
-      ? selectedPage.panels.find((panel) => panel.id === selection.objectId) ?? null
-      : null;
-  const selectedText =
-    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "text"
-      ? selectedPage.texts.find((text) => text.id === selection.objectId) ?? null
-      : null;
-  const selectedBubble =
-    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "bubble"
-      ? selectedPage.bubbles.find((bubble) => bubble.id === selection.objectId) ?? null
-      : null;
-  const draftAvailable = hasLocalDraft();
+  const refreshProjectCatalog = async () => {
+    setProjectsLoading(true);
+    try {
+      const projects = await listLocalProjects();
+      setProjectsCatalog(projects);
+    } finally {
+      setProjectsLoading(false);
+    }
+  };
 
   const handleExportPage = async () => {
     if (!selectedPage) {
@@ -106,11 +278,18 @@ export const App = () => {
     downloadDataUrl(artifact.fileName, artifact.dataUrl);
   };
 
+  const handleSaveProject = async () => {
+    await executeCommand("saveProject", {});
+    await refreshProjectCatalog();
+  };
+
+  const handleReturnHome = async () => {
+    await handleSaveProject();
+    setView("welcome");
+  };
+
   const handleDeleteCurrentPage = () => {
     if (!selectedPage) {
-      return;
-    }
-    if (!window.confirm(t("dialog.removePage", { name: selectedPage.name }))) {
       return;
     }
     void executeCommand("removePage", { pageId: selectedPage.id });
@@ -118,9 +297,6 @@ export const App = () => {
 
   const handleDeleteSelectedObject = () => {
     if (!selection) {
-      return;
-    }
-    if (!window.confirm(t("dialog.deleteObject"))) {
       return;
     }
     void executeCommand("deleteObject", {
@@ -183,7 +359,12 @@ export const App = () => {
       event.target.value = "";
       return;
     }
-    const src = URL.createObjectURL(file);
+    let src = URL.createObjectURL(file);
+    try {
+      src = await persistImportedImageForProject(project.id, file);
+    } catch (error) {
+      console.warn("Failed to persist imported image; using session blob URL.", error);
+    }
     await executeCommand("placeImageInPanel", {
       pageId: page.id,
       panelId: panel.id,
@@ -206,6 +387,75 @@ export const App = () => {
     void executeCommand("reorderPage", {
       fromIndex: currentIndex,
       toIndex: nextIndex,
+    });
+  };
+
+  const buildClipboardItem = async (): Promise<ClipboardItem | null> => {
+    if (selection) {
+      const selectionPage = project.pages.find((page) => page.id === selection.pageId) ?? null;
+      if (!selectionPage) {
+        return null;
+      }
+      if (selection.objectType === "panel") {
+        const panel = selectionPage.panels.find((entry) => entry.id === selection.objectId) ?? null;
+        if (!panel) {
+          return null;
+        }
+        return {
+          kind: "panel",
+          panel: await inlinePanelImageForClipboard(panel),
+        };
+      }
+      if (selection.objectType === "text") {
+        const text = selectionPage.texts.find((entry) => entry.id === selection.objectId) ?? null;
+        return text ? { kind: "text", text } : null;
+      }
+      const bubble =
+        selectionPage.bubbles.find((entry) => entry.id === selection.objectId) ?? null;
+      return bubble ? { kind: "bubble", bubble } : null;
+    }
+
+    const page = selectedPage ?? project.pages[0] ?? null;
+    if (!page) {
+      return null;
+    }
+    return {
+      kind: "page",
+      page: await inlinePageForClipboard(page),
+    };
+  };
+
+  const handleCopySelection = async () => {
+    const item = await buildClipboardItem();
+    if (!item) {
+      return;
+    }
+    const payload: ClipboardEnvelope = {
+      signature: MANGAMAKER_CLIPBOARD_SIGNATURE,
+      copiedAt: new Date().toISOString(),
+      sourceProjectId: project.id,
+      item,
+    };
+    try {
+      await writeTextToClipboard(serializeClipboardEnvelope(payload));
+    } catch (error) {
+      const copied = fallbackCopyText(serializeClipboardEnvelope(payload));
+      if (!copied) {
+        console.warn("Failed to write clipboard payload:", error);
+      }
+    }
+  };
+
+  const handlePasteEnvelope = async (envelope: ClipboardEnvelope) => {
+    const normalizedItem = await normalizeClipboardItemForPaste(project.id, envelope.item);
+    let targetPageId = selectedPage?.id ?? project.pages[0]?.id ?? null;
+    if (normalizedItem.kind !== "page" && !targetPageId) {
+      const createdPage = (await executeCommand("addPage", {})) as { id: string };
+      targetPageId = createdPage.id;
+    }
+    await executeCommand("pasteClipboardItem", {
+      ...(targetPageId ? { pageId: targetPageId } : {}),
+      item: normalizedItem,
     });
   };
 
@@ -236,37 +486,43 @@ export const App = () => {
 
       if (usesModifier && key === "s") {
         event.preventDefault();
-        void executeCommand("saveProject", {});
+        void handleSaveProject();
         return;
       }
 
-      if (key === "v") {
+      if (usesModifier && key === "c") {
+        event.preventDefault();
+        void handleCopySelection();
+        return;
+      }
+
+      if (!usesModifier && key === "v") {
         void executeCommand("setTool", { tool: "select" });
         return;
       }
 
-      if (key === "p") {
+      if (!usesModifier && key === "p") {
         void executeCommand("setTool", { tool: "panel" });
         return;
       }
 
-      if (key === "t") {
+      if (!usesModifier && key === "t") {
         void executeCommand("setTool", { tool: "text" });
         return;
       }
 
-      if (key === "b") {
+      if (!usesModifier && key === "b") {
         void executeCommand("setTool", { tool: "bubble" });
         return;
       }
 
-      if (key === "i" && selectedPanel) {
+      if (!usesModifier && key === "i" && selectedPanel) {
         event.preventDefault();
         handleImportImage();
         return;
       }
 
-      if (key === "e" && selectedPage) {
+      if (!usesModifier && key === "e" && selectedPage) {
         event.preventDefault();
         void handleExportPage();
         return;
@@ -281,6 +537,68 @@ export const App = () => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [executeCommand, selectedPage, selectedPanel, selection]);
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      if (view !== "editor" || isTextEditingElement(event.target)) {
+        return;
+      }
+      const items = event.clipboardData?.items;
+      if (!items) {
+        return;
+      }
+      const hasImageItem = Array.from(items).some((item) => item.type.startsWith("image/"));
+      if (hasImageItem) {
+        return;
+      }
+      const rawText = event.clipboardData?.getData("text/plain") ?? "";
+      if (!rawText) {
+        return;
+      }
+      const parsed = parseClipboardEnvelope(rawText);
+      if (!parsed) {
+        return;
+      }
+      event.preventDefault();
+      void handlePasteEnvelope(parsed);
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [view, project.id, selectedPage?.id, executeCommand, project.pages]);
+
+  const handleCreateProjectFromWelcome = async () => {
+    const title = projectTitleInput.trim() || getDefaultProjectTitle(locale);
+    await executeCommand("createProject", { title });
+    await handleSaveProject();
+    setView("editor");
+  };
+
+  const handleRestoreDraftFromWelcome = async () => {
+    await executeCommand("loadProject", { source: "localDraft" });
+    setView("editor");
+  };
+
+  const handleOpenProjectFromWelcome = async (nextProject: Project) => {
+    await executeCommand("loadProject", { project: nextProject });
+    setView("editor");
+  };
+
+  if (view === "welcome") {
+    return (
+      <WelcomeScreen
+        projects={projectsCatalog}
+        loading={projectsLoading}
+        title={projectTitleInput}
+        draftAvailable={draftAvailable}
+        onTitleChange={setProjectTitleInput}
+        onCreateProject={() => void handleCreateProjectFromWelcome()}
+        onRestoreDraft={() => void handleRestoreDraftFromWelcome()}
+        onOpenProject={(nextProject) => void handleOpenProjectFromWelcome(nextProject)}
+        onSetLocale={(nextLocale) => void executeCommand("setLocale", { locale: nextLocale })}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -345,6 +663,8 @@ export const App = () => {
               : undefined
           }
           onSetTool={(tool: ToolMode) => void executeCommand("setTool", { tool })}
+          onSave={() => void handleSaveProject()}
+          onGoHome={() => void handleReturnHome()}
           onExport={() => void handleExportPage()}
           onUndo={() => void executeCommand("undo", {})}
           onRedo={() => void executeCommand("redo", {})}

@@ -128,6 +128,15 @@ describe("commandRegistry", () => {
     })) as { points: Array<{ x: number; y: number }> };
     expect(reshaped.points).toHaveLength(4);
 
+    const describedPanel = await runCommand(harness, "setPanelDescription", {
+      pageId: page.id,
+      panelId: panel.id,
+      description: "Panel note for story pacing",
+    });
+    expect(describedPanel).toMatchObject({
+      description: "Panel note for story pacing",
+    });
+
     const text = (await runCommand(harness, "createText", {
       pageId: page.id,
       x: 120,
@@ -174,8 +183,79 @@ describe("commandRegistry", () => {
       objectId: text.id,
     });
 
+    const movedLayer = await runCommand(harness, "moveLayer", {
+      pageId: page.id,
+      objectType: "bubble",
+      objectId: bubble.id,
+      direction: "down",
+    });
+    expect(movedLayer).toMatchObject({
+      fromIndex: 1,
+      toIndex: 0,
+    });
+
     expect(harness.readSession().project.pages[0].texts).toHaveLength(0);
     expect(harness.readSession().project.pages[0].bubbles[0].text).toBe("Updated dialogue");
+  });
+
+  it("pastes copied page and object payloads as new entities", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Clipboard Paste" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const panel = (await runCommand(harness, "createPanel", {
+      pageId: page.id,
+      x: 80,
+      y: 120,
+      width: 320,
+      height: 260,
+    })) as { id: string; description: string };
+
+    await runCommand(harness, "setPanelDescription", {
+      pageId: page.id,
+      panelId: panel.id,
+      description: "Clipboard image panel",
+    });
+    await runCommand(harness, "placeImageInPanel", {
+      pageId: page.id,
+      panelId: panel.id,
+      src: "data:image/png;base64,AAAA",
+    });
+    const sourcePanel = harness.readSession().project.pages[0].panels[0];
+    if (!sourcePanel.image) {
+      throw new Error("Expected source panel image");
+    }
+
+    const pastedPanel = await runCommand(harness, "pasteClipboardItem", {
+      pageId: page.id,
+      item: {
+        kind: "panel",
+        panel: sourcePanel,
+      },
+    });
+    expect(pastedPanel).toMatchObject({
+      kind: "panel",
+      pageId: page.id,
+    });
+    expect(harness.readSession().project.pages[0].panels).toHaveLength(2);
+    expect(harness.readSession().project.pages[0].panels[1].description).toBe(
+      "Clipboard image panel",
+    );
+    expect(harness.readSession().project.pages[0].panels[1].image?.src).toContain("data:image/png");
+
+    const pastedPage = await runCommand(harness, "pasteClipboardItem", {
+      item: {
+        kind: "page",
+        page: harness.readSession().project.pages[0],
+      },
+    });
+    expect(pastedPage).toMatchObject({
+      kind: "page",
+    });
+    expect(harness.readSession().project.pages).toHaveLength(2);
+    expect(harness.readSession().selectedPageId).toBe(
+      (pastedPage as { pageId: string }).pageId,
+    );
   });
 
   it("uses the same history model for undo and redo", async () => {
@@ -209,5 +289,41 @@ describe("commandRegistry", () => {
 
     await runCommand(harness, "redo", {});
     expect(harness.readHistory().past.length).toBeGreaterThan(0);
+  });
+
+  it("allows undo after immediate delete operations", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Delete Undo" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const text = (await runCommand(harness, "createText", {
+      pageId: page.id,
+      x: 140,
+      y: 180,
+      content: "Undo me",
+    })) as { id: string };
+
+    harness.context.setHistory({
+      past: [
+        {
+          project: structuredClone(harness.readSession().project),
+          selectedPageId: harness.readSession().selectedPageId,
+          selection: harness.readSession().selection,
+          panelImageEditing: harness.readSession().panelImageEditing,
+        },
+      ],
+      future: [],
+    });
+
+    await runCommand(harness, "deleteObject", {
+      pageId: page.id,
+      objectType: "text",
+      objectId: text.id,
+    });
+    expect(harness.readSession().project.pages[0].texts).toHaveLength(0);
+
+    await runCommand(harness, "undo", {});
+    expect(harness.readSession().project.pages[0].texts).toHaveLength(1);
+    expect(harness.readSession().project.pages[0].texts[0].id).toBe(text.id);
   });
 });

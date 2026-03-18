@@ -28,6 +28,8 @@ type RibbonBarProps = {
   textFormat?: TextFormatState;
   pageFormat?: PageFormatState;
   onSetTool: (tool: ToolMode) => void;
+  onSave: () => void;
+  onGoHome: () => void;
   onExport: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -70,6 +72,8 @@ export const RibbonBar = ({
   textFormat,
   pageFormat,
   onSetTool,
+  onSave,
+  onGoHome,
   onExport,
   onUndo,
   onRedo,
@@ -84,6 +88,16 @@ export const RibbonBar = ({
 
   return (
     <div className="ribbon-bar">
+      <div className="ribbon-group">
+        <span className="ribbon-group-label">{t("ribbon.project")}</span>
+        <div className="ribbon-group-row">
+          <RibbonButton label={t("toolbar.home")} onClick={onGoHome} />
+          <RibbonButton label={t("toolbar.save")} shortcut="Ctrl/Cmd+S" onClick={onSave} />
+        </div>
+      </div>
+
+      <Divider />
+
       <div className="ribbon-group">
         <span className="ribbon-group-label">{t("toolbar.undo")}</span>
         <div className="ribbon-group-row">

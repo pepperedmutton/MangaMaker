@@ -45,6 +45,9 @@ Required scope:
 必需范围：
 
 - Multi-page comic and manga project editing.
+- Startup must open on a welcome screen that supports creating a project and opening any existing project.
+- The welcome screen must list existing projects with the first-page thumbnail for each project.
+- While editing a project, the top bar must provide navigation back to the welcome screen and allow opening another project.
 - Panel-based page layout.
 - The visible comic page sits inside a larger editing workspace.
 - Each panel binds directly to one source image file.
@@ -71,6 +74,11 @@ Required scope:
 - Objects and panel vertices may extend outside the comic page as long as they remain inside the editing workspace.
 - Text boxes must support both horizontal and vertical text layout.
 - The interface must provide font family and font size controls in a Home-tab style editing area.
+- Each panel may carry an attached description text for planning; this metadata appears in the right inspector and is never rendered into comic output.
+- The top Home bar must include a manual Save button for current project progress.
+- Copy/paste must support pages, panels, text boxes, and bubbles across projects and across running app instances.
+- Copying a panel must carry its bound image data so pasting into another project keeps the image content intact.
+- Progress must persist after every mutating operation so closing the app does not lose edits.
 - The UI and the governing documents must support Chinese and English.
 - All major GUI actions must have command/API parity.
 
@@ -105,9 +113,13 @@ Non-goals:
 Project and page / 项目与页面：
 
 - Create, rename, load, autosave, and reset projects.
+- Show a welcome project browser at startup, including create/open actions and first-page thumbnails.
 - Add, duplicate, remove, reorder, and select pages.
+- Provide Home navigation from editor back to the welcome project browser.
+- Support manual Save from the top Home bar in addition to shortcut save.
 - Change page background color from the ribbon.
 - Export page PNG and project PDF.
+- In desktop (Tauri) runtime, autosave persists projects under a local untracked `projects/` folder, including per-project `project.json`.
 
 - 创建、重命名、加载、自动保存和重置项目。
 - 添加、复制、删除、重排和切换页面。
@@ -131,6 +143,11 @@ Panel and image / 分镜与图片：
   - The panel border/edge can still be dragged to move the panel position.
 - **Drag-to-Select Prevention**: When a drag operation ends, the dragged object must NOT be auto-selected. Selection only occurs on a pure click without drag.
 - Right-clicking the canvas must open a custom context menu, suppress the browser default menu, and expose object-appropriate shortcut actions.
+- Context menus for panels, text, and bubbles must provide layer up/down actions for occlusion control.
+- Each panel must support an attached content description shown in the right inspector for organization only, not as rendered comic content.
+- Clipboard copy/paste for page/panel/text/bubble must work across projects and app instances.
+- Pasted panel/page images must be materialized into the target project's local assets.
+- Deleting pages or objects must execute immediately without confirmation dialogs, and deletion must remain undoable via Ctrl/Cmd+Z.
 - 在画布中右键点击时，必须打开自定义右键菜单、屏蔽浏览器默认菜单，并提供与当前对象对应的快捷操作。
 - Support polygon panels with editable vertices.
 - **Vertex Drag Live Preview**: Dragging a panel vertex must immediately reshape the panel in real-time before mouse release.
@@ -212,6 +229,9 @@ System and automation / 系统与自动化：
 - Shared command model for GUI, tests, and automation.
 - Local automation API for programmatic control.
 - Chinese/English interface switching.
+- Imported images in desktop (Tauri) runtime are copied into each project's `assets/` folder under `projects/`.
+- Project listing for welcome-screen browsing is loaded from local `projects/*/project.json` in desktop runtime.
+- Autosave runs after every project mutation, and manual save remains available.
 
 - 撤销与重做。
 - GUI、测试和自动化共用同一套命令模型。
@@ -276,7 +296,7 @@ The project is acceptable only if all of the following are true:
 - 测试验证了项目声称具备的行为。
 
 ## Status / 当前状态
-Snapshot date: March 15, 2026.
+Snapshot date: March 18, 2026.
 
 快照日期：2026 年 3 月 15 日。
 
@@ -288,6 +308,11 @@ Current status:
 - Crop-based panel images, selection-driven source-image preview, live in-panel image dragging feedback, polygon vertex editing that keeps the image stage position stable, fit-to-view canvas behavior, a continuous zoom slider, Home-tab font controls, vertical text, export, autosave, automation API, and bilingual UI are present.
 - Page-boundary dashed overlays for selected overlapping content and ribbon-based page background color controls are present.
 - A custom canvas context menu is present and replaces the browser default menu inside the editing surface.
+- Context menus now include layer up/down controls for panel/text/bubble stacking order adjustments.
+- Panels now support non-rendered content-description metadata that is edited in the right inspector for story organization.
+- Startup now enters a welcome project browser with existing-project thumbnails, plus create/open actions.
+- The top bar now includes Home (return to welcome) and Save controls.
+- Clipboard copy/paste now supports page/panel/text/bubble across projects and app instances, with panel images carried into the destination project assets.
 - 当前已具备页面边界虚线覆盖提示与 ribbon 页面背景色控制。
 - 当前已具备自定义右键菜单，并会在画布区域屏蔽浏览器默认右键菜单。
 - 当前已具备基于裁切的分镜图片、选中驱动的原图预览、分镜内实时拖图反馈、保持图片 stage 位置稳定的多边形顶点编辑、适配视图画布行为、连续缩放滑杆、Home Tab 字体控制、竖排文字、导出、自动保存、自动化 API 和双语界面。

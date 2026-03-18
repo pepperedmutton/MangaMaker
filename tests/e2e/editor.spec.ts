@@ -543,6 +543,31 @@ test("polygon panels support adding and removing vertices through the inspector"
     .toBe(4);
 });
 
+test("panel descriptions are editable in the inspector and stored as panel metadata", async ({
+  page,
+}) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Panel Description Workflow");
+
+  await createPanelViaApi(page, { x: 120, y: 120, width: 320, height: 280 });
+
+  await page
+    .locator(".right-sidebar")
+    .getByPlaceholder("Describe this panel...")
+    .fill("Establishing shot: winter street, long perspective.");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels[0]?.description))
+    .toBe("Establishing shot: winter street, long perspective.");
+
+  await page.evaluate(() => window.mangaMaker?.commands.execute("clearSelection", {}));
+  await expect(page.locator(".right-sidebar")).toContainText("Panel Content Descriptions");
+
+  await page.locator(".right-sidebar").getByLabel("Panel 1").fill("Close-up reaction beat.");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels[0]?.description))
+    .toBe("Close-up reaction beat.");
+});
+
 test("double-clicking a panel still leaves it selected", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Panel Double Click");
@@ -718,7 +743,14 @@ test("right-clicking a panel opens a custom context menu and suppresses the brow
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Panel Context Menu");
   await createPanelViaApi(page, { x: 140, y: 160, width: 320, height: 280 });
+  await createPanelViaApi(page, { x: 620, y: 200, width: 260, height: 240 });
   await installCanvasContextMenuProbe(page);
+  const firstPanelId = await page.evaluate(
+    () => window.mangaMaker?.project.get().pages[0]?.panels[0]?.id ?? null,
+  );
+  if (!firstPanelId) {
+    throw new Error("First panel id not available");
+  }
 
   const panelCenter = await getPanelCanvasPoint(page);
   const canvasBox = await getCanvasBox(page);
@@ -729,6 +761,8 @@ test("right-clicking a panel opens a custom context menu and suppresses the brow
   await expect(page.getByRole("menu", { name: "Panel Actions" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Import Image" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Add Vertex" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Move Layer Up" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Move Layer Down" })).toBeVisible();
   await expect
     .poll(
       () =>
@@ -746,6 +780,22 @@ test("right-clicking a panel opens a custom context menu and suppresses the brow
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels[0]?.points.length))
     .toBe(5);
   await expect(page.getByRole("menu", { name: "Panel Actions" })).toBeHidden();
+
+  await page.mouse.click(canvasBox.x + panelCenter.x, canvasBox.y + panelCenter.y, {
+    button: "right",
+  });
+  await page.getByRole("menuitem", { name: "Move Layer Up" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ currentPanelId }) => {
+          const layers = window.mangaMaker?.project.get().pages[0]?.layers ?? [];
+          return layers.indexOf(`panel:${currentPanelId}`);
+        },
+        { currentPanelId: firstPanelId },
+      ),
+    )
+    .toBe(1);
 });
 
 test("a selected panel can be dragged to a new position", async ({ page }) => {
@@ -794,6 +844,31 @@ test("a selected panel can be dragged to a new position", async ({ page }) => {
   });
   expect((panelAfter?.x ?? 0) - (panelBefore?.x ?? 0)).toBeGreaterThan(70);
   expect((panelAfter?.y ?? 0) - (panelBefore?.y ?? 0)).toBeGreaterThan(50);
+});
+
+test("delete executes immediately without confirmation and can be undone with Ctrl+Z", async ({
+  page,
+}) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Immediate Delete Undo");
+  await createPanelViaApi(page, { x: 200, y: 220, width: 300, height: 260 });
+
+  let dialogOpened = false;
+  page.on("dialog", async (dialog) => {
+    dialogOpened = true;
+    await dialog.dismiss();
+  });
+
+  await page.keyboard.press("Delete");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
+    .toBe(0);
+  expect(dialogOpened).toBe(false);
+
+  await page.keyboard.press("Control+KeyZ");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
+    .toBe(1);
 });
 
 test("text boxes support home-tab font controls and vertical text direction", async ({
@@ -1016,6 +1091,23 @@ test("local draft recovery restores the saved project after reset", async ({ pag
   await page.getByRole("button", { name: "Restore saved draft" }).click();
   await expect(page.locator(".left-sidebar")).toContainText("Draft Recovery");
   await expect(page.getByRole("button", { name: "Page 1" })).toBeVisible();
+});
+
+test("home navigation returns to welcome and lists existing projects with thumbnails", async ({
+  page,
+}) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Welcome Browser");
+  await createPanelViaApi(page, { x: 120, y: 120, width: 320, height: 260 });
+
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Home" }).click();
+  await expect(page.getByText("Existing projects")).toBeVisible();
+  await expect(page.locator(".welcome-project-card")).toHaveCount(1);
+  await expect(page.locator(".welcome-project-card").first()).toContainText("Welcome Browser");
+  await expect(page.locator(".welcome-project-card .page-thumbnail")).toHaveCount(1);
+
+  await page.locator(".welcome-project-card").first().click();
+  await expect(page.locator(".left-sidebar")).toContainText("Welcome Browser");
 });
 
 test("interface copy switches cleanly between English and Chinese", async ({ page }) => {

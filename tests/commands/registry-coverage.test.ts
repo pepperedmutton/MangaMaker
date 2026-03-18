@@ -66,6 +66,8 @@ describe("commandRegistry coverage", () => {
         "duplicatePage",
         "removePage",
         "reorderPage",
+        "moveLayer",
+        "pasteClipboardItem",
         "selectPage",
         "setTool",
         "setLocale",
@@ -78,6 +80,7 @@ describe("commandRegistry coverage", () => {
         "movePanel",
         "resizePanel",
         "setPanelStyle",
+        "setPanelDescription",
         "placeImageInPanel",
         "transformImageInPanel",
         "setPanelImageCrop",
@@ -330,6 +333,15 @@ describe("commandRegistry coverage", () => {
       },
     });
 
+    const panelWithDescription = await runCommand(harness, "setPanelDescription", {
+      pageId: page.id,
+      panelId: panel.id,
+      description: "Opening shot: establish location and mood",
+    });
+    expect(panelWithDescription).toMatchObject({
+      description: "Opening shot: establish location and mood",
+    });
+
     const updatedText = await runCommand(harness, "updateText", {
       pageId: page.id,
       textId: text.id,
@@ -388,6 +400,18 @@ describe("commandRegistry coverage", () => {
     expect((updatedBubble as { spikePositions: Array<{ x: number; y: number }> }).spikePositions).toEqual(
       customSpikePositions,
     );
+
+    const layerOrderBefore = [...harness.readSession().project.pages[0].layers];
+    const movedLayer = await runCommand(harness, "moveLayer", {
+      pageId: page.id,
+      objectType: "panel",
+      objectId: panel.id,
+      direction: "up",
+    });
+    expect((movedLayer as { fromIndex: number; toIndex: number }).toIndex).toBe(
+      (movedLayer as { fromIndex: number; toIndex: number }).fromIndex + 1,
+    );
+    expect(harness.readSession().project.pages[0].layers).not.toEqual(layerOrderBefore);
 
     const movedTextOutsidePage = await runCommand(harness, "updateText", {
       pageId: page.id,

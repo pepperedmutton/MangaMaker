@@ -65,9 +65,6 @@ const DeleteButton = ({
       className="insp-delete-btn"
       title={t("inspector.deleteSelected")}
       onClick={() => {
-        if (!window.confirm(t("dialog.deleteObject"))) {
-          return;
-        }
         void executeCommand("deleteObject", {
           pageId,
           objectType,
@@ -110,6 +107,23 @@ const PanelInspector = ({
             {panel.image ? t("inspector.replaceImage") : t("toolbar.importImage")}
           </button>
         </div>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.panelDescriptionSection")}</p>
+        <p>{t("inspector.panelDescriptionHint")}</p>
+        <textarea
+          rows={5}
+          value={panel.description}
+          placeholder={t("inspector.panelDescriptionPlaceholder")}
+          onChange={(event) =>
+            void executeCommand("setPanelDescription", {
+              pageId: page.id,
+              panelId: panel.id,
+              description: event.target.value,
+            })
+          }
+        />
       </section>
 
       <section>
@@ -282,6 +296,48 @@ const PanelInspector = ({
         </div>
       </section>
     </>
+  );
+};
+
+const PanelDescriptionList = ({ page }: { page: Page }) => {
+  const executeCommand = useEditorStore((state) => state.executeCommand);
+  const { t } = useI18n();
+
+  const orderedPanels = page.layers
+    .filter((layer) => layer.startsWith("panel:"))
+    .map((layer) => page.panels.find((panel) => panel.id === layer.slice("panel:".length)) ?? null)
+    .filter((panel): panel is Panel => panel !== null);
+  const orderedIds = new Set(orderedPanels.map((panel) => panel.id));
+  const missingPanels = page.panels.filter((panel) => !orderedIds.has(panel.id));
+  const displayPanels = [...orderedPanels, ...missingPanels];
+
+  return (
+    <section>
+      <p className="eyebrow">{t("inspector.panelDescriptionList")}</p>
+      {displayPanels.length === 0 ? (
+        <p className="hint">{t("inspector.panelDescriptionEmpty")}</p>
+      ) : (
+        <div className="panel-description-list">
+          {displayPanels.map((panel, index) => (
+            <label key={`${panel.id}-description`} className="panel-description-item">
+              <span>{t("inspector.panelDescriptionItem", { index: index + 1 })}</span>
+              <textarea
+                rows={3}
+                value={panel.description}
+                placeholder={t("inspector.panelDescriptionPlaceholder")}
+                onChange={(event) =>
+                  void executeCommand("setPanelDescription", {
+                    pageId: page.id,
+                    panelId: panel.id,
+                    description: event.target.value,
+                  })
+                }
+              />
+            </label>
+          ))}
+        </div>
+      )}
+    </section>
   );
 };
 
@@ -1041,6 +1097,7 @@ export const Inspector = ({ page, onExportProjectPdf, onImportImage, onCreatePan
             <p>{t("inspector.textCount", { count: page.texts.length })}</p>
             <p>{t("inspector.bubbleCount", { count: page.bubbles.length })}</p>
           </section>
+          <PanelDescriptionList page={page} />
           <section>
             <p className="eyebrow">{t("inspector.nextStep")}</p>
             <p>{t(getRecommendedNextStepKey(page))}</p>

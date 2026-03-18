@@ -53,6 +53,12 @@ When implementing a new feature or fixing a bug, you must:
 2. Ensure the command works flawlessly via `window.mangaMaker.commands.execute()`.
 3. Verify the state changes correctly via `window.mangaMaker.session.get()` and `window.mangaMaker.project.get()`.
 4. For explosion bubbles, verify `updateBubble` can set `spikePositions` and that those positions persist in `window.mangaMaker.project.get()`.
+5. Verify `moveLayer` updates `project.pages[n].layers` with correct up/down ordering for panel/text/bubble objects.
+6. Verify `setPanelDescription` persists per-panel metadata text and does not create rendered comic text objects.
+7. In Tauri runtime, verify autosave creates/updates `projects/<project-id>/project.json` and imported images are copied to `projects/<project-id>/assets/`.
+8. Verify startup project listing is available via local project files and contains all existing projects.
+9. Verify `pasteClipboardItem` supports page/panel/text/bubble payloads and inserts new IDs without overwriting originals.
+10. Verify panel/page paste payloads retain image data and can be persisted into target project assets.
 
 ### 2.3 Manual GUI Testing / 手动 GUI 测试
 If the change affects human interaction, the following steps must be manually verified (or verified via E2E tests simulating these actions):
@@ -79,8 +85,13 @@ If the change affects human interaction, the following steps must be manually ve
    - Jagged: adjustable jaggedness
    - Thought: adjustable trailing circles
    Draggable tail tip to point at speaker (except explosion), adjustable tail width and angle, setting text alignment, adjusting border width, background color, border color, and applying font changes from the Inspector sidebar.
-9. **Context Menus**: Right-clicking on objects must bring up custom custom menus, suppressing the default browser menu.
-10. **Zooming**: Using the continuous zoom slider must smoothly scale the workspace, without suddenly resizing the canvas window boundaries.
+9. **Context Menus**: Right-clicking on objects must bring up custom custom menus, suppressing the default browser menu, and expose layer up/down actions that change stacking order.
+10. **Panel Description Metadata**: The right inspector must allow editing a per-panel content description used for organization; this metadata must persist and must not render on canvas as comic text.
+11. **Zooming**: Using the continuous zoom slider must smoothly scale the workspace, without suddenly resizing the canvas window boundaries.
+12. **Delete Behavior**: Deleting pages/objects should happen immediately without confirmation popups, and Ctrl/Cmd+Z must restore the deleted state.
+13. **Welcome Flow**: On startup, existing projects must appear on the welcome screen with first-page thumbnails; users must be able to open one and continue editing.
+14. **Home/Save Controls**: While editing a project, users must be able to click Home to return to welcome and Save to persist progress manually.
+15. **Cross-Project Clipboard**: Copy/paste page/panel/text/bubble across projects (or app instances) must work; pasted panels/pages must keep image content.
 
 ## 3. Reporting / 报告
 If any test fails, the modification is considered **incomplete** and must be reverted or fixed prior to acceptance. 

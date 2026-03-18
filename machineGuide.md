@@ -82,12 +82,17 @@ Required examples:
 必需示例：
 
 - project creation and rename
+- welcome-screen project listing/opening/creation, including first-page thumbnail previews
 - page add/duplicate/remove/reorder/select
+- home navigation back to welcome and manual save from the top bar
 - page background color change
 - 页面背景色修改
 - panel create/move/resize/delete
 - panel image bind and selection-driven crop adjustment
 - polygon vertex editing
+- layer ordering adjustments (up/down) for panel, text, and bubble objects
+- panel content-description metadata editing in the right inspector
+- clipboard paste command support for page/panel/text/bubble payloads
 - movement and resizing inside a larger workspace around the page
 - continuous workspace zoom through the shared `setZoom` command
 - 通过共享 `setZoom` 命令实现连续工作区缩放
@@ -96,8 +101,10 @@ Required examples:
 - bubble resize handles: corner handles scale two axes, edge-midpoint handles scale one axis
 - undo/redo
 - save/load
+- automatic save after every project mutation
 - export
 - locale switch
+- immediate delete actions (without confirmation dialogs) that remain undoable
 
 - 项目创建与重命名
 - 页面新增、复制、删除、重排和切换
@@ -177,7 +184,13 @@ Guidance:
 - Tests for zoom must verify that the ribbon exposes a continuous slider, that changing it updates session zoom, and that the visible canvas size responds accordingly.
 - Tests for page background must verify that the ribbon control updates the current page background through the shared command layer.
 - Tests for the canvas context menu must verify that right-clicking a panel opens the custom menu, exposes panel shortcut actions, and suppresses the browser default context menu.
+- Tests for context-menu layer actions must verify that layer up/down updates `page.layers` in the expected direction.
 - Tests for panel selection must verify that selecting a panel does not resize the editing surface and that the selected panel remains movable.
+- Tests for panel description metadata must verify that inspector edits persist on each panel and are not rendered as comic content.
+- Tests for welcome flow must verify existing projects are listed with first-page thumbnails and can be opened.
+- Tests for manual save/home actions must verify users can save explicitly and return to welcome without losing progress.
+- Tests for clipboard payload paste must verify page/panel/text/bubble insertion through the shared command layer.
+- Tests for clipboard panel/page payloads must verify image data is retained after paste and can be persisted to target project assets.
 - Tests for zoom must also verify that crossing 100% changes rendered scale continuously without suddenly resizing the editing surface itself.
 - Tests for zoom must also verify that higher zoom levels do not let the workspace frame itself stretch outside the editing surface.
 - Tests for layout must verify that next-step guidance remains available in the inspector without rendering a banner above the workspace.
@@ -234,6 +247,15 @@ agent 必须保持以下不变量：
 - The comic-page boundary stays readable above selected overlapping panel/text content via a dashed overlay.
 - The current page background remains editable from the ribbon through a command-backed path.
 - The editing surface uses a custom context menu and suppresses the browser default context menu.
+- Layer order is controlled by `page.layers`, and context-menu layer up/down actions update it deterministically.
+- Panel content-description metadata is editable in the inspector, persisted in project state, and excluded from rendered comic output.
+- Delete actions run immediately (no confirm popup) and are still reversible through command-history undo.
+- In Tauri runtime, project autosave persists to local untracked `projects/<project-id>/project.json`, and imported images are copied into `projects/<project-id>/assets/`.
+- Welcome-screen project listing is loaded from local project files so users can open any existing project at launch.
+- Home navigation must let users leave the current project and return to the welcome project browser.
+- Manual save in the top bar must persist current project progress immediately.
+- Every project mutation must trigger autosave persistence.
+- Clipboard paste supports page/panel/text/bubble payloads, with panel images retained across project boundaries.
 - Selecting a panel does not resize the editing surface, and selected panels remain movable.
 - Zooming across 100% remains continuous and does not suddenly resize the editing surface itself.
 - The workspace frame stays inside the editing surface at every zoom level.

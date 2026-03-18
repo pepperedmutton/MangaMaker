@@ -5,6 +5,7 @@ import type { CommandDefinition } from "../commands/types";
 import { createBlankProject, DEFAULT_ZOOM } from "../domain/defaults";
 import { objectTypeSchema, projectSchema, type Project } from "../domain/schema";
 import { resolveInitialLocale, type Locale } from "../i18n";
+import { saveLocalDraft } from "../storage/localDraft";
 import type {
   EditorSelection,
   EditorSessionState,
@@ -132,7 +133,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     }
 
     try {
-      return await definition.execute(
+      const result = await definition.execute(
         {
           getProject: () => get().project,
           setProject: (project) =>
@@ -204,6 +205,24 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         },
         input,
       );
+      const projectChanged = get().project !== before.project;
+      if (projectChanged && definition.id !== "saveProject") {
+        try {
+          const savedAt = await saveLocalDraft(get().project);
+          if (savedAt) {
+            set((state) => ({
+              ...state,
+              saveStatus: {
+                target: "localDraft",
+                lastSavedAt: savedAt,
+              },
+            }));
+          }
+        } catch (error) {
+          console.warn("Failed to autosave project after command execution:", error);
+        }
+      }
+      return result;
     } catch (error) {
       if (definition.recordHistory) {
         set(historyBefore);

@@ -27,6 +27,7 @@ import {
 } from "../domain/helpers";
 import type { Bubble, Page, Panel, Point, Rect as PanelRect, TextItem } from "../domain/schema";
 import { useI18n } from "../i18n/useI18n";
+import { persistImportedImageForProject } from "../storage/projectFiles";
 import { useEditorStore } from "../state/editorStore";
 import { getBubbleBodyPath, getBubbleTailPath, getExplosionSpikePoints, getThoughtCircles } from "./bubbleShapes";
 
@@ -1643,6 +1644,7 @@ export const CanvasView = ({
   onRequestImportImage: (pageId: string, panelId: string) => void;
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
+  const projectId = useEditorStore((state) => state.project.id);
   const selection = useEditorStore((state) => state.selection);
   const activeTool = useEditorStore((state) => state.activeTool);
   const zoom = useEditorStore((state) => state.zoom);
@@ -1773,34 +1775,38 @@ export const CanvasView = ({
             return isPointInPolygon(pointerPoint, polygon);
           });
 
-          const src = URL.createObjectURL(file);
-
-          if (targetPanel) {
-            void executeCommand("placeImageInPanel", {
-              pageId: page.id,
-              panelId: targetPanel.id,
-              src,
-              prompt: file.name,
-            });
-          } else {
-            void executeCommand("createPanel", {
+          void (async () => {
+            let src = URL.createObjectURL(file);
+            try {
+              src = await persistImportedImageForProject(projectId, file);
+            } catch (error) {
+              console.warn("Failed to persist pasted image; using session blob URL.", error);
+            }
+            if (targetPanel) {
+              await executeCommand("placeImageInPanel", {
+                pageId: page.id,
+                panelId: targetPanel.id,
+                src,
+                prompt: file.name,
+              });
+              return;
+            }
+            const newPanel = (await executeCommand("createPanel", {
               pageId: page.id,
               x: pointerPoint.x - 200,
               y: pointerPoint.y - 150,
               width: 400,
               height: 300,
-            }).then((newPanel: unknown) => {
-              const panel = newPanel as Panel | null;
-              if (panel) {
-                void executeCommand("placeImageInPanel", {
-                  pageId: page.id,
-                  panelId: panel.id,
-                  src,
-                  prompt: file.name,
-                });
-              }
-            });
-          }
+            })) as Panel | null;
+            if (newPanel) {
+              await executeCommand("placeImageInPanel", {
+                pageId: page.id,
+                panelId: newPanel.id,
+                src,
+                prompt: file.name,
+              });
+            }
+          })();
           event.preventDefault();
           break;
         }
@@ -1813,7 +1819,7 @@ export const CanvasView = ({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("paste", handlePaste);
     };
-  }, [page, scale, pageCanvasOrigin, executeCommand]);
+  }, [page, scale, pageCanvasOrigin, executeCommand, projectId]);
 
   const selectedObject = getSelectedObject(page, selection);
   const selectedImagePanel =
@@ -1990,11 +1996,25 @@ export const CanvasView = ({
   const bubbleForContextMenu = bubbleContextTarget
     ? page.bubbles.find((entry) => entry.id === bubbleContextTarget.bubbleId) ?? null
     : null;
+  const getLayerMoveState = (objectType: "panel" | "text" | "bubble", objectId: string) => {
+    const layerRef = `${objectType}:${objectId}`;
+    const currentIndex = page.layers.indexOf(layerRef);
+    return {
+      canMoveUp: currentIndex >= 0 && currentIndex < page.layers.length - 1,
+      canMoveDown: currentIndex > 0,
+    };
+  };
+  const panelLayerMoveState = panelForContextMenu
+    ? getLayerMoveState("panel", panelForContextMenu.id)
+    : null;
+  const textLayerMoveState = textForContextMenu
+    ? getLayerMoveState("text", textForContextMenu.id)
+    : null;
+  const bubbleLayerMoveState = bubbleForContextMenu
+    ? getLayerMoveState("bubble", bubbleForContextMenu.id)
+    : null;
 
   const confirmDeleteObject = (objectType: "panel" | "text" | "bubble", objectId: string) => {
-    if (!window.confirm(t("dialog.deleteObject"))) {
-      return;
-    }
     closeContextMenu();
     void executeCommand("deleteObject", {
       pageId: page.id,
@@ -2050,6 +2070,38 @@ export const CanvasView = ({
             },
           },
           {
+            label: t("contextMenu.moveLayerUp"),
+            disabled: !panelLayerMoveState?.canMoveUp,
+            onSelect: () => {
+              if (!panelLayerMoveState?.canMoveUp) {
+                return;
+              }
+              closeContextMenu();
+              void executeCommand("moveLayer", {
+                pageId: page.id,
+                objectType: "panel",
+                objectId: panelForContextMenu.id,
+                direction: "up",
+              });
+            },
+          },
+          {
+            label: t("contextMenu.moveLayerDown"),
+            disabled: !panelLayerMoveState?.canMoveDown,
+            onSelect: () => {
+              if (!panelLayerMoveState?.canMoveDown) {
+                return;
+              }
+              closeContextMenu();
+              void executeCommand("moveLayer", {
+                pageId: page.id,
+                objectType: "panel",
+                objectId: panelForContextMenu.id,
+                direction: "down",
+              });
+            },
+          },
+          {
             label: t("contextMenu.deletePanel"),
             danger: true,
             onSelect: () => {
@@ -2075,6 +2127,38 @@ export const CanvasView = ({
               },
             },
             {
+              label: t("contextMenu.moveLayerUp"),
+              disabled: !textLayerMoveState?.canMoveUp,
+              onSelect: () => {
+                if (!textLayerMoveState?.canMoveUp) {
+                  return;
+                }
+                closeContextMenu();
+                void executeCommand("moveLayer", {
+                  pageId: page.id,
+                  objectType: "text",
+                  objectId: textForContextMenu.id,
+                  direction: "up",
+                });
+              },
+            },
+            {
+              label: t("contextMenu.moveLayerDown"),
+              disabled: !textLayerMoveState?.canMoveDown,
+              onSelect: () => {
+                if (!textLayerMoveState?.canMoveDown) {
+                  return;
+                }
+                closeContextMenu();
+                void executeCommand("moveLayer", {
+                  pageId: page.id,
+                  objectType: "text",
+                  objectId: textForContextMenu.id,
+                  direction: "down",
+                });
+              },
+            },
+            {
               label: t("contextMenu.deleteText"),
               danger: true,
               onSelect: () => {
@@ -2084,6 +2168,38 @@ export const CanvasView = ({
           ]
         : contextMenu?.target.kind === "bubble" && bubbleForContextMenu
           ? [
+              {
+                label: t("contextMenu.moveLayerUp"),
+                disabled: !bubbleLayerMoveState?.canMoveUp,
+                onSelect: () => {
+                  if (!bubbleLayerMoveState?.canMoveUp) {
+                    return;
+                  }
+                  closeContextMenu();
+                  void executeCommand("moveLayer", {
+                    pageId: page.id,
+                    objectType: "bubble",
+                    objectId: bubbleForContextMenu.id,
+                    direction: "up",
+                  });
+                },
+              },
+              {
+                label: t("contextMenu.moveLayerDown"),
+                disabled: !bubbleLayerMoveState?.canMoveDown,
+                onSelect: () => {
+                  if (!bubbleLayerMoveState?.canMoveDown) {
+                    return;
+                  }
+                  closeContextMenu();
+                  void executeCommand("moveLayer", {
+                    pageId: page.id,
+                    objectType: "bubble",
+                    objectId: bubbleForContextMenu.id,
+                    direction: "down",
+                  });
+                },
+              },
               {
                 label: t("contextMenu.deleteBubble"),
                 danger: true,

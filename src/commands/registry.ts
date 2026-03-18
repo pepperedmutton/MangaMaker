@@ -28,6 +28,7 @@ import {
   snapValue,
   toLayerRef,
 } from "../domain/helpers";
+import { clipboardItemSchema } from "../domain/clipboard";
 import { objectTypeSchema, pointSchema, projectSchema, type Project } from "../domain/schema";
 import { renderPageToPngDataUrl, renderProjectToPdfDataUrl } from "../export/render";
 import {
@@ -167,6 +168,115 @@ const assertObjectExists = (
   }
 };
 
+const moveLayerByDirection = (
+  layers: string[],
+  layerRef: string,
+  direction: "up" | "down",
+) => {
+  const fromIndex = layers.indexOf(layerRef);
+  if (fromIndex < 0) {
+    return null;
+  }
+  const toIndex =
+    direction === "up"
+      ? Math.min(layers.length - 1, fromIndex + 1)
+      : Math.max(0, fromIndex - 1);
+  if (toIndex === fromIndex) {
+    return {
+      layers: [...layers],
+      fromIndex,
+      toIndex,
+    };
+  }
+  const nextLayers = [...layers];
+  const [moved] = nextLayers.splice(fromIndex, 1);
+  nextLayers.splice(toIndex, 0, moved);
+  return {
+    layers: nextLayers,
+    fromIndex,
+    toIndex,
+  };
+};
+
+const CLIPBOARD_PASTE_OFFSET = 40;
+
+const createPastedPanel = (
+  page: Project["pages"][number],
+  panel: Project["pages"][number]["panels"][number],
+) => {
+  const rect = clampPanelRectToWorkspace(page, {
+    x: panel.x + CLIPBOARD_PASTE_OFFSET,
+    y: panel.y + CLIPBOARD_PASTE_OFFSET,
+    width: panel.width,
+    height: panel.height,
+  });
+  const nextPoints = scalePanelPoints(
+    panel.points,
+    panel.width,
+    panel.height,
+    rect.width,
+    rect.height,
+  );
+  return {
+    ...panel,
+    id: createId("panel"),
+    ...rect,
+    points: nextPoints,
+    image: panel.image
+      ? {
+          ...panel.image,
+          viewBox: preservePanelImageViewBox(
+            panel,
+            rect,
+            panel.image.sourceWidth ?? panel.image.viewBox.width,
+            panel.image.sourceHeight ?? panel.image.viewBox.height,
+            panel.image.viewBox,
+          ),
+        }
+      : null,
+  };
+};
+
+const createPastedText = (
+  page: Project["pages"][number],
+  text: Project["pages"][number]["texts"][number],
+) => {
+  const rect = clampTextBoxToWorkspace(page, {
+    x: text.x + CLIPBOARD_PASTE_OFFSET,
+    y: text.y + CLIPBOARD_PASTE_OFFSET,
+    width: text.width,
+    height: text.height,
+  });
+  return {
+    ...text,
+    id: createId("text"),
+    ...rect,
+  };
+};
+
+const createPastedBubble = (
+  page: Project["pages"][number],
+  bubble: Project["pages"][number]["bubbles"][number],
+) => {
+  const rect = clampBubbleRectToWorkspace(page, {
+    x: bubble.x + CLIPBOARD_PASTE_OFFSET,
+    y: bubble.y + CLIPBOARD_PASTE_OFFSET,
+    width: bubble.width,
+    height: bubble.height,
+  });
+  const deltaX = rect.x - bubble.x;
+  const deltaY = rect.y - bubble.y;
+  return {
+    ...bubble,
+    id: createId("bubble"),
+    ...rect,
+    tailTip: clampPointToWorkspace(page, {
+      x: bubble.tailTip.x + deltaX,
+      y: bubble.tailTip.y + deltaY,
+    }),
+  };
+};
+
 const commands = {
   createProject: {
     id: "createProject",
@@ -216,8 +326,8 @@ const commands = {
     inputSchema: z.object({
       target: z.enum(["localDraft"]).default("localDraft"),
     }),
-    execute: (context, input) => {
-      const savedAt = saveLocalDraft(context.getProject());
+    execute: async (context, input) => {
+      const savedAt = await saveLocalDraft(context.getProject());
       context.setSession({
         saveStatus: {
           target: input.target,
@@ -238,8 +348,8 @@ const commands = {
       project: projectSchema.optional(),
       source: z.enum(["localDraft"]).optional(),
     }),
-    execute: (context, input) => {
-      const project = input.project ?? loadLocalDraft();
+    execute: async (context, input) => {
+      const project = input.project ?? (await loadLocalDraft());
       if (!project) {
         throw new Error("No saved draft was found.");
       }
@@ -396,6 +506,181 @@ const commands = {
         statusMessage: createContextStatus(context, "info", "command.pageReordered"),
       });
       return pages.map((entry) => entry.id);
+    },
+  },
+  moveLayer: {
+    id: "moveLayer",
+    label: "Move Layer",
+    recordHistory: true,
+    inputSchema: z.object({
+      pageId: z.string(),
+      objectType: objectTypeSchema,
+      objectId: z.string(),
+      direction: z.enum(["up", "down"]),
+    }),
+    execute: (context, input) => {
+      const current = context.getProject();
+      assertObjectExists(current, input.pageId, input.objectType, input.objectId);
+      const page = getPageById(current, input.pageId);
+      const layerRef = toLayerRef(input.objectType, input.objectId);
+      const moved = moveLayerByDirection(page.layers, layerRef, input.direction);
+      if (!moved) {
+        throw new Error(`Layer not found: ${layerRef}`);
+      }
+      if (moved.toIndex === moved.fromIndex) {
+        throw new Error("Layer move is out of bounds.");
+      }
+      const nextProject = ensureProject(
+        touch(
+          updatePage(current, input.pageId, (entry) => ({
+            ...entry,
+            layers: moved.layers,
+          })),
+        ),
+      );
+      context.setProject(nextProject);
+      context.setSession({
+        selectedPageId: input.pageId,
+      });
+      return moved;
+    },
+  },
+  pasteClipboardItem: {
+    id: "pasteClipboardItem",
+    label: "Paste Clipboard Item",
+    recordHistory: true,
+    inputSchema: z.object({
+      pageId: z.string().optional(),
+      item: clipboardItemSchema,
+    }),
+    execute: (context, input) => {
+      const current = context.getProject();
+
+      if (input.item.kind === "page") {
+        const anchorPageId =
+          input.pageId ?? context.getSession().selectedPageId ?? current.pages[0]?.id ?? null;
+        const anchorIndex = anchorPageId
+          ? current.pages.findIndex((page) => page.id === anchorPageId)
+          : current.pages.length - 1;
+        const insertIndex =
+          anchorIndex >= 0 ? Math.min(anchorIndex + 1, current.pages.length) : current.pages.length;
+        const pastedPage = {
+          ...clonePage(input.item.page),
+          name: getDuplicatedPageName(getLocale(context), input.item.page.name),
+        };
+        const pages = [...current.pages];
+        pages.splice(insertIndex, 0, pastedPage);
+        const nextProject = ensureProject(touch({ ...current, pages }));
+        context.setProject(nextProject);
+        context.setSession({
+          selectedPageId: pastedPage.id,
+          selection: null,
+          panelImageEditing: null,
+          activeTool: "select",
+          statusMessage: createContextStatus(context, "success", "command.pageDuplicated", {
+            name: pastedPage.name,
+          }),
+        });
+        return {
+          kind: "page" as const,
+          pageId: pastedPage.id,
+        };
+      }
+
+      const targetPageId =
+        input.pageId ?? context.getSession().selectedPageId ?? current.pages[0]?.id ?? null;
+      if (!targetPageId) {
+        throw new Error("No target page is available for paste.");
+      }
+      const page = getPageById(current, targetPageId);
+
+      if (input.item.kind === "panel") {
+        const panel = createPastedPanel(page, input.item.panel);
+        const nextProject = ensureProject(
+          touch(
+            updatePage(current, targetPageId, (entry) => ({
+              ...entry,
+              panels: [...entry.panels, panel],
+              layers: [...entry.layers, toLayerRef("panel", panel.id)],
+            })),
+          ),
+        );
+        context.setProject(nextProject);
+        context.setSession({
+          selectedPageId: targetPageId,
+          selection: {
+            pageId: targetPageId,
+            objectType: "panel",
+            objectId: panel.id,
+          },
+          panelImageEditing: null,
+          activeTool: "select",
+          statusMessage: createContextStatus(context, "success", "command.panelCreated"),
+        });
+        return {
+          kind: "panel" as const,
+          pageId: targetPageId,
+          objectId: panel.id,
+        };
+      }
+
+      if (input.item.kind === "text") {
+        const text = createPastedText(page, input.item.text);
+        const nextProject = ensureProject(
+          touch(
+            updatePage(current, targetPageId, (entry) => ({
+              ...entry,
+              texts: [...entry.texts, text],
+              layers: [...entry.layers, toLayerRef("text", text.id)],
+            })),
+          ),
+        );
+        context.setProject(nextProject);
+        context.setSession({
+          selectedPageId: targetPageId,
+          selection: {
+            pageId: targetPageId,
+            objectType: "text",
+            objectId: text.id,
+          },
+          panelImageEditing: null,
+          activeTool: "select",
+          statusMessage: createContextStatus(context, "success", "command.textAdded"),
+        });
+        return {
+          kind: "text" as const,
+          pageId: targetPageId,
+          objectId: text.id,
+        };
+      }
+
+      const bubble = createPastedBubble(page, input.item.bubble);
+      const nextProject = ensureProject(
+        touch(
+          updatePage(current, targetPageId, (entry) => ({
+            ...entry,
+            bubbles: [...entry.bubbles, bubble],
+            layers: [...entry.layers, toLayerRef("bubble", bubble.id)],
+          })),
+        ),
+      );
+      context.setProject(nextProject);
+      context.setSession({
+        selectedPageId: targetPageId,
+        selection: {
+          pageId: targetPageId,
+          objectType: "bubble",
+          objectId: bubble.id,
+        },
+        panelImageEditing: null,
+        activeTool: "select",
+        statusMessage: createContextStatus(context, "success", "command.bubbleAdded"),
+      });
+      return {
+        kind: "bubble" as const,
+        pageId: targetPageId,
+        objectId: bubble.id,
+      };
     },
   },
   selectPage: {
@@ -606,6 +891,7 @@ const commands = {
         ],
         style: createDefaultPanelStyle(),
         image: null,
+        description: "",
       };
       const nextProject = ensureProject(
         touch(
@@ -767,6 +1053,38 @@ const commands = {
                       ...(input.strokeWidth !== undefined ? { strokeWidth: input.strokeWidth } : {}),
                       ...(input.cornerRadius !== undefined ? { cornerRadius: input.cornerRadius } : {}),
                     },
+                  }
+                : panel,
+            ),
+          })),
+        ),
+      );
+      context.setProject(nextProject);
+      return withPage(nextProject, input.pageId, (entry) =>
+        entry.panels.find((panel) => panel.id === input.panelId),
+      );
+    },
+  },
+  setPanelDescription: {
+    id: "setPanelDescription",
+    label: "Set Panel Description",
+    recordHistory: true,
+    inputSchema: z.object({
+      pageId: z.string(),
+      panelId: z.string(),
+      description: z.string(),
+    }),
+    execute: (context, input) => {
+      getPanel(context.getProject(), input.pageId, input.panelId);
+      const nextProject = ensureProject(
+        touch(
+          updatePage(context.getProject(), input.pageId, (entry) => ({
+            ...entry,
+            panels: entry.panels.map((panel) =>
+              panel.id === input.panelId
+                ? {
+                    ...panel,
+                    description: input.description,
                   }
                 : panel,
             ),
