@@ -52,6 +52,7 @@ When implementing a new feature or fixing a bug, you must:
 1. Identify the corresponding command in `src/commands`.
 2. Ensure the command works flawlessly via `window.mangaMaker.commands.execute()`.
 3. Verify the state changes correctly via `window.mangaMaker.session.get()` and `window.mangaMaker.project.get()`.
+4. For explosion bubbles, verify `updateBubble` can set `spikePositions` and that those positions persist in `window.mangaMaker.project.get()`.
 
 ### 2.3 Manual GUI Testing / 手动 GUI 测试
 If the change affects human interaction, the following steps must be manually verified (or verified via E2E tests simulating these actions):
@@ -60,25 +61,26 @@ If the change affects human interaction, the following steps must be manually ve
 
 1. **Project & Page**: Creating a new project, adding/deleting pages, and changing page backgrounds.
 2. **Panels**: Creating polygon panels, moving vertices, and ensuring panels outside the main page edge behave correctly within the workspace. When dragging a panel vertex, the panel shape must update live before mouse release.
-3. **Panel Drag Behavior**: 
+3. **Bubble Resize Handles**: Corner handles must resize width/height together (dual-axis). Edge-midpoint handles must resize only one axis (single-axis stretch/compress).
+4. **Panel Drag Behavior**: 
    - Dragging a panel must move it without auto-selecting it after the drag ends.
    - The selection state must remain unchanged after a drag operation.
    - A pure click must select the panel.
-4. **Image Cropping**: Binding an image to a panel. Dragging and zooming the image must update the visible crop **live** without moving the panel itself.
-5. **Selected Panel with Image**:
+5. **Image Cropping**: Binding an image to a panel. Dragging and zooming the image must update the visible crop **live** without moving the panel itself.
+6. **Selected Panel with Image**:
    - Left-drag on the semi-transparent image must pan the crop region.
    - Left-drag on the panel border must move the panel.
    - The panel must not move during image crop panning.
-6. **Text**: Adding text, switching between horizontal/vertical directions, setting horizontal alignment (left/center/right), setting vertical alignment (top/middle/bottom), and applying font changes from the Inspector sidebar.
-7. **Bubble**: Adding bubbles, switching between ten bubble types with unique adjustable features:
+7. **Text**: Adding text, switching between horizontal/vertical directions, setting horizontal alignment (left/center/right), setting vertical alignment (top/middle/bottom), and applying font changes from the Inspector sidebar.
+8. **Bubble**: Adding bubbles, switching between ten bubble types with unique adjustable features:
    - Round: adjustable corner radius
    - Cloud: adjustable bumpiness
    - Explosion: each spike individually draggable to adjust depth, no separate tail
    - Jagged: adjustable jaggedness
    - Thought: adjustable trailing circles
    Draggable tail tip to point at speaker (except explosion), adjustable tail width and angle, setting text alignment, adjusting border width, background color, border color, and applying font changes from the Inspector sidebar.
-7. **Context Menus**: Right-clicking on objects must bring up custom custom menus, suppressing the default browser menu.
-8. **Zooming**: Using the continuous zoom slider must smoothly scale the workspace, without suddenly resizing the canvas window boundaries.
+9. **Context Menus**: Right-clicking on objects must bring up custom custom menus, suppressing the default browser menu.
+10. **Zooming**: Using the continuous zoom slider must smoothly scale the workspace, without suddenly resizing the canvas window boundaries.
 
 ## 3. Reporting / 报告
 If any test fails, the modification is considered **incomplete** and must be reverted or fixed prior to acceptance. 

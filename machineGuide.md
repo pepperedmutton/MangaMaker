@@ -93,6 +93,7 @@ Required examples:
 - 通过共享 `setZoom` 命令实现连续工作区缩放
 - text create/update/move/resize/direction/font/alignment
 - bubble create/update/delete/font/alignment
+- bubble resize handles: corner handles scale two axes, edge-midpoint handles scale one axis
 - undo/redo
 - save/load
 - export
@@ -108,6 +109,7 @@ Required examples:
 - 气泡创建、更新、字体、对齐、气泡类型、边框宽度、背景颜色、边框颜色控制
 - 气泡尾巴控制（位置、角度、宽度）
 - 爆炸气泡：每个尖刺可单独拖拽调节深度
+- 缩放控制：四角控制点双轴缩放，四边中点控制点单轴拉伸/压缩
 - 类型特定控制：圆角半径、凹凸度、尖刺数量和深度、锯齿度、思考圆圈数
 - 撤销与重做
 - 保存与加载
@@ -159,6 +161,7 @@ Guidance:
 - Tests for panel images must also verify that dragging the image never changes the panel's own stage position.
 - Tests for panel images must also verify that the clipped panel content updates live during image drag before `dragEnd`.
 - Tests for panel geometry edits must verify that moving panel vertices or resize handles does not drag the bound image to a different stage position.
+- Tests for bubble resize handles must verify: corner handles resize width and height together, while edge-midpoint handles resize only one axis.
 - **Tests for panel vertex drag must verify**: Dragging a panel vertex updates the panel shape live before `dragEnd`; the visual feedback must be immediate.
 - **Tests for panel drag behavior must verify**:
   - Dragging a panel (mouse down, move, mouse up) moves the panel but does NOT auto-select it.
@@ -178,6 +181,7 @@ Guidance:
 - Tests for zoom must also verify that crossing 100% changes rendered scale continuously without suddenly resizing the editing surface itself.
 - Tests for zoom must also verify that higher zoom levels do not let the workspace frame itself stretch outside the editing surface.
 - Tests for layout must verify that next-step guidance remains available in the inspector without rendering a banner above the workspace.
+- Command-layer tests must cover explosion bubble `updateBubble` payloads that set `spikePositions`, and assert the project state reflects those positions.
 - 页面背景测试还必须验证：ribbon 中的背景色控件会通过共享命令层更新当前页面背景。
 - 画布右键菜单测试还必须验证：右键点击分镜会打开自定义菜单、显示分镜快捷操作，并且阻止浏览器默认右键菜单。
 - 分镜选中测试还必须验证：选中分镜不会让编辑区域重排变大，并且分镜在选中后仍然可以移动。

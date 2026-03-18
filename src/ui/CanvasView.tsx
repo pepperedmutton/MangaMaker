@@ -13,6 +13,7 @@ import {
 } from "react-konva";
 import { GRID_SIZE } from "../domain/defaults";
 import {
+  clampBubbleRectToWorkspace,
   getBubbleBasePoints,
   getDisplayedTextContent,
   getPageWorkspace,
@@ -82,9 +83,17 @@ type ContextMenuAction = {
   disabled?: boolean;
 };
 
-type ResizeHandle = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+type ResizeHandle =
+  | "top-left"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-right"
+  | "top"
+  | "right"
+  | "bottom"
+  | "left";
 
-const HANDLE_SIZE = 12;
+const HANDLE_SIZE = 8;
 const POINT_HANDLE_RADIUS = 7;
 const CONTEXT_MENU_WIDTH = 220;
 
@@ -153,26 +162,6 @@ const isRectCrossingPageBounds = (
   rect.y < 0 ||
   rect.x + rect.width > page.width ||
   rect.y + rect.height > page.height;
-
-const applyHandleToRect = (
-  handle: ResizeHandle,
-  rect: { x: number; y: number; width: number; height: number },
-  point: { x: number; y: number },
-) => {
-  const right = rect.x + rect.width;
-  const bottom = rect.y + rect.height;
-
-  if (handle === "top-left") {
-    return { x: point.x, y: point.y, width: right - point.x, height: bottom - point.y };
-  }
-  if (handle === "top-right") {
-    return { x: rect.x, y: point.y, width: point.x - rect.x, height: bottom - point.y };
-  }
-  if (handle === "bottom-left") {
-    return { x: point.x, y: rect.y, width: right - point.x, height: point.y - rect.y };
-  }
-  return { x: rect.x, y: rect.y, width: point.x - rect.x, height: point.y - rect.y };
-};
 
 const getPanelImageRenderMetrics = (
   panel: Pick<Panel, "width" | "height" | "image">,
@@ -243,19 +232,180 @@ const ResizeHandles = ({
   scale,
   color,
   onCommit,
+  onLiveChange,
+  mode = "corners",
 }: {
   rect: { x: number; y: number; width: number; height: number };
   scale: number;
   color: string;
-  onCommit: (handle: ResizeHandle, point: { x: number; y: number }) => void;
+  onCommit: (handle: ResizeHandle, newRect: { x: number; y: number; width: number; height: number }) => void;
+  onLiveChange?: (rect: { x: number; y: number; width: number; height: number } | null) => void;
+  mode?: "corners" | "corners-and-edges";
 }) => {
   const size = HANDLE_SIZE;
-  const handles: Array<{ key: ResizeHandle; x: number; y: number }> = [
+
+  // Store drag start state
+  const dragStateRef = useRef<{
+    handleKey: ResizeHandle;
+    initialRect: typeof rect;
+  } | null>(null);
+
+  const getPointerInParentSpace = (event: KonvaEventObject<DragEvent>) => {
+    const stage = event.target.getStage();
+    const parent = event.target.getParent();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer || !parent) {
+      return null;
+    }
+    return parent.getAbsoluteTransform().copy().invert().point(pointer);
+  };
+
+  // Compute a centered resize rect; corners resize both axes, edge handles resize one axis.
+  const computeScaledRect = (
+    handleKey: ResizeHandle,
+    pointerX: number,
+    pointerY: number,
+    baseRect: typeof rect,
+  ) => {
+    const centerX = baseRect.x + baseRect.width / 2;
+    const centerY = baseRect.y + baseRect.height / 2;
+    
+    // Convert pointer to page coordinates
+    const pageX = pointerX / scale;
+    const pageY = pointerY / scale;
+
+    // Calculate new dimensions based on which corner is being dragged
+    let newWidth = baseRect.width;
+    let newHeight = baseRect.height;
+
+    switch (handleKey) {
+      case "top-left": {
+        // Distance from drag point to center
+        const dx = centerX - pageX;
+        const dy = centerY - pageY;
+        newWidth = dx * 2;
+        newHeight = dy * 2;
+        break;
+      }
+      case "top-right": {
+        const dx = pageX - centerX;
+        const dy = centerY - pageY;
+        newWidth = dx * 2;
+        newHeight = dy * 2;
+        break;
+      }
+      case "bottom-left": {
+        const dx = centerX - pageX;
+        const dy = pageY - centerY;
+        newWidth = dx * 2;
+        newHeight = dy * 2;
+        break;
+      }
+      case "bottom-right": {
+        const dx = pageX - centerX;
+        const dy = pageY - centerY;
+        newWidth = dx * 2;
+        newHeight = dy * 2;
+        break;
+      }
+      case "top": {
+        const dy = centerY - pageY;
+        newHeight = dy * 2;
+        break;
+      }
+      case "right": {
+        const dx = pageX - centerX;
+        newWidth = dx * 2;
+        break;
+      }
+      case "bottom": {
+        const dy = pageY - centerY;
+        newHeight = dy * 2;
+        break;
+      }
+      case "left": {
+        const dx = centerX - pageX;
+        newWidth = dx * 2;
+        break;
+      }
+      default:
+        return baseRect;
+    }
+
+    // Enforce minimum size
+    newWidth = Math.max(20, newWidth);
+    newHeight = Math.max(20, newHeight);
+
+    // Calculate new x, y to maintain center
+    const newX = centerX - newWidth / 2;
+    const newY = centerY - newHeight / 2;
+
+    return { x: newX, y: newY, width: newWidth, height: newHeight };
+  };
+
+  const handleDragStart = (
+    handleKey: ResizeHandle,
+    event: KonvaEventObject<DragEvent>,
+  ) => {
+    event.cancelBubble = true;
+    const pointer = getPointerInParentSpace(event);
+    if (!pointer) return;
+
+    dragStateRef.current = {
+      handleKey,
+      initialRect: { ...rect },
+    };
+  };
+
+  const handleDragMove = (
+    event: KonvaEventObject<DragEvent>,
+  ) => {
+    if (!dragStateRef.current) return;
+    event.cancelBubble = true;
+
+    const pointer = getPointerInParentSpace(event);
+    if (!pointer) return;
+
+    const { initialRect } = dragStateRef.current;
+    
+    const nextRect = computeScaledRect(dragStateRef.current.handleKey, pointer.x, pointer.y, initialRect);
+    onLiveChange?.(nextRect);
+  };
+
+  const handleDragEnd = (
+    event: KonvaEventObject<DragEvent>,
+  ) => {
+    if (!dragStateRef.current) return;
+    event.cancelBubble = true;
+
+    const pointer = getPointerInParentSpace(event);
+    
+    const { handleKey, initialRect } = dragStateRef.current;
+    dragStateRef.current = null;
+
+    if (!pointer) {
+      onLiveChange?.(null);
+      return;
+    }
+
+    const nextRect = computeScaledRect(handleKey, pointer.x, pointer.y, initialRect);
+    onLiveChange?.(null);
+    onCommit(handleKey, nextRect);
+  };
+
+  const cornerHandles: Array<{ key: ResizeHandle; x: number; y: number }> = [
     { key: "top-left", x: rect.x, y: rect.y },
     { key: "top-right", x: rect.x + rect.width, y: rect.y },
     { key: "bottom-left", x: rect.x, y: rect.y + rect.height },
     { key: "bottom-right", x: rect.x + rect.width, y: rect.y + rect.height },
   ];
+  const edgeHandles: Array<{ key: ResizeHandle; x: number; y: number }> = [
+    { key: "top", x: rect.x + rect.width * 0.5, y: rect.y },
+    { key: "right", x: rect.x + rect.width, y: rect.y + rect.height * 0.5 },
+    { key: "bottom", x: rect.x + rect.width * 0.5, y: rect.y + rect.height },
+    { key: "left", x: rect.x, y: rect.y + rect.height * 0.5 },
+  ];
+  const handles = mode === "corners-and-edges" ? [...cornerHandles, ...edgeHandles] : cornerHandles;
 
   return (
     <>
@@ -268,22 +418,39 @@ const ResizeHandles = ({
           height={size}
           fill="#ffffff"
           stroke={color}
-          strokeWidth={2}
-          cornerRadius={4}
+          strokeWidth={1.5}
+          cornerRadius={2}
           draggable
           onMouseDown={(event) => {
-            event.cancelBubble = true;
+            if (event.evt.button === 0) {
+              event.cancelBubble = true;
+            }
           }}
-          onDragEnd={(event) => {
-            onCommit(handle.key, {
-              x: event.target.x() / scale + size / 2 / scale,
-              y: event.target.y() / scale + size / 2 / scale,
-            });
-          }}
+          onDragStart={(event) => handleDragStart(handle.key, event)}
+          onDragMove={(event) => handleDragMove(event)}
+          onDragEnd={(event) => handleDragEnd(event)}
         />
       ))}
     </>
   );
+};
+
+const scaleExplosionSpikePositions = (
+  spikePositions: Array<{ x: number; y: number }> | undefined,
+  fromRect: { width: number; height: number },
+  toRect: { width: number; height: number },
+) => {
+  if (!spikePositions || spikePositions.length === 0) {
+    return [];
+  }
+
+  const scaleX = toRect.width / fromRect.width;
+  const scaleY = toRect.height / fromRect.height;
+
+  return spikePositions.map((position) => ({
+    x: (position.x - fromRect.width / 2) * scaleX + toRect.width / 2,
+    y: (position.y - fromRect.height / 2) * scaleY + toRect.height / 2,
+  }));
 };
 
 const SelectedPanelImagePreview = ({
@@ -449,7 +616,10 @@ const PanelNode = ({
   const isDraggingRef = useRef(false);
   // Live points for real-time preview during vertex drag
   const [livePoints, setLivePoints] = useState<Point[] | null>(null);
+  // Live rect for real-time preview during resize
+  const [liveRect, setLiveRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const displayPoints = livePoints ?? panel.points;
+  const displayRect = liveRect ?? { x: panel.x, y: panel.y, width: panel.width, height: panel.height };
   const clipPoints = displayPoints.flatMap((point) => [point.x * scale, point.y * scale]);
   
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
@@ -596,7 +766,7 @@ const PanelNode = ({
           points={clipPoints}
           closed
           stroke={selected ? "#c36d2f" : panel.style.stroke}
-          strokeWidth={selected ? 3 : Math.max(1, panel.style.strokeWidth * 0.5)}
+          strokeWidth={selected ? 3 : panel.style.strokeWidth * 0.5}
           fillEnabled={false}
           listening={false}
         />
@@ -633,7 +803,10 @@ const PanelNode = ({
                 panelId: panel.id,
               });
             }}
-            onDragStart={() => {
+            onDragStart={(event) => {
+              const target = event.target;
+              target.setAttr('initialX', target.x());
+              target.setAttr('initialY', target.y());
               onBoundaryPreviewChange({
                 objectType: "panel",
                 objectId: panel.id,
@@ -646,21 +819,31 @@ const PanelNode = ({
               });
             }}
             onDragMove={(event) => {
+              const target = event.target;
+              const initialX = target.getAttr('initialX');
+              const initialY = target.getAttr('initialY');
+              const deltaX = (target.x() - initialX) / scale;
+              const deltaY = (target.y() - initialY) / scale;
               onBoundaryPreviewChange({
                 objectType: "panel",
                 objectId: panel.id,
                 rect: {
-                  x: panel.x + event.target.x() / scale,
-                  y: panel.y + event.target.y() / scale,
+                  x: panel.x + deltaX,
+                  y: panel.y + deltaY,
                   width: panel.width,
                   height: panel.height,
                 },
               });
             }}
             onDragEnd={(event) => {
-              const deltaX = event.target.x() / scale;
-              const deltaY = event.target.y() / scale;
-              event.target.position({ x: 0, y: 0 });
+              const target = event.target;
+              const initialX = target.getAttr('initialX');
+              const initialY = target.getAttr('initialY');
+              const deltaX = (target.x() - initialX) / scale;
+              const deltaY = (target.y() - initialY) / scale;
+              target.position({ x: initialX, y: initialY });
+              target.setAttr('initialX', undefined);
+              target.setAttr('initialY', undefined);
               void executeCommand("movePanel", {
                 pageId: page.id,
                 panelId: panel.id,
@@ -706,7 +889,9 @@ const PanelNode = ({
                 }
               }}
               onMouseDown={(event) => {
-                event.cancelBubble = true;
+                if (event.evt.button === 0) {
+                  event.cancelBubble = true;
+                }
               }}
               onContextMenu={(event) => {
                 onOpenContextMenu(event, {
@@ -714,7 +899,11 @@ const PanelNode = ({
                   panelId: panel.id,
                 });
               }}
-              onDragStart={() => {
+              onDragStart={(event) => {
+                const target = event.target;
+                // Store the initial absolute position
+                target.setAttr('initialX', target.x());
+                target.setAttr('initialY', target.y());
                 onBoundaryPreviewChange({
                   objectType: "panel",
                   objectId: panel.id,
@@ -727,21 +916,34 @@ const PanelNode = ({
                 });
               }}
               onDragMove={(event) => {
+                const target = event.target;
+                const initialX = target.getAttr('initialX');
+                const initialY = target.getAttr('initialY');
+                // Calculate delta from initial position
+                const deltaX = (target.x() - initialX) / scale;
+                const deltaY = (target.y() - initialY) / scale;
                 onBoundaryPreviewChange({
                   objectType: "panel",
                   objectId: panel.id,
                   rect: {
-                    x: panel.x + event.target.x() / scale,
-                    y: panel.y + event.target.y() / scale,
+                    x: panel.x + deltaX,
+                    y: panel.y + deltaY,
                     width: panel.width,
                     height: panel.height,
                   },
                 });
               }}
               onDragEnd={(event) => {
-                const deltaX = event.target.x() / scale;
-                const deltaY = event.target.y() / scale;
-                event.target.position({ x: 0, y: 0 });
+                const target = event.target;
+                const initialX = target.getAttr('initialX');
+                const initialY = target.getAttr('initialY');
+                // Calculate delta from initial position
+                const deltaX = (target.x() - initialX) / scale;
+                const deltaY = (target.y() - initialY) / scale;
+                // Reset to initial position
+                target.position({ x: initialX, y: initialY });
+                target.setAttr('initialX', undefined);
+                target.setAttr('initialY', undefined);
                 void executeCommand("movePanel", {
                   pageId: page.id,
                   panelId: panel.id,
@@ -755,11 +957,12 @@ const PanelNode = ({
             />
           ) : null}
           <ResizeHandles
-            rect={panel}
+            rect={displayRect}
             scale={scale}
             color="#c36d2f"
-            onCommit={(handle, point) => {
-              const nextRect = applyHandleToRect(handle, panel, point);
+            onLiveChange={setLiveRect}
+            onCommit={(_, nextRect) => {
+              setLiveRect(null);
               void executeCommand("resizePanel", {
                 pageId: page.id,
                 panelId: panel.id,
@@ -949,8 +1152,7 @@ const TextNode = ({
             rect={item}
             scale={scale}
             color="#c36d2f"
-            onCommit={(handle, point) => {
-              const nextRect = applyHandleToRect(handle, item, point);
+            onCommit={(_, nextRect) => {
               void executeCommand("updateText", {
                 pageId: page.id,
                 textId: item.id,
@@ -986,6 +1188,16 @@ const BubbleNode = ({
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const activeTool = useEditorStore((state) => state.activeTool);
   const base = getBubbleBasePoints(bubble);
+
+  // Live spike positions for real-time preview during drag
+  const [liveSpikePositions, setLiveSpikePositions] = useState<Array<{x: number, y: number}> | null>(null);
+  // Live rect for real-time resize preview
+  const [liveRect, setLiveRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Single spike edit mode: which spike is being edited individually
+  const [editingSpikeIndex, setEditingSpikeIndex] = useState<number | null>(null);
+  // Live spike depth for individual spike editing
+  const [liveSpikeDepth, setLiveSpikeDepth] = useState<number | null>(null);
+  
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
     event.cancelBubble = true;
     void executeCommand("selectObject", {
@@ -994,20 +1206,35 @@ const BubbleNode = ({
       objectId: bubble.id,
     });
   };
+  
+  // Use live rect during resize for real-time preview
+  const previewSpikePositions =
+    liveRect && bubble.bubbleType === "explosion"
+      ? scaleExplosionSpikePositions(bubble.spikePositions, bubble, liveRect)
+      : [];
+  const displayBubble = liveRect
+    ? {
+        ...bubble,
+        ...liveRect,
+        ...(previewSpikePositions.length > 0 ? { spikePositions: previewSpikePositions } : {}),
+      }
+    : bubble;
 
-  const bodyPath = getBubbleBodyPath(bubble);
-  const tailPath = getBubbleTailPath(bubble);
-  const thoughtCircles = bubble.bubbleType === "thought" ? getThoughtCircles(bubble) : [];
-  const explosionSpikes = bubble.bubbleType === "explosion" ? getExplosionSpikePoints(bubble) : [];
-  const strokeColor = selected ? "#c36d2f" : bubble.strokeColor;
+  const bodyPath = getBubbleBodyPath(displayBubble, liveSpikePositions);
+  const tailPath = getBubbleTailPath(displayBubble);
+  const thoughtCircles = displayBubble.bubbleType === "thought" ? getThoughtCircles(displayBubble) : [];
+  const explosionSpikes = displayBubble.bubbleType === "explosion" ? getExplosionSpikePoints(displayBubble, liveSpikePositions) : [];
+  // When strokeWidth is 0, don't render stroke at all
+  const hasStroke = displayBubble.strokeWidth > 0;
+  const strokeColor = selected ? "#c36d2f" : (hasStroke ? bubble.strokeColor : undefined);
   const padding = 24;
 
   return (
     <>
       <Group
-        x={bubble.x * scale}
-        y={bubble.y * scale}
-        draggable={activeTool === "select"}
+        x={displayBubble.x * scale}
+        y={displayBubble.y * scale}
+        draggable={activeTool === "select" && !liveRect}
         onClick={handleSelect}
         onContextMenu={(event) => {
           handleSelect(event);
@@ -1036,23 +1263,24 @@ const BubbleNode = ({
       >
         {/* Bubble body */}
         <Path
+          data-testid="bubble-body"
           data={bodyPath}
-          fill={bubble.backgroundColor}
+          fill={displayBubble.backgroundColor}
           stroke={strokeColor}
-          strokeWidth={bubble.strokeWidth}
+          strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
           scaleX={scale}
           scaleY={scale}
         />
         {/* Bubble tail - regular tail, thought circles, or explosion spikes (none for explosion) */}
-        {bubble.bubbleType === "thought" ? (() => {
-          const base = getBubbleBasePoints(bubble);
-          const tailTipX = (bubble.tailTip.x - bubble.x) * scale;
-          const tailTipY = (bubble.tailTip.y - bubble.y) * scale;
-          const tailBaseX = (base.center.x - bubble.x) * scale;
-          const tailBaseY = (base.center.y - bubble.y) * scale;
+        {displayBubble.bubbleType === "thought" ? (() => {
+          const base = getBubbleBasePoints(displayBubble);
+          const tailTipX = (displayBubble.tailTip.x - displayBubble.x) * scale;
+          const tailTipY = (displayBubble.tailTip.y - displayBubble.y) * scale;
+          const tailBaseX = (base.center.x - displayBubble.x) * scale;
+          const tailBaseY = (base.center.y - displayBubble.y) * scale;
           
           const circles = [];
-          const numCircles = bubble.thoughtCircles ?? 3;
+          const numCircles = displayBubble.thoughtCircles ?? 3;
           
           for (let i = 0; i < numCircles; i++) {
             const t = (i + 1) / (numCircles + 1);
@@ -1066,19 +1294,19 @@ const BubbleNode = ({
                 x={cx}
                 y={cy}
                 radius={radius}
-                fill={bubble.backgroundColor}
+                fill={displayBubble.backgroundColor}
                 stroke={strokeColor}
-                strokeWidth={bubble.strokeWidth}
+                strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
               />
             );
           }
           return circles;
-        })() : bubble.bubbleType !== "explosion" ? (
+        })() : displayBubble.bubbleType !== "explosion" ? (
           <Path
             data={tailPath}
-            fill={bubble.backgroundColor}
+            fill={displayBubble.backgroundColor}
             stroke={strokeColor}
-            strokeWidth={bubble.strokeWidth}
+            strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
             scaleX={scale}
             scaleY={scale}
           />
@@ -1087,81 +1315,142 @@ const BubbleNode = ({
         <Text
           x={padding * scale}
           y={padding * scale}
-          width={(bubble.width - padding * 2) * scale}
-          height={(bubble.height - padding * 2) * scale}
-          text={bubble.text}
-          fontSize={bubble.fontSize * scale}
-          fontFamily={bubble.fontFamily}
+          width={(displayBubble.width - padding * 2) * scale}
+          height={(displayBubble.height - padding * 2) * scale}
+          text={displayBubble.text}
+          fontSize={displayBubble.fontSize * scale}
+          fontFamily={displayBubble.fontFamily}
           fill="#111111"
-          align={bubble.textAlign}
-          verticalAlign={bubble.verticalAlign}
+          align={displayBubble.textAlign}
+          verticalAlign={displayBubble.verticalAlign}
         />
       </Group>
 
       {selected ? (
         <>
+          <Group data-testid="bubble-selected" />
           <ResizeHandles
-            rect={bubble}
+            rect={displayBubble}
             scale={scale}
             color="#c36d2f"
-            onCommit={(handle, point) => {
-              const nextRect = applyHandleToRect(handle, bubble, point);
+            mode="corners-and-edges"
+            onLiveChange={setLiveRect}
+            onCommit={(_, nextRect) => {
+              setLiveRect(null);
+              const resolvedRect = clampBubbleRectToWorkspace(page, nextRect);
+              const scaledSpikePositions = scaleExplosionSpikePositions(
+                bubble.spikePositions,
+                bubble,
+                resolvedRect,
+              );
               void executeCommand("updateBubble", {
                 pageId: page.id,
                 bubbleId: bubble.id,
-                x: nextRect.x,
-                y: nextRect.y,
-                width: nextRect.width,
-                height: nextRect.height,
+                x: resolvedRect.x,
+                y: resolvedRect.y,
+                width: resolvedRect.width,
+                height: resolvedRect.height,
+                ...(scaledSpikePositions.length > 0 ? { spikePositions: scaledSpikePositions } : {}),
               });
             }}
           />
-          {bubble.bubbleType === "explosion" ? (
-            // Explosion bubble: each spike tip is draggable
+          {displayBubble.bubbleType === "explosion" ? (
+            // Explosion bubble: each spike tip is draggable with full 2D positioning
+            // Note: These circles are rendered OUTSIDE the bubble's Group, so they use absolute coordinates
             explosionSpikes.map((spike) => (
               <Circle
                 key={`spike-${spike.index}`}
-                x={(bubble.x + spike.x) * scale}
-                y={(bubble.y + spike.y) * scale}
-                radius={6}
-                fill="#c36d2f"
+                x={(displayBubble.x + spike.x) * scale}
+                y={(displayBubble.y + spike.y) * scale}
+                radius={editingSpikeIndex === spike.index ? 9 : 6}
+                fill={editingSpikeIndex === spike.index ? "#ff6b6b" : "#c36d2f"}
                 stroke="#ffffff"
                 strokeWidth={2}
                 draggable
                 onMouseDown={(event) => {
                   event.cancelBubble = true;
                 }}
+                onDblClick={(event) => {
+                  event.cancelBubble = true;
+                  // Enter single spike edit mode
+                  if (editingSpikeIndex === spike.index) {
+                    setEditingSpikeIndex(null);
+                    setLiveSpikeDepth(null);
+                  } else {
+                    setEditingSpikeIndex(spike.index);
+                    // Calculate current depth from position
+                    const centerX = displayBubble.width / 2;
+                    const centerY = displayBubble.height / 2;
+                    const dx = spike.x - centerX;
+                    const dy = spike.y - centerY;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    const outerRadius = Math.min(displayBubble.width, displayBubble.height) * 0.48;
+                    const depth = Math.max(0.1, Math.min(1.0, (distance / outerRadius - 0.3) / 0.7));
+                    setLiveSpikeDepth(depth);
+                  }
+                }}
+                onDragStart={(event) => {
+                  // Store initial position to calculate delta correctly
+                  const target = event.target;
+                  target.setAttr('initialX', target.x());
+                  target.setAttr('initialY', target.y());
+                }}
                 onDragMove={(event) => {
-                  // Calculate distance from center to determine spike depth
-                  const centerX = bubble.x + bubble.width * 0.5;
-                  const centerY = bubble.y + bubble.height * 0.5;
-                  const newX = event.target.x() / scale;
-                  const newY = event.target.y() / scale;
-                  const distance = Math.sqrt(
-                    Math.pow(newX - centerX, 2) + Math.pow(newY - centerY, 2)
-                  );
-                  const outerRadius = Math.min(bubble.width, bubble.height) * 0.48;
-                  const maxDepthRadius = outerRadius * 0.7;
-                  const minDepthRadius = outerRadius * 0.3;
-                  // Map distance to depth (0.1 to 1.0)
-                  const newDepth = Math.max(0.1, Math.min(1.0, 
-                    (distance - minDepthRadius) / (maxDepthRadius - minDepthRadius)
-                  ));
+                  const target = event.target;
+                  const initialX = target.getAttr('initialX');
+                  const initialY = target.getAttr('initialY');
                   
-                  // Update the specific spike depth
-                  const newDepths = [...(bubble.spikeDepths || Array(bubble.spikeCount).fill(bubble.spikeDepth))];
-                  newDepths[spike.index] = newDepth;
+                  // Calculate the new absolute position based on drag delta
+                  const newAbsX = initialX + target.x() - initialX;
+                  const newAbsY = initialY + target.y() - initialY;
+                  
+                  // Convert to bubble-local coordinates for state update
+                  const newX = newAbsX / scale - displayBubble.x;
+                  const newY = newAbsY / scale - displayBubble.y;
+                  
+                  // Update live spike positions for real-time shape preview
+                  const currentPositions = liveSpikePositions || explosionSpikes.map(s => ({ x: s.x, y: s.y }));
+                  const newPositions = [...currentPositions];
+                  newPositions[spike.index] = { x: newX, y: newY };
+                  setLiveSpikePositions(newPositions);
+                }}
+                onDragEnd={(event) => {
+                  const target = event.target;
+                  const initialX = target.getAttr('initialX');
+                  const initialY = target.getAttr('initialY');
+                  
+                  // Calculate final absolute position
+                  const finalAbsX = initialX + target.x() - initialX;
+                  const finalAbsY = initialY + target.y() - initialY;
+                  
+                  // Convert to bubble-local coordinates
+                  const finalX = finalAbsX / scale - displayBubble.x;
+                  const finalY = finalAbsY / scale - displayBubble.y;
+                  
+                  // Reset position to initial so it doesn't drift
+                  target.position({ x: initialX, y: initialY });
+                  target.setAttr('initialX', undefined);
+                  target.setAttr('initialY', undefined);
+                  
+                  // Build new spikePositions array preserving existing positions
+                  const currentPositions = bubble.spikePositions || [];
+                  const newPositions: Array<{ x: number; y: number }> = [];
+                  
+                  for (let i = 0; i < bubble.spikeCount; i++) {
+                    if (i === spike.index) {
+                      newPositions[i] = { x: finalX, y: finalY };
+                    } else {
+                      newPositions[i] = currentPositions[i] ?? explosionSpikes[i];
+                    }
+                  }
+                  
+                  // Clear live positions and commit changes
+                  setLiveSpikePositions(null);
                   
                   void executeCommand("updateBubble", {
                     pageId: page.id,
                     bubbleId: bubble.id,
-                    spikeDepths: newDepths,
-                  });
-                }}
-                onDragEnd={(event) => {
-                  event.target.position({
-                    x: (bubble.x + spike.x) * scale,
-                    y: (bubble.y + spike.y) * scale,
+                    spikePositions: newPositions,
                   });
                 }}
               />
@@ -1169,26 +1458,177 @@ const BubbleNode = ({
           ) : (
             // Regular tail tip for other bubble types
             <Circle
-              x={bubble.tailTip.x * scale}
-              y={bubble.tailTip.y * scale}
+              x={displayBubble.tailTip.x * scale}
+              y={displayBubble.tailTip.y * scale}
               radius={8}
               fill="#c36d2f"
               draggable
               onMouseDown={(event) => {
                 event.cancelBubble = true;
               }}
+              onDragStart={(event) => {
+                const target = event.target;
+                target.setAttr('initialX', target.x());
+                target.setAttr('initialY', target.y());
+              }}
               onDragEnd={(event) => {
+                const target = event.target;
+                const initialX = target.getAttr('initialX');
+                const initialY = target.getAttr('initialY');
+                // Calculate final absolute position
+                const finalX = initialX + (target.x() - initialX);
+                const finalY = initialY + (target.y() - initialY);
+                // Reset to initial position
+                target.position({ x: initialX, y: initialY });
+                target.setAttr('initialX', undefined);
+                target.setAttr('initialY', undefined);
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
                   tailTip: {
-                    x: event.target.x() / scale,
-                    y: event.target.y() / scale,
+                    x: finalX / scale,
+                    y: finalY / scale,
                   },
                 });
               }}
             />
           )}
+          {/* Single spike depth editor - shown when a spike is selected for editing */}
+          {displayBubble.bubbleType === "explosion" && editingSpikeIndex !== null && (() => {
+            const spike = explosionSpikes[editingSpikeIndex];
+            if (!spike) return null;
+            
+            const centerX = displayBubble.x + displayBubble.width / 2;
+            const centerY = displayBubble.y + displayBubble.height / 2;
+            
+            // Calculate current spike position
+            const spikeAbsX = displayBubble.x + spike.x;
+            const spikeAbsY = displayBubble.y + spike.y;
+            
+            // Calculate angle from center to spike
+            const angle = Math.atan2(spikeAbsY - centerY, spikeAbsX - centerX);
+            
+            // Calculate inner and outer positions for the depth slider
+            const outerRadius = Math.min(displayBubble.width, displayBubble.height) * 0.48;
+            const innerRadius = outerRadius * 0.25;
+            
+            const currentDepth = liveSpikeDepth ?? 0.5;
+            const currentRadius = innerRadius + (outerRadius - innerRadius) * currentDepth;
+            
+            const innerX = centerX + Math.cos(angle) * innerRadius;
+            const innerY = centerY + Math.sin(angle) * innerRadius;
+            const outerX = centerX + Math.cos(angle) * outerRadius;
+            const outerY = centerY + Math.sin(angle) * outerRadius;
+            const currentX = centerX + Math.cos(angle) * currentRadius;
+            const currentY = centerY + Math.sin(angle) * currentRadius;
+            
+            return (
+              <>
+                {/* Depth track line */}
+                <Line
+                  points={[
+                    innerX * scale, innerY * scale,
+                    outerX * scale, outerY * scale,
+                  ]}
+                  stroke="#ff6b6b"
+                  strokeWidth={2}
+                  dash={[4, 4]}
+                />
+                {/* Depth control handle */}
+                <Circle
+                  x={currentX * scale}
+                  y={currentY * scale}
+                  radius={8}
+                  fill="#ff6b6b"
+                  stroke="#ffffff"
+                  strokeWidth={2}
+                  draggable
+                  onMouseDown={(event) => event.cancelBubble = true}
+                  onDragMove={(event) => {
+                    const stage = event.target.getStage();
+                    const pointer = stage?.getPointerPosition();
+                    if (!pointer) return;
+                    
+                    // Calculate distance from center along the angle
+                    const px = pointer.x / scale;
+                    const py = pointer.y / scale;
+                    const dx = px - centerX;
+                    const dy = py - centerY;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    // Clamp to track range
+                    const clampedDist = Math.max(innerRadius, Math.min(outerRadius, dist));
+                    
+                    // Convert to depth (0.1 - 1.0)
+                    const newDepth = (clampedDist - innerRadius) / (outerRadius - innerRadius);
+                    setLiveSpikeDepth(newDepth);
+                    
+                    // Update spike position
+                    const newX = displayBubble.width / 2 + Math.cos(angle) * clampedDist;
+                    const newY = displayBubble.height / 2 + Math.sin(angle) * clampedDist;
+                    
+                    const currentPositions = bubble.spikePositions || explosionSpikes.map(s => ({ x: s.x, y: s.y }));
+                    const newPositions = [...currentPositions];
+                    newPositions[editingSpikeIndex] = { x: newX, y: newY };
+                    setLiveSpikePositions(newPositions);
+                  }}
+                  onDragEnd={() => {
+                    // Commit changes
+                    const currentPositions = bubble.spikePositions || [];
+                    const newPositions: Array<{ x: number; y: number }> = [];
+                    const livePositions = liveSpikePositions || explosionSpikes.map(s => ({ x: s.x, y: s.y }));
+                    
+                    for (let i = 0; i < bubble.spikeCount; i++) {
+                      if (i === editingSpikeIndex) {
+                        newPositions[i] = livePositions[i];
+                      } else {
+                        newPositions[i] = currentPositions[i] ?? explosionSpikes[i];
+                      }
+                    }
+                    
+                    setLiveSpikePositions(null);
+                    void executeCommand("updateBubble", {
+                      pageId: page.id,
+                      bubbleId: bubble.id,
+                      spikePositions: newPositions,
+                    });
+                  }}
+                />
+                {/* Close button */}
+                <Circle
+                  x={(displayBubble.x + displayBubble.width + 20) * scale}
+                  y={(displayBubble.y + 20) * scale}
+                  radius={10}
+                  fill="#666666"
+                  stroke="#ffffff"
+                  strokeWidth={2}
+                  onClick={() => {
+                    setEditingSpikeIndex(null);
+                    setLiveSpikeDepth(null);
+                  }}
+                />
+                <Text
+                  x={(displayBubble.x + displayBubble.width + 20) * scale - 4}
+                  y={(displayBubble.y + 20) * scale - 6}
+                  text="×"
+                  fontSize={14}
+                  fill="#ffffff"
+                  onClick={() => {
+                    setEditingSpikeIndex(null);
+                    setLiveSpikeDepth(null);
+                  }}
+                />
+                {/* Hint text */}
+                <Text
+                  x={(displayBubble.x + displayBubble.width + 35) * scale}
+                  y={(displayBubble.y + 15) * scale}
+                  text="拖动红点调整尖端深度，点击×退出"
+                  fontSize={12}
+                  fill="#666666"
+                />
+              </>
+            );
+          })()}
         </>
       ) : null}
     </>

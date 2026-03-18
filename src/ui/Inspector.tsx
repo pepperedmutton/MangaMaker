@@ -5,6 +5,42 @@ import { useI18n } from "../i18n/useI18n";
 import { LOCAL_FONTS } from "../platform/localFonts";
 import { useEditorStore } from "../state/editorStore";
 
+// Reusable range input with slider and number field
+const RangeInput = ({
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) => {
+  return (
+    <div className="range-input">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+    </div>
+  );
+};
+
 type InspectorProps = {
   page: Page | null;
   onExportProjectPdf: () => void;
@@ -215,14 +251,16 @@ const PanelInspector = ({
           </label>
           <label>
             <span>{t("common.borderWidth")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={0}
+              max={20}
+              step={1}
               value={panel.style.strokeWidth}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("setPanelStyle", {
                   pageId: page.id,
                   panelId: panel.id,
-                  strokeWidth: Number(event.target.value),
+                  strokeWidth: value,
                 })
               }
             />
@@ -576,16 +614,16 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
         <div className="field-grid">
           <label>
             <span>{t("inspector.strokeWidth")}</span>
-            <input
-              type="number"
+            <RangeInput
               min={0}
               max={10}
+              step={0.5}
               value={bubble.strokeWidth}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  strokeWidth: Number(event.target.value),
+                  strokeWidth: value,
                 })
               }
             />
@@ -726,6 +764,7 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
                   pageId: page.id,
                   bubbleId: bubble.id,
                   spikeDepths: [], // Reset to empty array, will use base spikeDepth
+                  spikePositions: [], // Reset positions too
                 })
               }
             >

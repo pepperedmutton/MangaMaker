@@ -168,6 +168,7 @@ export const bubbleSchema = z.object({
   spikeCount: z.number().int().min(4).max(16).default(8), // for explosion
   spikeDepth: z.number().min(0.2).max(0.8).default(0.5), // for explosion base depth
   spikeDepths: z.array(z.number().min(0.1).max(1)).optional(), // for explosion - individual spike depths
+  spikePositions: z.array(pointSchema).optional(), // for explosion - individual spike 2D positions (overrides depth calculation)
   activeSpikeIndex: z.number().int().min(-1).max(15).default(-1), // which spike is being dragged (-1 = none)
   jaggedness: z.number().min(2).max(12).default(6), // for jagged (number of zigzags per edge)
   thoughtCircles: z.number().int().min(2).max(5).default(3), // for thought (number of trailing circles)

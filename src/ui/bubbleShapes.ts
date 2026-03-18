@@ -2,7 +2,10 @@ import type { Bubble } from "../domain/schema";
 import { getBubbleBasePoints } from "../domain/helpers";
 
 // Generate bubble body path based on type
-export const getBubbleBodyPath = (bubble: Bubble): string => {
+export const getBubbleBodyPath = (
+  bubble: Bubble,
+  liveSpikePositions?: Array<{x: number, y: number}> | null,
+): string => {
   const w = bubble.width;
   const h = bubble.height;
   const r = bubble.cornerRadius;
@@ -56,22 +59,37 @@ export const getBubbleBodyPath = (bubble: Bubble): string => {
       const baseDepth = bubble.spikeDepth;
       const outerRadius = Math.min(w, h) * 0.48;
       const individualDepths = bubble.spikeDepths || [];
+      const individualPositions = bubble.spikePositions || [];
+      const useLive = liveSpikePositions && liveSpikePositions.length === spikes;
       let path = "";
       for (let i = 0; i < spikes * 2; i++) {
         const angle = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
-        let radius: number;
+        let px: number;
+        let py: number;
         if (i % 2 === 0) {
           // Outer point (spike tip)
           const spikeIndex = i / 2;
-          const spikeDepth = individualDepths[spikeIndex] ?? baseDepth;
-          radius = outerRadius * (0.3 + spikeDepth * 0.7);
+          if (useLive) {
+            // Use live dragged position directly
+            px = liveSpikePositions[spikeIndex].x;
+            py = liveSpikePositions[spikeIndex].y;
+          } else if (individualPositions[spikeIndex]) {
+            // Use saved individual 2D position
+            px = individualPositions[spikeIndex].x;
+            py = individualPositions[spikeIndex].y;
+          } else {
+            const spikeDepth = individualDepths[spikeIndex] ?? baseDepth;
+            const radius = outerRadius * (0.3 + spikeDepth * 0.7);
+            px = w * 0.5 + Math.cos(angle) * radius;
+            py = h * 0.5 + Math.sin(angle) * radius;
+          }
         } else {
           // Inner point (valley)
-          radius = outerRadius * 0.25;
+          const radius = outerRadius * 0.25;
+          px = w * 0.5 + Math.cos(angle) * radius;
+          py = h * 0.5 + Math.sin(angle) * radius;
         }
-        const x = w * 0.5 + Math.cos(angle) * radius;
-        const y = h * 0.5 + Math.sin(angle) * radius;
-        path += (i === 0 ? "M " : "L ") + `${x} ${y} `;
+        path += (i === 0 ? "M " : "L ") + `${px} ${py} `;
       }
       path += "Z";
       return path;
@@ -172,8 +190,24 @@ export const getThoughtCircles = (
 };
 
 // Get explosion bubble spike control points for dragging
-export const getExplosionSpikePoints = (bubble: Bubble): Array<{ x: number; y: number; index: number; angle: number }> => {
+export const getExplosionSpikePoints = (
+  bubble: Bubble,
+  livePositions?: Array<{x: number, y: number}> | null
+): Array<{ x: number; y: number; index: number; angle: number }> => {
   if (bubble.bubbleType !== "explosion") return [];
+  
+  // Use live positions if provided (during drag)
+  if (livePositions && livePositions.length === bubble.spikeCount) {
+    return livePositions.map((pos, i) => {
+      const angle = (i / bubble.spikeCount) * Math.PI * 2 - Math.PI / 2;
+      return {
+        x: pos.x,
+        y: pos.y,
+        index: i,
+        angle: (angle * 180) / Math.PI + 90,
+      };
+    });
+  }
   
   const spikes = bubble.spikeCount;
   const w = bubble.width;
@@ -181,20 +215,32 @@ export const getExplosionSpikePoints = (bubble: Bubble): Array<{ x: number; y: n
   const outerRadius = Math.min(w, h) * 0.48;
   const baseDepth = bubble.spikeDepth;
   const individualDepths = bubble.spikeDepths || [];
+  const individualPositions = bubble.spikePositions || [];
   
   const points: Array<{ x: number; y: number; index: number; angle: number }> = [];
   
   for (let i = 0; i < spikes; i++) {
     const angle = (i / spikes) * Math.PI * 2 - Math.PI / 2;
-    const spikeDepth = individualDepths[i] ?? baseDepth;
-    const radius = outerRadius * (0.3 + spikeDepth * 0.7);
     
-    points.push({
-      x: w * 0.5 + Math.cos(angle) * radius,
-      y: h * 0.5 + Math.sin(angle) * radius,
-      index: i,
-      angle: (angle * 180) / Math.PI + 90, // Convert to degrees, adjust to match tailBaseAngle convention
-    });
+    // Use saved individual position if available
+    if (individualPositions[i]) {
+      points.push({
+        x: individualPositions[i].x,
+        y: individualPositions[i].y,
+        index: i,
+        angle: (angle * 180) / Math.PI + 90,
+      });
+    } else {
+      const spikeDepth = individualDepths[i] ?? baseDepth;
+      const radius = outerRadius * (0.3 + spikeDepth * 0.7);
+      
+      points.push({
+        x: w * 0.5 + Math.cos(angle) * radius,
+        y: h * 0.5 + Math.sin(angle) * radius,
+        index: i,
+        angle: (angle * 180) / Math.PI + 90, // Convert to degrees, adjust to match tailBaseAngle convention
+      });
+    }
   }
   
   return points;

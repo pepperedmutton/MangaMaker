@@ -771,3 +771,51 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+/* Range input with slider and number field */
+.range-input {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.range-input input[type="range"] {
+  flex: 1;
+  min-width: 60px;
+  height: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--line);
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.range-input input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.range-input input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.range-input input[type="number"] {
+  width: 60px;
+  padding: 0.25rem 0.5rem;
+  text-align: center;
+}

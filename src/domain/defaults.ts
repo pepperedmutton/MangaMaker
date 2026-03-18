@@ -94,6 +94,7 @@ export const createDefaultBubble = (
   spikeCount: 8,
   spikeDepth: 0.5,
   spikeDepths: [],
+  spikePositions: [],
   activeSpikeIndex: -1,
   jaggedness: 6,
   thoughtCircles: 3,

@@ -669,8 +669,10 @@ test("pasting an image creates a new panel or replaces an existing one depending
 
   // Now create a manual panel elsewhere and paste over it
   await createPanelViaApi(page, { x: 400, y: 400, width: 200, height: 200 });
+  const canvasBox = await getCanvasBox(page);
+  const secondPanelCenter = await getPanelCanvasPoint(page, { panelIndex: 1 });
 
-  await page.evaluate(async () => {
+  await page.evaluate(async ({ pointerX, pointerY }) => {
     const canvasWrap = document.querySelector(".canvas-wrap");
     if (!canvasWrap) return;
 
@@ -683,8 +685,8 @@ test("pasting an image creates a new panel or replaces an existing one depending
     
     // Position over the second panel
     const pointerEvent = new PointerEvent("pointermove", {
-      clientX: canvasWrap.getBoundingClientRect().left + 500,
-      clientY: canvasWrap.getBoundingClientRect().top + 500,
+      clientX: pointerX,
+      clientY: pointerY,
       bubbles: true,
     });
     window.dispatchEvent(pointerEvent);
@@ -694,6 +696,9 @@ test("pasting an image creates a new panel or replaces an existing one depending
       bubbles: true,
     });
     window.dispatchEvent(pasteEvent);
+  }, {
+    pointerX: canvasBox.x + secondPanelCenter.x,
+    pointerY: canvasBox.y + secondPanelCenter.y,
   });
 
   // Verify the panel count is still 2, meaning it didn't create a third panel

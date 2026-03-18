@@ -355,6 +355,12 @@ describe("commandRegistry coverage", () => {
       direction: "vertical",
     });
 
+    const customSpikePositions = [
+      { x: 120, y: 52 },
+      { x: 160, y: 40 },
+      { x: 202, y: 66 },
+    ];
+
     const updatedBubble = await runCommand(harness, "updateBubble", {
       pageId: page.id,
       bubbleId: bubble.id,
@@ -365,6 +371,8 @@ describe("commandRegistry coverage", () => {
       tailTip: { x: 1300, y: -60 },
       text: "Updated dialogue",
       fontSize: 30,
+      bubbleType: "explosion",
+      spikePositions: customSpikePositions,
     });
     expect(updatedBubble).toMatchObject({
       x: 280,
@@ -373,9 +381,13 @@ describe("commandRegistry coverage", () => {
       height: 160,
       text: "Updated dialogue",
       fontSize: 30,
+      bubbleType: "explosion",
     });
     expect((updatedBubble as { tailTip: { x: number; y: number } }).tailTip.x).toBeGreaterThan(1200);
     expect((updatedBubble as { tailTip: { x: number; y: number } }).tailTip.y).toBeLessThan(0);
+    expect((updatedBubble as { spikePositions: Array<{ x: number; y: number }> }).spikePositions).toEqual(
+      customSpikePositions,
+    );
 
     const movedTextOutsidePage = await runCommand(harness, "updateText", {
       pageId: page.id,
