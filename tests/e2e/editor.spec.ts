@@ -891,7 +891,7 @@ test("text boxes support home-tab font controls and vertical text direction", as
 
   await page.locator(".ribbon-font-select").selectOption(nextFont);
   await page.locator(".ribbon-font-size").fill("48");
-  await page.locator(".ribbon-bar").getByRole("button", { name: "Vertical" }).click();
+  await page.locator(".right-sidebar").getByRole("button", { name: "Vertical" }).click();
 
   await expect
     .poll(() =>

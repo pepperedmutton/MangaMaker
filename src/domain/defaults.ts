@@ -1,4 +1,4 @@
-import type { Bubble, Page, PanelStyle, Point, Project, TextItem } from "./schema";
+import type { Bubble, Page, PanelStyle, Point, Project, ProjectType, TextItem } from "./schema";
 
 export const GRID_SIZE = 20;
 export const MIN_PANEL_SIZE = 160;
@@ -6,9 +6,13 @@ export const MIN_BUBBLE_WIDTH = 180;
 export const MIN_BUBBLE_HEIGHT = 120;
 export const MIN_TEXT_BOX_WIDTH = 100;
 export const MIN_TEXT_BOX_HEIGHT = 120;
-export const DEFAULT_PAGE_WIDTH = 1200;
-export const DEFAULT_PAGE_HEIGHT = 1700;
-export const WORKSPACE_PAGE_AREA_RATIO = 0.25;
+export const MANGA_PAGE_WIDTH = 1200;
+export const MANGA_PAGE_HEIGHT = 1700;
+export const CG_PAGE_WIDTH = 1200;
+export const CG_PAGE_HEIGHT = 1600;
+export const DEFAULT_PAGE_WIDTH = MANGA_PAGE_WIDTH;
+export const DEFAULT_PAGE_HEIGHT = MANGA_PAGE_HEIGHT;
+export const WORKSPACE_PAGE_AREA_RATIO = 0.125;
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 2;
 export const DEFAULT_ZOOM = 1;
@@ -33,19 +37,30 @@ export const createRectanglePanelPoints = (width: number, height: number): Point
   { x: 0, y: height },
 ];
 
-export const createBlankProject = (title = ""): Project => ({
+const getDefaultPageSize = (projectType: ProjectType) =>
+  projectType === "cg"
+    ? {
+        width: CG_PAGE_WIDTH,
+        height: CG_PAGE_HEIGHT,
+      }
+    : {
+        width: MANGA_PAGE_WIDTH,
+        height: MANGA_PAGE_HEIGHT,
+      };
+
+export const createBlankProject = (title = "", type: ProjectType = "manga"): Project => ({
   id: createId("project"),
   title,
+  type,
   createdAt: now(),
   updatedAt: now(),
   pages: [],
 });
 
-export const createDefaultPage = (index: number): Page => ({
+export const createDefaultPage = (index: number, projectType: ProjectType = "manga"): Page => ({
+  ...getDefaultPageSize(projectType),
   id: createId("page"),
   name: `Page ${index + 1}`,
-  width: DEFAULT_PAGE_WIDTH,
-  height: DEFAULT_PAGE_HEIGHT,
   background: "#ffffff",
   panels: [],
   texts: [],
@@ -64,7 +79,7 @@ export const createDefaultText = (
   fontSize: 36,
   fontFamily: "Georgia",
   color: "#121212",
-  direction: "horizontal",
+  direction: "vertical",
   textAlign: "left",
   verticalAlign: "top",
   ...overrides,
@@ -83,6 +98,7 @@ export const createDefaultBubble = (
   text: "Dialogue",
   fontSize: 26,
   fontFamily: "system-ui",
+  direction: "vertical",
   textAlign: "center",
   verticalAlign: "middle",
   bubbleType: "round",
@@ -129,12 +145,13 @@ export const clonePage = (page: Page): Page => {
   const bubbles = page.bubbles.map((bubble) => {
     const id = createId("bubble");
     bubbleIdMap.set(bubble.id, id);
-    return {
-      ...bubble,
-      id,
-      tailTip: { ...bubble.tailTip },
-    };
-  });
+  return {
+    ...bubble,
+    id,
+    tailTip: { ...bubble.tailTip },
+    ...(bubble.tailBase ? { tailBase: { ...bubble.tailBase } } : {}),
+  };
+});
 
   return {
     ...page,

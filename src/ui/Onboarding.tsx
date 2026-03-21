@@ -1,8 +1,11 @@
 import { useI18n } from "../i18n/useI18n";
+import type { ProjectType } from "../domain/schema";
 
 type FirstRunGuideProps = {
   title: string;
+  projectType: ProjectType;
   onTitleChange: (value: string) => void;
+  onProjectTypeChange: (value: ProjectType) => void;
   draftAvailable: boolean;
   projectCreated: boolean;
   onCreateProject: () => void;
@@ -12,7 +15,9 @@ type FirstRunGuideProps = {
 
 export const FirstRunGuide = ({
   title,
+  projectType,
   onTitleChange,
+  onProjectTypeChange,
   draftAvailable,
   projectCreated,
   onCreateProject,
@@ -36,6 +41,17 @@ export const FirstRunGuide = ({
               value={title}
               onChange={(event) => onTitleChange(event.target.value)}
             />
+          </label>
+          <label>
+            <span>{t("firstRun.projectType")}</span>
+            <select
+              aria-label={t("firstRun.projectType")}
+              value={projectType}
+              onChange={(event) => onProjectTypeChange(event.target.value as ProjectType)}
+            >
+              <option value="manga">{t("projectType.manga")}</option>
+              <option value="cg">{t("projectType.cg")}</option>
+            </select>
           </label>
           <div className="cta-row">
             <button className="primary-button" onClick={onCreateProject}>

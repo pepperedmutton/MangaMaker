@@ -11,17 +11,21 @@ import {
   Stage,
   Text,
 } from "react-konva";
-import { GRID_SIZE } from "../domain/defaults";
+import { CG_PAGE_HEIGHT, CG_PAGE_WIDTH, GRID_SIZE } from "../domain/defaults";
 import {
+  clampBubbleTailBaseLocalPoint,
   clampBubbleRectToWorkspace,
   getBubbleBasePoints,
+  getDisplayedContentByDirection,
   getDisplayedTextContent,
   getPageWorkspace,
   getPanelAbsolutePoints,
   getRenderableLayers,
   getSelectedObject,
+  getBubbleTailBaseLocalPoint,
   isPointInPolygon,
   panImageViewBox,
+  scaleBubbleLocalPoint,
   snapValue,
   zoomImageViewBox,
 } from "../domain/helpers";
@@ -29,7 +33,7 @@ import type { Bubble, Page, Panel, Point, Rect as PanelRect, TextItem } from "..
 import { useI18n } from "../i18n/useI18n";
 import { persistImportedImageForProject } from "../storage/projectFiles";
 import { useEditorStore } from "../state/editorStore";
-import { getBubbleBodyPath, getBubbleTailPath, getExplosionSpikePoints, getThoughtCircles } from "./bubbleShapes";
+import { getBubbleBodyPath, getBubbleTailPath, getExplosionSpikePoints } from "./bubbleShapes";
 
 type DraftShape =
   | {
@@ -97,6 +101,60 @@ type ResizeHandle =
 const HANDLE_SIZE = 8;
 const POINT_HANDLE_RADIUS = 7;
 const CONTEXT_MENU_WIDTH = 220;
+const EDGE_HANDLE_LENGTH = 34;
+const EDGE_HANDLE_THICKNESS = 10;
+const EDGE_AXIS_LOCK_ENTER_RATIO = 0.45;
+const EDGE_AXIS_LOCK_EXIT_RATIO = 0.75;
+
+const inferClipboardImageExtension = (mimeType: string | null) => {
+  if (!mimeType) {
+    return "png";
+  }
+  const [, subtype] = mimeType.split("/");
+  return subtype ? subtype.replace(/[^a-z0-9]/gi, "").toLowerCase() : "png";
+};
+
+const getClipboardImageFile = async (event: ClipboardEvent) => {
+  const clipboardData = event.clipboardData;
+  if (clipboardData) {
+    const itemFile = Array.from(clipboardData.items)
+      .find((item) => item.type.startsWith("image/"))
+      ?.getAsFile();
+    if (itemFile) {
+      return itemFile;
+    }
+
+    const fileEntry = Array.from(clipboardData.files).find((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (fileEntry) {
+      return fileEntry;
+    }
+  }
+
+  if (!window.navigator.clipboard?.read) {
+    return null;
+  }
+
+  try {
+    const clipboardItems = await window.navigator.clipboard.read();
+    for (const clipboardItem of clipboardItems) {
+      const imageType = clipboardItem.types.find((type) => type.startsWith("image/"));
+      if (!imageType) {
+        continue;
+      }
+      const blob = await clipboardItem.getType(imageType);
+      const extension = inferClipboardImageExtension(blob.type || imageType);
+      return new File([blob], `clipboard-image.${extension}`, {
+        type: blob.type || imageType,
+      });
+    }
+  } catch {
+    // Ignore clipboard read failures and fall through to null.
+  }
+
+  return null;
+};
 
 const useImageElement = (src: string | null | undefined) => {
   const [image, setImage] = useState<HTMLImageElement | null>(null);
@@ -619,9 +677,205 @@ const PanelNode = ({
   const [livePoints, setLivePoints] = useState<Point[] | null>(null);
   // Live rect for real-time preview during resize
   const [liveRect, setLiveRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Track edge drag state for edge-translation editing
+  const edgeDragStateRef = useRef<{
+    edgeIndex: number;
+    initialPoints: Point[];
+    initialX: number;
+    initialY: number;
+    initialPointerX: number;
+    initialPointerY: number;
+    lockMode: "x" | "y" | "free";
+    lastDeltaX: number;
+    lastDeltaY: number;
+  } | null>(null);
   const displayPoints = livePoints ?? panel.points;
   const displayRect = liveRect ?? { x: panel.x, y: panel.y, width: panel.width, height: panel.height };
   const clipPoints = displayPoints.flatMap((point) => [point.x * scale, point.y * scale]);
+
+  const translateEdgePoints = (
+    points: Point[],
+    edgeIndex: number,
+    deltaX: number,
+    deltaY: number,
+  ) => {
+    const nextIndex = (edgeIndex + 1) % points.length;
+    return points.map((entry, index) =>
+      index === edgeIndex || index === nextIndex
+        ? { x: entry.x + deltaX, y: entry.y + deltaY }
+        : entry,
+    );
+  };
+
+  const publishBoundaryPreviewForPoints = (points: Point[]) => {
+    const absolutePoints = points.map((point) => ({
+      x: panel.x + point.x,
+      y: panel.y + point.y,
+    }));
+    const xs = absolutePoints.map((point) => point.x);
+    const ys = absolutePoints.map((point) => point.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const maxX = Math.max(...xs);
+    const maxY = Math.max(...ys);
+    onBoundaryPreviewChange({
+      objectType: "panel",
+      objectId: panel.id,
+      rect: {
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+      },
+    });
+  };
+
+  const getAxisBiasedEdgeDelta = (
+    rawDeltaX: number,
+    rawDeltaY: number,
+    currentMode: "x" | "y" | "free",
+  ) => {
+    const absX = Math.abs(rawDeltaX);
+    const absY = Math.abs(rawDeltaY);
+    const dominantAxis = absX >= absY ? "x" : "y";
+    const dominantMagnitude = dominantAxis === "x" ? absX : absY;
+    const minorMagnitude = dominantAxis === "x" ? absY : absX;
+    const dominantMinorRatio =
+      dominantMagnitude > 0 ? minorMagnitude / dominantMagnitude : Number.POSITIVE_INFINITY;
+
+    let nextMode = currentMode;
+    if (currentMode === "free") {
+      if (dominantMinorRatio <= EDGE_AXIS_LOCK_ENTER_RATIO) {
+        nextMode = dominantAxis;
+      }
+    } else {
+      const currentMajorMagnitude = currentMode === "x" ? absX : absY;
+      const currentMinorMagnitude = currentMode === "x" ? absY : absX;
+      const currentMinorRatio =
+        currentMajorMagnitude > 0
+          ? currentMinorMagnitude / currentMajorMagnitude
+          : Number.POSITIVE_INFINITY;
+
+      if (currentMinorRatio >= EDGE_AXIS_LOCK_EXIT_RATIO) {
+        nextMode = "free";
+      } else if (dominantAxis !== currentMode && dominantMinorRatio <= EDGE_AXIS_LOCK_ENTER_RATIO) {
+        nextMode = dominantAxis;
+      }
+    }
+
+    if (nextMode === "x") {
+      return {
+        deltaX: snapValue(rawDeltaX),
+        deltaY: 0,
+        nextMode,
+      };
+    }
+    if (nextMode === "y") {
+      return {
+        deltaX: 0,
+        deltaY: snapValue(rawDeltaY),
+        nextMode,
+      };
+    }
+    return {
+      deltaX: snapValue(rawDeltaX),
+      deltaY: snapValue(rawDeltaY),
+      nextMode,
+    };
+  };
+
+  const handleEdgeDragStart = (
+    edgeIndex: number,
+    event: KonvaEventObject<MouseEvent>,
+  ) => {
+    isDraggingRef.current = true;
+    const target = event.target;
+    const pointer = target.getStage()?.getPointerPosition();
+    edgeDragStateRef.current = {
+      edgeIndex,
+      initialPoints: panel.points.map((entry) => ({ ...entry })),
+      initialX: target.x(),
+      initialY: target.y(),
+      initialPointerX: pointer?.x ?? target.x(),
+      initialPointerY: pointer?.y ?? target.y(),
+      lockMode: "free",
+      lastDeltaX: 0,
+      lastDeltaY: 0,
+    };
+    publishBoundaryPreviewForPoints(panel.points);
+  };
+
+  const handleEdgeDragMove = (event: KonvaEventObject<MouseEvent>) => {
+    const dragState = edgeDragStateRef.current;
+    if (!dragState) {
+      return;
+    }
+    const pointer = event.target.getStage()?.getPointerPosition();
+    if (!pointer) {
+      return;
+    }
+    const rawDeltaX = (pointer.x - dragState.initialPointerX) / scale;
+    const rawDeltaY = (pointer.y - dragState.initialPointerY) / scale;
+    const snappedDelta = getAxisBiasedEdgeDelta(
+      rawDeltaX,
+      rawDeltaY,
+      dragState.lockMode,
+    );
+    dragState.lockMode = snappedDelta.nextMode;
+    const { deltaX, deltaY } = snappedDelta;
+    dragState.lastDeltaX = deltaX;
+    dragState.lastDeltaY = deltaY;
+    const nextPoints = translateEdgePoints(
+      dragState.initialPoints,
+      dragState.edgeIndex,
+      deltaX,
+      deltaY,
+    );
+    setLivePoints(nextPoints);
+    publishBoundaryPreviewForPoints(nextPoints);
+  };
+
+  const handleEdgeDragEnd = (event: KonvaEventObject<MouseEvent>) => {
+    const dragState = edgeDragStateRef.current;
+    if (!dragState) {
+      return;
+    }
+    const target = event.target;
+    target.position({
+      x: dragState.initialX,
+      y: dragState.initialY,
+    });
+    const pointer = event.target.getStage()?.getPointerPosition();
+    const finalDelta =
+      pointer
+        ? getAxisBiasedEdgeDelta(
+            (pointer.x - dragState.initialPointerX) / scale,
+            (pointer.y - dragState.initialPointerY) / scale,
+            dragState.lockMode,
+          )
+        : {
+            deltaX: dragState.lastDeltaX,
+            deltaY: dragState.lastDeltaY,
+          };
+    const nextPoints = translateEdgePoints(
+      dragState.initialPoints,
+      dragState.edgeIndex,
+      finalDelta.deltaX,
+      finalDelta.deltaY,
+    );
+    edgeDragStateRef.current = null;
+    setLivePoints(null);
+    void executeCommand("setPanelPoints", {
+      pageId: page.id,
+      panelId: panel.id,
+      points: nextPoints,
+    }).finally(() => {
+      onBoundaryPreviewChange(null);
+    });
+    setTimeout(() => {
+      isDraggingRef.current = false;
+    }, 50);
+  };
   
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
     // Don't select if this click is the end of a drag operation
@@ -868,6 +1122,124 @@ const PanelNode = ({
             fillEnabled={false}
             listening={false}
           />
+          {displayPoints.map((point, edgeIndex) => {
+            const nextPoint = displayPoints[(edgeIndex + 1) % displayPoints.length];
+            const centerX = panel.x + (point.x + nextPoint.x) * 0.5;
+            const centerY = panel.y + (point.y + nextPoint.y) * 0.5;
+            const edgeAngle = (Math.atan2(nextPoint.y - point.y, nextPoint.x - point.x) * 180) / Math.PI;
+            return (
+              <Group key={`${panel.id}-edge-controls-${edgeIndex}`}>
+                <Line
+                  key={`${panel.id}-edge-drag-${edgeIndex}`}
+                  points={[
+                    (panel.x + point.x) * scale,
+                    (panel.y + point.y) * scale,
+                    (panel.x + nextPoint.x) * scale,
+                    (panel.y + nextPoint.y) * scale,
+                  ]}
+                  stroke="rgba(195,109,47,0.001)"
+                  strokeWidth={18}
+                  lineCap="round"
+                  draggable={activeTool === "select" && !showImagePreview}
+                  dragBoundFunc={(position) => {
+                    const dragState = edgeDragStateRef.current;
+                    if (!dragState || dragState.edgeIndex !== edgeIndex) {
+                      return {
+                        x: 0,
+                        y: 0,
+                      };
+                    }
+                    return {
+                      x: dragState.initialX,
+                      y: dragState.initialY,
+                    };
+                  }}
+                  onMouseEnter={(event) => {
+                    const stage = event.target.getStage();
+                    if (stage) {
+                      stage.container().style.cursor = "move";
+                    }
+                  }}
+                  onMouseLeave={(event) => {
+                    const stage = event.target.getStage();
+                    if (stage) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                  onMouseDown={(event) => {
+                    event.cancelBubble = true;
+                  }}
+                  onDragStart={(event) => {
+                    event.cancelBubble = true;
+                    handleEdgeDragStart(edgeIndex, event);
+                  }}
+                  onDragMove={(event) => {
+                    event.cancelBubble = true;
+                    handleEdgeDragMove(event);
+                  }}
+                  onDragEnd={(event) => {
+                    event.cancelBubble = true;
+                    handleEdgeDragEnd(event);
+                  }}
+                />
+                <Rect
+                  key={`${panel.id}-edge-handle-${edgeIndex}`}
+                  x={centerX * scale}
+                  y={centerY * scale}
+                  width={EDGE_HANDLE_LENGTH}
+                  height={EDGE_HANDLE_THICKNESS}
+                  offsetX={EDGE_HANDLE_LENGTH * 0.5}
+                  offsetY={EDGE_HANDLE_THICKNESS * 0.5}
+                  cornerRadius={EDGE_HANDLE_THICKNESS * 0.5}
+                  rotation={edgeAngle}
+                  fill="#ffffff"
+                  stroke="#c36d2f"
+                  strokeWidth={2}
+                  draggable={activeTool === "select"}
+                  dragBoundFunc={(position) => {
+                    const dragState = edgeDragStateRef.current;
+                    if (!dragState || dragState.edgeIndex !== edgeIndex) {
+                      return {
+                        x: centerX * scale,
+                        y: centerY * scale,
+                      };
+                    }
+                    return {
+                      x: dragState.initialX,
+                      y: dragState.initialY,
+                    };
+                  }}
+                  onMouseEnter={(event) => {
+                    const stage = event.target.getStage();
+                    if (stage) {
+                      stage.container().style.cursor = "move";
+                    }
+                  }}
+                  onMouseLeave={(event) => {
+                    const stage = event.target.getStage();
+                    if (stage) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                  onMouseDown={(event) => {
+                    event.cancelBubble = true;
+                  }}
+                  onDragStart={(event) => {
+                    event.cancelBubble = true;
+                    handleEdgeDragStart(edgeIndex, event);
+                  }}
+                  onDragMove={(event) => {
+                    event.cancelBubble = true;
+                    handleEdgeDragMove(event);
+                  }}
+                  onDragEnd={(event) => {
+                    event.cancelBubble = true;
+                    handleEdgeDragEnd(event);
+                  }}
+                />
+              </Group>
+            );
+          })}
           {!showImagePreview ? (
             <Circle
               x={(panel.x + panel.width * 0.5) * scale}
@@ -1188,7 +1560,6 @@ const BubbleNode = ({
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const activeTool = useEditorStore((state) => state.activeTool);
-  const base = getBubbleBasePoints(bubble);
 
   // Live spike positions for real-time preview during drag
   const [liveSpikePositions, setLiveSpikePositions] = useState<Array<{x: number, y: number}> | null>(null);
@@ -1198,6 +1569,8 @@ const BubbleNode = ({
   const [editingSpikeIndex, setEditingSpikeIndex] = useState<number | null>(null);
   // Live spike depth for individual spike editing
   const [liveSpikeDepth, setLiveSpikeDepth] = useState<number | null>(null);
+  // Live tail connection point preview (bubble-local coordinates)
+  const [liveTailBase, setLiveTailBase] = useState<Point | null>(null);
   
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
     event.cancelBubble = true;
@@ -1213,22 +1586,38 @@ const BubbleNode = ({
     liveRect && bubble.bubbleType === "explosion"
       ? scaleExplosionSpikePositions(bubble.spikePositions, bubble, liveRect)
       : [];
+  const previewTailBase =
+    liveTailBase ??
+    (liveRect
+      ? scaleBubbleLocalPoint(
+          getBubbleTailBaseLocalPoint(bubble),
+          bubble.width,
+          bubble.height,
+          liveRect.width,
+          liveRect.height,
+        )
+      : getBubbleTailBaseLocalPoint(bubble));
   const displayBubble = liveRect
     ? {
         ...bubble,
         ...liveRect,
+        tailBase: previewTailBase,
         ...(previewSpikePositions.length > 0 ? { spikePositions: previewSpikePositions } : {}),
       }
-    : bubble;
+    : {
+        ...bubble,
+        tailBase: previewTailBase,
+      };
 
   const bodyPath = getBubbleBodyPath(displayBubble, liveSpikePositions);
   const tailPath = getBubbleTailPath(displayBubble);
-  const thoughtCircles = displayBubble.bubbleType === "thought" ? getThoughtCircles(displayBubble) : [];
   const explosionSpikes = displayBubble.bubbleType === "explosion" ? getExplosionSpikePoints(displayBubble, liveSpikePositions) : [];
+  const displayBubbleText = getDisplayedContentByDirection(displayBubble.text, displayBubble.direction);
   // When strokeWidth is 0, don't render stroke at all
   const hasStroke = displayBubble.strokeWidth > 0;
   const strokeColor = selected ? "#c36d2f" : (hasStroke ? bubble.strokeColor : undefined);
   const padding = 24;
+  const tailBaseHandle = getBubbleBasePoints(displayBubble).center;
 
   return (
     <>
@@ -1262,6 +1651,19 @@ const BubbleNode = ({
           });
         }}
       >
+        {/* Regular tail first, then body on top for a seamless border join */}
+        {displayBubble.bubbleType !== "thought" && displayBubble.bubbleType !== "explosion" ? (
+          <Path
+            data={tailPath}
+            fill={displayBubble.backgroundColor}
+            stroke={strokeColor}
+            strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
+            lineCap="round"
+            lineJoin="round"
+            scaleX={scale}
+            scaleY={scale}
+          />
+        ) : null}
         {/* Bubble body */}
         <Path
           data-testid="bubble-body"
@@ -1269,61 +1671,58 @@ const BubbleNode = ({
           fill={displayBubble.backgroundColor}
           stroke={strokeColor}
           strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
+          lineCap="round"
+          lineJoin="round"
           scaleX={scale}
           scaleY={scale}
         />
-        {/* Bubble tail - regular tail, thought circles, or explosion spikes (none for explosion) */}
-        {displayBubble.bubbleType === "thought" ? (() => {
-          const base = getBubbleBasePoints(displayBubble);
-          const tailTipX = (displayBubble.tailTip.x - displayBubble.x) * scale;
-          const tailTipY = (displayBubble.tailTip.y - displayBubble.y) * scale;
-          const tailBaseX = (base.center.x - displayBubble.x) * scale;
-          const tailBaseY = (base.center.y - displayBubble.y) * scale;
-          
-          const circles = [];
-          const numCircles = displayBubble.thoughtCircles ?? 3;
-          
-          for (let i = 0; i < numCircles; i++) {
-            const t = (i + 1) / (numCircles + 1);
-            const cx = tailBaseX + (tailTipX - tailBaseX) * t;
-            const cy = tailBaseY + (tailTipY - tailBaseY) * t;
-            const radius = Math.max(4 * scale, (12 - i * 2) * scale);
-            
-            circles.push(
-              <Circle
-                key={`thought-circle-${i}`}
-                x={cx}
-                y={cy}
-                radius={radius}
-                fill={displayBubble.backgroundColor}
-                stroke={strokeColor}
-                strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
-              />
-            );
-          }
-          return circles;
-        })() : displayBubble.bubbleType !== "explosion" ? (
-          <Path
-            data={tailPath}
-            fill={displayBubble.backgroundColor}
-            stroke={strokeColor}
-            strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
-            scaleX={scale}
-            scaleY={scale}
-          />
-        ) : null}
+        {/* Thought bubble tail circles render above body */}
+        {displayBubble.bubbleType === "thought"
+          ? (() => {
+              const base = getBubbleBasePoints(displayBubble);
+              const tailTipX = (displayBubble.tailTip.x - displayBubble.x) * scale;
+              const tailTipY = (displayBubble.tailTip.y - displayBubble.y) * scale;
+              const tailBaseX = (base.center.x - displayBubble.x) * scale;
+              const tailBaseY = (base.center.y - displayBubble.y) * scale;
+
+              const circles = [];
+              const numCircles = displayBubble.thoughtCircles ?? 3;
+
+              for (let i = 0; i < numCircles; i++) {
+                const t = (i + 1) / (numCircles + 1);
+                const cx = tailBaseX + (tailTipX - tailBaseX) * t;
+                const cy = tailBaseY + (tailTipY - tailBaseY) * t;
+                const radius = Math.max(4 * scale, (12 - i * 2) * scale);
+
+                circles.push(
+                  <Circle
+                    key={`thought-circle-${i}`}
+                    x={cx}
+                    y={cy}
+                    radius={radius}
+                    fill={displayBubble.backgroundColor}
+                    stroke={strokeColor}
+                    strokeWidth={hasStroke ? displayBubble.strokeWidth : 0}
+                  />
+                );
+              }
+              return circles;
+            })()
+          : null}
         {/* Text */}
         <Text
           x={padding * scale}
           y={padding * scale}
           width={(displayBubble.width - padding * 2) * scale}
           height={(displayBubble.height - padding * 2) * scale}
-          text={displayBubble.text}
+          text={displayBubbleText}
           fontSize={displayBubble.fontSize * scale}
           fontFamily={displayBubble.fontFamily}
           fill="#111111"
           align={displayBubble.textAlign}
           verticalAlign={displayBubble.verticalAlign}
+          wrap={displayBubble.direction === "vertical" ? "char" : "word"}
+          lineHeight={displayBubble.direction === "vertical" ? 1.1 : 1.35}
         />
       </Group>
 
@@ -1494,6 +1893,51 @@ const BubbleNode = ({
               }}
             />
           )}
+          {displayBubble.bubbleType !== "explosion" ? (
+            <Circle
+              x={tailBaseHandle.x * scale}
+              y={tailBaseHandle.y * scale}
+              radius={7}
+              fill="#ffffff"
+              stroke="#c36d2f"
+              strokeWidth={2}
+              draggable
+              onMouseDown={(event) => {
+                event.cancelBubble = true;
+              }}
+              onDragStart={(event) => {
+                const target = event.target;
+                target.setAttr("initialX", target.x());
+                target.setAttr("initialY", target.y());
+              }}
+              onDragMove={(event) => {
+                const target = event.target;
+                const nextTailBase = clampBubbleTailBaseLocalPoint(displayBubble, {
+                  x: target.x() / scale - displayBubble.x,
+                  y: target.y() / scale - displayBubble.y,
+                });
+                setLiveTailBase(nextTailBase);
+              }}
+              onDragEnd={(event) => {
+                const target = event.target;
+                const initialX = target.getAttr("initialX");
+                const initialY = target.getAttr("initialY");
+                const nextTailBase = clampBubbleTailBaseLocalPoint(displayBubble, {
+                  x: target.x() / scale - displayBubble.x,
+                  y: target.y() / scale - displayBubble.y,
+                });
+                target.position({ x: initialX, y: initialY });
+                target.setAttr("initialX", undefined);
+                target.setAttr("initialY", undefined);
+                setLiveTailBase(null);
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  tailBase: nextTailBase,
+                });
+              }}
+            />
+          ) : null}
           {/* Single spike depth editor - shown when a spike is selected for editing */}
           {displayBubble.bubbleType === "explosion" && editingSpikeIndex !== null && (() => {
             const spike = explosionSpikes[editingSpikeIndex];
@@ -1645,6 +2089,8 @@ export const CanvasView = ({
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const projectId = useEditorStore((state) => state.project.id);
+  const projectTitle = useEditorStore((state) => state.project.title);
+  const projectType = useEditorStore((state) => state.project.type);
   const selection = useEditorStore((state) => state.selection);
   const activeTool = useEditorStore((state) => state.activeTool);
   const zoom = useEditorStore((state) => state.zoom);
@@ -1748,69 +2194,121 @@ export const CanvasView = ({
     };
 
     const handlePaste = (event: ClipboardEvent) => {
-      const items = event.clipboardData?.items;
-      if (!items) {
+      const clipboardData = event.clipboardData;
+      const hasImageInClipboardData = Boolean(
+        clipboardData &&
+          (Array.from(clipboardData.items).some((item) => item.type.startsWith("image/")) ||
+            Array.from(clipboardData.files).some((file) => file.type.startsWith("image/"))),
+      );
+      if (!hasImageInClipboardData && !window.navigator.clipboard?.read) {
         return;
       }
-      for (const item of items) {
-        if (item.type.startsWith("image/")) {
-          const file = item.getAsFile();
-          if (!file) {
-            continue;
-          }
-          const wrapperRect = wrapperRef.current?.getBoundingClientRect();
-          if (!wrapperRect || !lastPointerRef.current) {
-            continue;
-          }
-          
-          const stageX = lastPointerRef.current.clientX - wrapperRect.left;
-          const stageY = lastPointerRef.current.clientY - wrapperRect.top;
-          
-          const pageX = (stageX - pageCanvasOrigin.x) / scale;
-          const pageY = (stageY - pageCanvasOrigin.y) / scale;
-          const pointerPoint = { x: pageX, y: pageY };
-
-          const targetPanel = [...page.panels].reverse().find((panel) => {
-            const polygon = getPanelAbsolutePoints(panel);
-            return isPointInPolygon(pointerPoint, polygon);
-          });
-
-          void (async () => {
-            let src = URL.createObjectURL(file);
-            try {
-              src = await persistImportedImageForProject(projectId, file);
-            } catch (error) {
-              console.warn("Failed to persist pasted image; using session blob URL.", error);
-            }
-            if (targetPanel) {
-              await executeCommand("placeImageInPanel", {
-                pageId: page.id,
-                panelId: targetPanel.id,
-                src,
-                prompt: file.name,
-              });
-              return;
-            }
-            const newPanel = (await executeCommand("createPanel", {
-              pageId: page.id,
-              x: pointerPoint.x - 200,
-              y: pointerPoint.y - 150,
-              width: 400,
-              height: 300,
-            })) as Panel | null;
-            if (newPanel) {
-              await executeCommand("placeImageInPanel", {
-                pageId: page.id,
-                panelId: newPanel.id,
-                src,
-                prompt: file.name,
-              });
-            }
-          })();
-          event.preventDefault();
-          break;
-        }
+      if (hasImageInClipboardData) {
+        event.preventDefault();
       }
+
+      const selectedPanel =
+        selection?.pageId === page.id && selection.objectType === "panel"
+          ? page.panels.find((panel) => panel.id === selection.objectId) ?? null
+          : null;
+
+      const wrapperRect = wrapperRef.current?.getBoundingClientRect() ?? null;
+      const pointerPoint =
+        wrapperRect && lastPointerRef.current
+          ? {
+              x: Math.max(
+                0,
+                Math.min(
+                  page.width,
+                  (lastPointerRef.current.clientX - wrapperRect.left - pageCanvasOrigin.x) / scale,
+                ),
+              ),
+              y: Math.max(
+                0,
+                Math.min(
+                  page.height,
+                  (lastPointerRef.current.clientY - wrapperRect.top - pageCanvasOrigin.y) / scale,
+                ),
+              ),
+            }
+          : null;
+
+      const topToBottomPanels = getRenderableLayers(page)
+        .flatMap((entry) => (entry.objectType === "panel" ? [entry.object] : []))
+        .reverse();
+      const hoveredPanel = pointerPoint
+        ? topToBottomPanels.find((panel) =>
+            isPointInPolygon(pointerPoint, getPanelAbsolutePoints(panel)),
+          ) ?? null
+        : null;
+
+      const targetPanel = selectedPanel ?? hoveredPanel;
+      const anchorPoint = pointerPoint ?? {
+        x: page.width * 0.5,
+        y: page.height * 0.5,
+      };
+
+      void (async () => {
+        const file = await getClipboardImageFile(event);
+        if (!file) {
+          return;
+        }
+        let src = "";
+        try {
+          src = await persistImportedImageForProject(projectId, projectTitle, file);
+        } catch (error) {
+          console.warn("Failed to persist pasted image into project assets; paste aborted.", error);
+          return;
+        }
+        if (projectType === "cg") {
+          const fullStagePanel = (await executeCommand("createPanel", {
+            pageId: page.id,
+            x: Math.max(0, (page.width - Math.min(page.width, CG_PAGE_WIDTH)) * 0.5),
+            y: Math.max(0, (page.height - Math.min(page.height, CG_PAGE_HEIGHT)) * 0.5),
+            width: Math.min(page.width, CG_PAGE_WIDTH),
+            height: Math.min(page.height, CG_PAGE_HEIGHT),
+          })) as Panel | null;
+          if (fullStagePanel) {
+            await executeCommand("placeImageInPanel", {
+              pageId: page.id,
+              panelId: fullStagePanel.id,
+              src,
+              prompt: file.name,
+            });
+          }
+          return;
+        }
+        if (targetPanel) {
+          await executeCommand("placeImageInPanel", {
+            pageId: page.id,
+            panelId: targetPanel.id,
+            src,
+            prompt: file.name,
+          });
+          return;
+        }
+
+        const defaultWidth = 400;
+        const defaultHeight = 300;
+        const newPanel = (await executeCommand("createPanel", {
+          pageId: page.id,
+          x: Math.max(0, Math.min(page.width - defaultWidth, anchorPoint.x - defaultWidth * 0.5)),
+          y: Math.max(
+            0,
+            Math.min(page.height - defaultHeight, anchorPoint.y - defaultHeight * 0.5),
+          ),
+          width: defaultWidth,
+          height: defaultHeight,
+        })) as Panel | null;
+        if (newPanel) {
+          await executeCommand("placeImageInPanel", {
+            pageId: page.id,
+            panelId: newPanel.id,
+            src,
+            prompt: file.name,
+          });
+        }
+      })();
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -1819,7 +2317,7 @@ export const CanvasView = ({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("paste", handlePaste);
     };
-  }, [page, scale, pageCanvasOrigin, executeCommand, projectId]);
+  }, [page, scale, pageCanvasOrigin, executeCommand, projectId, projectTitle, projectType, selection]);
 
   const selectedObject = getSelectedObject(page, selection);
   const selectedImagePanel =

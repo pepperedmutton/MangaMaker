@@ -8,7 +8,17 @@ import {
   WORKSPACE_PAGE_AREA_RATIO,
   createRectanglePanelPoints,
 } from "./defaults";
-import type { Bubble, ObjectType, Page, Panel, Point, Project, Rect, TextItem } from "./schema";
+import type {
+  Bubble,
+  ObjectType,
+  Page,
+  Panel,
+  Point,
+  Project,
+  Rect,
+  TextDirection,
+  TextItem,
+} from "./schema";
 import type { EditorSelection } from "../state/types";
 
 type RenderableLayer =
@@ -110,6 +120,177 @@ export const shiftBubbleTail = (bubble: Bubble, deltaX: number, deltaY: number):
   },
 });
 
+const getBubbleLocalCenter = (bubble: Pick<Bubble, "width" | "height">) => ({
+  x: bubble.width * 0.5,
+  y: bubble.height * 0.5,
+});
+
+const getBubbleLocalBoundaryPoint = (
+  bubble: Pick<
+    Bubble,
+    | "width"
+    | "height"
+    | "bubbleType"
+    | "spikeDepth"
+    | "spikeCount"
+    | "tailBaseAngle"
+  >,
+  target: Point,
+) => {
+  const center = getBubbleLocalCenter(bubble);
+  const dx = target.x - center.x;
+  const dy = target.y - center.y;
+  if (Math.abs(dx) < 0.0001 && Math.abs(dy) < 0.0001) {
+    return center;
+  }
+
+  let scale: number;
+  switch (bubble.bubbleType) {
+    case "ellipse":
+    case "oval": {
+      const radiusX = bubble.width * 0.5;
+      const radiusY = bubble.height * 0.5;
+      scale =
+        1 /
+        Math.sqrt(
+          (dx * dx) / Math.max(radiusX * radiusX, 0.0001) +
+            (dy * dy) / Math.max(radiusY * radiusY, 0.0001),
+        );
+      break;
+    }
+    case "bubbleRound": {
+      const radius = Math.min(bubble.width, bubble.height) * 0.5;
+      scale = radius / Math.max(Math.hypot(dx, dy), 0.0001);
+      break;
+    }
+    case "cloud":
+    case "thought": {
+      const radiusX = bubble.width * 0.425;
+      const radiusY = bubble.height * 0.425;
+      scale =
+        1 /
+        Math.sqrt(
+          (dx * dx) / Math.max(radiusX * radiusX, 0.0001) +
+            (dy * dy) / Math.max(radiusY * radiusY, 0.0001),
+        );
+      break;
+    }
+    case "explosion": {
+      const radius = Math.min(bubble.width, bubble.height) * 0.48;
+      scale = radius / Math.max(Math.hypot(dx, dy), 0.0001);
+      break;
+    }
+    case "jagged": {
+      scale = Math.min(
+        (bubble.width * 0.48) / Math.max(Math.abs(dx), 0.0001),
+        (bubble.height * 0.48) / Math.max(Math.abs(dy), 0.0001),
+      );
+      break;
+    }
+    case "round":
+    case "roundedSquare":
+    case "square":
+    default: {
+      scale = Math.min(
+        (bubble.width * 0.5) / Math.max(Math.abs(dx), 0.0001),
+        (bubble.height * 0.5) / Math.max(Math.abs(dy), 0.0001),
+      );
+      break;
+    }
+  }
+
+  return {
+    x: center.x + dx * scale,
+    y: center.y + dy * scale,
+  };
+};
+
+const getLegacyBubbleTailBaseLocalPoint = (
+  bubble: Pick<
+    Bubble,
+    | "width"
+    | "height"
+    | "bubbleType"
+    | "spikeDepth"
+    | "spikeCount"
+    | "tailBaseAngle"
+  >,
+) => {
+  const center = getBubbleLocalCenter(bubble);
+  const angleRad = ((bubble.tailBaseAngle - 90) * Math.PI) / 180;
+  return getBubbleLocalBoundaryPoint(bubble, {
+    x: center.x + Math.cos(angleRad),
+    y: center.y + Math.sin(angleRad),
+  });
+};
+
+export const getBubbleTailBaseLocalPoint = (
+  bubble: Pick<
+    Bubble,
+    | "width"
+    | "height"
+    | "bubbleType"
+    | "spikeDepth"
+    | "spikeCount"
+    | "tailBaseAngle"
+    | "tailBase"
+  >,
+) => (bubble.tailBase ? { ...bubble.tailBase } : getLegacyBubbleTailBaseLocalPoint(bubble));
+
+export const clampBubbleTailBaseLocalPoint = (
+  bubble: Pick<
+    Bubble,
+    | "width"
+    | "height"
+    | "bubbleType"
+    | "spikeDepth"
+    | "spikeCount"
+    | "tailBaseAngle"
+  >,
+  point: Point,
+) => {
+  const clampedPoint = {
+    x: clamp(point.x, 0, bubble.width),
+    y: clamp(point.y, 0, bubble.height),
+  };
+  const center = getBubbleLocalCenter(bubble);
+  const boundary = getBubbleLocalBoundaryPoint(bubble, clampedPoint);
+  const currentDistance = Math.hypot(clampedPoint.x - center.x, clampedPoint.y - center.y);
+  const boundaryDistance = Math.hypot(boundary.x - center.x, boundary.y - center.y);
+  if (currentDistance <= boundaryDistance * 0.98 || boundaryDistance < 0.0001) {
+    return clampedPoint;
+  }
+  const ratio = (boundaryDistance * 0.98) / currentDistance;
+  return {
+    x: center.x + (clampedPoint.x - center.x) * ratio,
+    y: center.y + (clampedPoint.y - center.y) * ratio,
+  };
+};
+
+export const scaleBubbleLocalPoint = (
+  point: Point,
+  previousWidth: number,
+  previousHeight: number,
+  nextWidth: number,
+  nextHeight: number,
+) => ({
+  x: point.x * (nextWidth / Math.max(previousWidth, 0.0001)),
+  y: point.y * (nextHeight / Math.max(previousHeight, 0.0001)),
+});
+
+export const getBubbleTailBaseAngleFromLocalPoint = (
+  bubble: Pick<Bubble, "width" | "height" | "tailBaseAngle">,
+  point: Point,
+) => {
+  const center = getBubbleLocalCenter(bubble);
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  if (Math.abs(dx) < 0.0001 && Math.abs(dy) < 0.0001) {
+    return bubble.tailBaseAngle;
+  }
+  return (((Math.atan2(dy, dx) * 180) / Math.PI + 90) % 360 + 360) % 360;
+};
+
 export const getPageById = (project: Project, pageId: string) => {
   const page = project.pages.find((entry) => entry.id === pageId);
   if (!page) {
@@ -170,119 +351,42 @@ export const getRenderableLayers = (page: Page): RenderableLayer[] =>
     .filter(isRenderableLayer);
 
 export const getBubbleBasePoints = (bubble: Bubble) => {
-  const centerX = bubble.x + bubble.width * 0.5;
-  const centerY = bubble.y + bubble.height * 0.5;
-  const angleRad = ((bubble.tailBaseAngle - 90) * Math.PI) / 180;
-  
-  // Calculate the point on the bubble edge based on angle and bubble type
-  const getEdgePoint = (angle: number) => {
-    const rad = ((angle - 90) * Math.PI) / 180;
-    const dx = Math.cos(rad);
-    const dy = Math.sin(rad);
-    
-    let scale: number;
-    
-    switch (bubble.bubbleType) {
-      case "ellipse":
-        // Ellipse boundary: (x/a)^2 + (y/b)^2 = 1
-        scale = Math.min(
-          (bubble.width / 2) / Math.abs(dx || 0.001),
-          (bubble.height / 2) / Math.abs(dy || 0.001)
-        );
-        break;
-        
-      case "bubbleRound":
-        // Circle boundary
-        const radius = Math.min(bubble.width, bubble.height) * 0.5;
-        scale = radius / Math.sqrt(dx * dx + dy * dy);
-        break;
-        
-      case "oval":
-        // Similar to ellipse but taller
-        scale = Math.min(
-          (bubble.width * 0.5) / Math.abs(dx || 0.001),
-          (bubble.height * 0.5) / Math.abs(dy || 0.001)
-        );
-        break;
-        
-      case "cloud":
-      case "thought": {
-        // Cloud shapes extend slightly beyond bounding box
-        const cloudScale = 0.85; // Cloud fills about 85% of bounding box
-        scale = Math.min(
-          (bubble.width * cloudScale / 2) / Math.abs(dx || 0.001),
-          (bubble.height * cloudScale / 2) / Math.abs(dy || 0.001)
-        );
-        break;
-      }
-      
-      case "explosion": {
-        // Explosion shape uses outerRadius = min(w, h) * 0.48
-        // The outer points are at distance 0.48 * min(w, h) from center
-        // We need to find where the ray at given angle intersects the star shape
-        const outerRadius = Math.min(bubble.width, bubble.height) * 0.48;
-        const innerRadius = outerRadius * (1 - bubble.spikeDepth);
-        const spikes = bubble.spikeCount;
-        
-        // Calculate which spike segment this angle falls into
-        const angleDeg = bubble.tailBaseAngle;
-        const spikeAngle = 360 / (spikes * 2); // Angle per point (outer and inner)
-        const normalizedAngle = ((angleDeg % 360) + 360) % 360;
-        const segmentIndex = Math.floor(normalizedAngle / spikeAngle);
-        const isOuter = segmentIndex % 2 === 0;
-        
-        // For simplicity, use the outer radius as the boundary
-        // The tail will be slightly inside the outermost points
-        scale = outerRadius / Math.sqrt(dx * dx + dy * dy);
-        break;
-      }
-      
-      case "jagged":
-        // Jagged shape stays close to rectangle but with zigzag
-        scale = Math.min(
-          (bubble.width * 0.48) / Math.abs(dx || 0.001),
-          (bubble.height * 0.48) / Math.abs(dy || 0.001)
-        );
-        break;
-        
-      case "round":
-      case "roundedSquare":
-      case "square":
-      default: {
-        // Rectangle with optional rounding - use standard rectangle intersection
-        scale = Math.min(
-          (bubble.width / 2) / Math.abs(dx || 0.001),
-          (bubble.height / 2) / Math.abs(dy || 0.001)
-        );
-        break;
-      }
-    }
-    
-    return {
-      x: centerX + dx * scale,
-      y: centerY + dy * scale,
-    };
+  const centerLocal = getBubbleTailBaseLocalPoint(bubble);
+  const center = {
+    x: bubble.x + centerLocal.x,
+    y: bubble.y + centerLocal.y,
   };
-  
-  // Calculate tail base points perpendicular to the angle
-  const perpAngle1 = bubble.tailBaseAngle + 90;
-  const perpAngle2 = bubble.tailBaseAngle - 90;
-  const perpRad1 = ((perpAngle1 - 90) * Math.PI) / 180;
-  const perpRad2 = ((perpAngle2 - 90) * Math.PI) / 180;
-  const halfWidth = bubble.tailWidth / 2;
-  
-  const edgePoint = getEdgePoint(bubble.tailBaseAngle);
-  
+  let directionX = bubble.tailTip.x - center.x;
+  let directionY = bubble.tailTip.y - center.y;
+  if (Math.abs(directionX) < 0.0001 && Math.abs(directionY) < 0.0001) {
+    const fallbackAngleRad = ((bubble.tailBaseAngle - 90) * Math.PI) / 180;
+    directionX = Math.cos(fallbackAngleRad);
+    directionY = Math.sin(fallbackAngleRad);
+  }
+  const length = Math.max(Math.hypot(directionX, directionY), 0.0001);
+  const perpendicularX = -directionY / length;
+  const perpendicularY = directionX / length;
+  const halfWidth = bubble.tailWidth * 0.5;
+
+  const leftLocal = clampBubbleTailBaseLocalPoint(bubble, {
+    x: centerLocal.x + perpendicularX * halfWidth,
+    y: centerLocal.y + perpendicularY * halfWidth,
+  });
+  const rightLocal = clampBubbleTailBaseLocalPoint(bubble, {
+    x: centerLocal.x - perpendicularX * halfWidth,
+    y: centerLocal.y - perpendicularY * halfWidth,
+  });
+
   return {
     left: {
-      x: edgePoint.x + Math.cos(perpRad1) * halfWidth,
-      y: edgePoint.y + Math.sin(perpRad1) * halfWidth,
+      x: bubble.x + leftLocal.x,
+      y: bubble.y + leftLocal.y,
     },
     right: {
-      x: edgePoint.x + Math.cos(perpRad2) * halfWidth,
-      y: edgePoint.y + Math.sin(perpRad2) * halfWidth,
+      x: bubble.x + rightLocal.x,
+      y: bubble.y + rightLocal.y,
     },
-    center: edgePoint,
+    center,
   };
 };
 
@@ -521,8 +625,11 @@ export const getVerticalTextLines = (content: string) =>
     .map((line) => line.split("").join("\n"))
     .join("\n\n");
 
-export const getDisplayedTextContent = (text: TextItem) =>
-  text.direction === "vertical" ? getVerticalTextLines(text.content) : text.content;
+export const getDisplayedContentByDirection = (content: string, direction: TextDirection) =>
+  direction === "vertical" ? getVerticalTextLines(content) : content;
+
+export const getDisplayedTextContent = (text: Pick<TextItem, "content" | "direction">) =>
+  getDisplayedContentByDirection(text.content, text.direction);
 
 export const getOnboardingStep = (project: Project, lastExportKind: string | null) => {
   const hasProject = project.title.trim().length > 0;

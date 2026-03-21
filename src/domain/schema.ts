@@ -126,7 +126,7 @@ export const textItemSchema = z.object({
   fontSize: z.number().positive(),
   fontFamily: z.string(),
   color: z.string(),
-  direction: textDirectionSchema.default("horizontal"),
+  direction: textDirectionSchema.default("vertical"),
   textAlign: textAlignSchema.default("left"),
   verticalAlign: verticalAlignSchema.default("top"),
 });
@@ -150,13 +150,15 @@ export const bubbleSchema = z.object({
   y: z.number(),
   width: z.number().positive(),
   height: z.number().positive(),
-  // Tail configuration - tail can be attached to any point on bubble edge
+  // Tail configuration - tail can be attached to any point inside the bubble body
   tailTip: pointSchema,
+  tailBase: pointSchema.optional(), // Local point inside the bubble body where the tail connects
   tailBaseAngle: z.number().default(90), // 0-360 degrees, default 90 (bottom)
   tailWidth: z.number().positive().default(24), // Width of tail at base
   text: z.string(),
   fontSize: z.number().positive(),
   fontFamily: z.string().default("system-ui"),
+  direction: textDirectionSchema.default("vertical"),
   textAlign: textAlignSchema.default("center"),
   verticalAlign: verticalAlignSchema.default("middle"),
   bubbleType: bubbleTypeSchema.default("round"),
@@ -176,6 +178,7 @@ export const bubbleSchema = z.object({
 });
 
 export const objectTypeSchema = z.enum(["panel", "text", "bubble"]);
+export const projectTypeSchema = z.enum(["manga", "cg"]);
 
 export const pageSchema = z.object({
   id: z.string(),
@@ -192,6 +195,7 @@ export const pageSchema = z.object({
 export const projectSchema = z.object({
   id: z.string(),
   title: z.string(),
+  type: projectTypeSchema.default("manga"),
   createdAt: z.string(),
   updatedAt: z.string(),
   pages: z.array(pageSchema),
@@ -207,5 +211,6 @@ export type TextItem = z.infer<typeof textItemSchema>;
 export type Bubble = z.infer<typeof bubbleSchema>;
 export type BubbleType = z.infer<typeof bubbleTypeSchema>;
 export type ObjectType = z.infer<typeof objectTypeSchema>;
+export type ProjectType = z.infer<typeof projectTypeSchema>;
 export type Page = z.infer<typeof pageSchema>;
 export type Project = z.infer<typeof projectSchema>;

@@ -1,4 +1,14 @@
-import { getSelectedObject } from "../domain/helpers";
+import {
+  getPageWorkspace,
+  getSelectedObject,
+} from "../domain/helpers";
+import {
+  MIN_BUBBLE_HEIGHT,
+  MIN_BUBBLE_WIDTH,
+  MIN_PANEL_SIZE,
+  MIN_TEXT_BOX_HEIGHT,
+  MIN_TEXT_BOX_WIDTH,
+} from "../domain/defaults";
 import type { Bubble, Page, Panel, TextItem } from "../domain/schema";
 import { formatLocaleTime } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
@@ -88,6 +98,9 @@ const PanelInspector = ({
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const { t } = useI18n();
+  const workspace = getPageWorkspace(page);
+  const maxPanelX = Math.ceil(workspace.x + workspace.width - panel.width);
+  const maxPanelY = Math.ceil(workspace.y + workspace.height - panel.height);
 
   return (
     <>
@@ -171,14 +184,16 @@ const PanelInspector = ({
         <div className="field-grid">
           <label>
             <span>{t("common.width")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={MIN_PANEL_SIZE}
+              max={Math.ceil(workspace.width)}
+              step={1}
               value={Math.round(panel.width)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("resizePanel", {
                   pageId: page.id,
                   panelId: panel.id,
-                  width: Number(event.target.value),
+                  width: value,
                   height: panel.height,
                 })
               }
@@ -186,29 +201,33 @@ const PanelInspector = ({
           </label>
           <label>
             <span>{t("common.height")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={MIN_PANEL_SIZE}
+              max={Math.ceil(workspace.height)}
+              step={1}
               value={Math.round(panel.height)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("resizePanel", {
                   pageId: page.id,
                   panelId: panel.id,
                   width: panel.width,
-                  height: Number(event.target.value),
+                  height: value,
                 })
               }
             />
           </label>
           <label>
             <span>{t("common.x")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={Math.floor(workspace.x)}
+              max={maxPanelX}
+              step={1}
               value={Math.round(panel.x)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("movePanel", {
                   pageId: page.id,
                   panelId: panel.id,
-                  x: Number(event.target.value),
+                  x: value,
                   y: panel.y,
                 })
               }
@@ -216,15 +235,17 @@ const PanelInspector = ({
           </label>
           <label>
             <span>{t("common.y")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={Math.floor(workspace.y)}
+              max={maxPanelY}
+              step={1}
               value={Math.round(panel.y)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("movePanel", {
                   pageId: page.id,
                   panelId: panel.id,
                   x: panel.x,
-                  y: Number(event.target.value),
+                  y: value,
                 })
               }
             />
@@ -281,14 +302,16 @@ const PanelInspector = ({
           </label>
           <label>
             <span>{t("common.cornerRadius")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={0}
+              max={Math.ceil(Math.min(panel.width, panel.height) * 0.5)}
+              step={1}
               value={panel.style.cornerRadius}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("setPanelStyle", {
                   pageId: page.id,
                   panelId: panel.id,
-                  cornerRadius: Number(event.target.value),
+                  cornerRadius: value,
                 })
               }
             />
@@ -344,6 +367,9 @@ const PanelDescriptionList = ({ page }: { page: Page }) => {
 const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const { t } = useI18n();
+  const workspace = getPageWorkspace(page);
+  const maxTextX = Math.ceil(workspace.x + workspace.width - text.width);
+  const maxTextY = Math.ceil(workspace.y + workspace.height - text.height);
 
   return (
     <>
@@ -395,14 +421,16 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
           </label>
           <label>
             <span>{t("common.fontSize")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={6}
+              max={300}
+              step={1}
               value={text.fontSize}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  fontSize: Number(event.target.value),
+                  fontSize: value,
                 })
               }
             />
@@ -529,28 +557,32 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
         <div className="field-grid">
           <label>
             <span>{t("common.width")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={MIN_TEXT_BOX_WIDTH}
+              max={Math.ceil(workspace.width)}
+              step={1}
               value={Math.round(text.width)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  width: Number(event.target.value),
+                  width: value,
                 })
               }
             />
           </label>
           <label>
             <span>{t("common.height")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={MIN_TEXT_BOX_HEIGHT}
+              max={Math.ceil(workspace.height)}
+              step={1}
               value={Math.round(text.height)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  height: Number(event.target.value),
+                  height: value,
                 })
               }
             />
@@ -571,28 +603,32 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
           </label>
           <label>
             <span>{t("common.x")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={Math.floor(workspace.x)}
+              max={maxTextX}
+              step={1}
               value={Math.round(text.x)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  x: Number(event.target.value),
+                  x: value,
                 })
               }
             />
           </label>
           <label>
             <span>{t("common.y")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={Math.floor(workspace.y)}
+              max={maxTextY}
+              step={1}
               value={Math.round(text.y)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  y: Number(event.target.value),
+                  y: value,
                 })
               }
             />
@@ -619,6 +655,9 @@ const BUBBLE_TYPES: Array<{ type: Bubble["bubbleType"]; labelKey: string }> = [
 const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const { t } = useI18n();
+  const workspace = getPageWorkspace(page);
+  const maxBubbleX = Math.ceil(workspace.x + workspace.width - bubble.width);
+  const maxBubbleY = Math.ceil(workspace.y + workspace.height - bubble.height);
 
   return (
     <>
@@ -687,16 +726,16 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
           {(bubble.bubbleType === "round" || bubble.bubbleType === "roundedSquare") && (
             <label>
               <span>{t("inspector.cornerRadius")}</span>
-              <input
-                type="number"
+              <RangeInput
                 min={0}
-                max={60}
+                max={Math.ceil(Math.min(bubble.width, bubble.height) * 0.5)}
+                step={1}
                 value={bubble.cornerRadius}
-                onChange={(event) =>
+                onChange={(value) =>
                   void executeCommand("updateBubble", {
                     pageId: page.id,
                     bubbleId: bubble.id,
-                    cornerRadius: Number(event.target.value),
+                    cornerRadius: value,
                   })
                 }
               />
@@ -705,17 +744,16 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
           {bubble.bubbleType === "cloud" && (
             <label>
               <span>{t("inspector.bumpiness")}</span>
-              <input
-                type="number"
+              <RangeInput
                 min={0}
                 max={1}
-                step={0.1}
+                step={0.01}
                 value={bubble.bumpiness}
-                onChange={(event) =>
+                onChange={(value) =>
                   void executeCommand("updateBubble", {
                     pageId: page.id,
                     bubbleId: bubble.id,
-                    bumpiness: Number(event.target.value),
+                    bumpiness: value,
                   })
                 }
               />
@@ -725,33 +763,32 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
             <>
               <label>
                 <span>{t("inspector.spikeCount")}</span>
-                <input
-                  type="number"
+                <RangeInput
                   min={4}
                   max={16}
+                  step={1}
                   value={bubble.spikeCount}
-                  onChange={(event) =>
+                  onChange={(value) =>
                     void executeCommand("updateBubble", {
                       pageId: page.id,
                       bubbleId: bubble.id,
-                      spikeCount: Number(event.target.value),
+                      spikeCount: Math.round(value),
                     })
                   }
                 />
               </label>
               <label>
                 <span>{t("inspector.spikeDepth")}</span>
-                <input
-                  type="number"
+                <RangeInput
                   min={0.2}
                   max={0.8}
-                  step={0.1}
+                  step={0.01}
                   value={bubble.spikeDepth}
-                  onChange={(event) =>
+                  onChange={(value) =>
                     void executeCommand("updateBubble", {
                       pageId: page.id,
                       bubbleId: bubble.id,
-                      spikeDepth: Number(event.target.value),
+                      spikeDepth: value,
                     })
                   }
                 />
@@ -761,52 +798,52 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
           {bubble.bubbleType === "jagged" && (
             <label>
               <span>{t("inspector.jaggedness")}</span>
-              <input
-                type="number"
-                min={2}
-                max={12}
-                value={bubble.jaggedness}
-                onChange={(event) =>
-                  void executeCommand("updateBubble", {
-                    pageId: page.id,
-                    bubbleId: bubble.id,
-                    jaggedness: Number(event.target.value),
-                  })
-                }
-              />
-            </label>
+                <RangeInput
+                  min={2}
+                  max={12}
+                  step={1}
+                  value={bubble.jaggedness}
+                  onChange={(value) =>
+                    void executeCommand("updateBubble", {
+                      pageId: page.id,
+                      bubbleId: bubble.id,
+                      jaggedness: Math.round(value),
+                    })
+                  }
+                />
+              </label>
           )}
           {bubble.bubbleType === "thought" && (
             <label>
               <span>{t("inspector.thoughtCircles")}</span>
-              <input
-                type="number"
-                min={2}
-                max={5}
-                value={bubble.thoughtCircles}
-                onChange={(event) =>
-                  void executeCommand("updateBubble", {
-                    pageId: page.id,
-                    bubbleId: bubble.id,
-                    thoughtCircles: Number(event.target.value),
-                  })
-                }
-              />
-            </label>
+                <RangeInput
+                  min={2}
+                  max={5}
+                  step={1}
+                  value={bubble.thoughtCircles}
+                  onChange={(value) =>
+                    void executeCommand("updateBubble", {
+                      pageId: page.id,
+                      bubbleId: bubble.id,
+                      thoughtCircles: Math.round(value),
+                    })
+                  }
+                />
+              </label>
           )}
           {bubble.bubbleType !== "explosion" && (
             <label>
               <span>{t("inspector.tailWidth")}</span>
-              <input
-                type="number"
+              <RangeInput
                 min={8}
-                max={48}
+                max={96}
+                step={1}
                 value={bubble.tailWidth}
-                onChange={(event) =>
+                onChange={(value) =>
                   void executeCommand("updateBubble", {
                     pageId: page.id,
                     bubbleId: bubble.id,
-                    tailWidth: Number(event.target.value),
+                    tailWidth: value,
                   })
                 }
               />
@@ -883,18 +920,50 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
           </label>
           <label>
             <span>{t("common.fontSize")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={6}
+              max={300}
+              step={1}
               value={bubble.fontSize}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  fontSize: Number(event.target.value),
+                  fontSize: value,
                 })
               }
             />
           </label>
+        </div>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.textDirection")}</p>
+        <div className="insp-seg">
+          <button
+            className={bubble.direction === "horizontal" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                direction: "horizontal",
+              })
+            }
+          >
+            {t("inspector.textDirectionH")}
+          </button>
+          <button
+            className={bubble.direction === "vertical" ? "active" : ""}
+            onClick={() =>
+              void executeCommand("updateBubble", {
+                pageId: page.id,
+                bubbleId: bubble.id,
+                direction: "vertical",
+              })
+            }
+          >
+            {t("inspector.textDirectionV")}
+          </button>
         </div>
       </section>
 
@@ -987,56 +1056,64 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
         <div className="field-grid">
           <label>
             <span>{t("common.width")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={MIN_BUBBLE_WIDTH}
+              max={Math.ceil(workspace.width)}
+              step={1}
               value={Math.round(bubble.width)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  width: Number(event.target.value),
+                  width: value,
                 })
               }
             />
           </label>
           <label>
             <span>{t("common.height")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={MIN_BUBBLE_HEIGHT}
+              max={Math.ceil(workspace.height)}
+              step={1}
               value={Math.round(bubble.height)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  height: Number(event.target.value),
+                  height: value,
                 })
               }
             />
           </label>
           <label>
             <span>{t("common.x")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={Math.floor(workspace.x)}
+              max={maxBubbleX}
+              step={1}
               value={Math.round(bubble.x)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  x: Number(event.target.value),
+                  x: value,
                 })
               }
             />
           </label>
           <label>
             <span>{t("common.y")}</span>
-            <input
-              type="number"
+            <RangeInput
+              min={Math.floor(workspace.y)}
+              max={maxBubbleY}
+              step={1}
               value={Math.round(bubble.y)}
-              onChange={(event) =>
+              onChange={(value) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  y: Number(event.target.value),
+                  y: value,
                 })
               }
             />
@@ -1121,7 +1198,7 @@ export const Inspector = ({ page, onExportProjectPdf, onImportImage, onCreatePan
         </>
       ) : "style" in selectedObject ? (
         <PanelInspector page={page} panel={selectedObject} onImportImage={onImportImage} />
-      ) : "direction" in selectedObject ? (
+      ) : "content" in selectedObject ? (
         <TextInspector page={page} text={selectedObject} />
       ) : (
         <BubbleInspector page={page} bubble={selectedObject as Bubble} />

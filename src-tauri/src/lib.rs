@@ -40,6 +40,84 @@ fn resolve_project_dir(root: &Path, project_id: &str) -> PathBuf {
     root.join(project_folder)
 }
 
+fn read_project_id(project_file: &Path) -> Option<String> {
+    let raw = fs::read_to_string(project_file).ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    json.get("id")
+        .and_then(|entry| entry.as_str())
+        .map(|entry| entry.to_string())
+}
+
+fn find_project_dir_by_id(root: &Path, project_id: &str) -> Option<PathBuf> {
+    let legacy_dir = resolve_project_dir(root, project_id);
+    if legacy_dir.exists() && legacy_dir.is_dir() {
+        return Some(legacy_dir);
+    }
+
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let project_file = path.join(PROJECT_JSON_FILE);
+        if !project_file.exists() {
+            continue;
+        }
+        if read_project_id(&project_file).as_deref() == Some(project_id) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn find_latest_project_folder(root: &Path) -> Option<String> {
+    let entries = fs::read_dir(root).ok()?;
+    let mut latest_folder: Option<String> = None;
+    let mut latest_millis = 0u128;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let project_file = path.join(PROJECT_JSON_FILE);
+        if !project_file.exists() {
+            continue;
+        }
+        let modified_millis = fs::metadata(&project_file)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+
+        if modified_millis >= latest_millis {
+            latest_millis = modified_millis;
+            latest_folder = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string());
+        }
+    }
+
+    latest_folder
+}
+
+fn sync_latest_project_meta(root: &Path) -> Result<(), String> {
+    let meta_file = root.join(PROJECT_META_FILE);
+    if let Some(folder) = find_latest_project_folder(root) {
+        fs::write(meta_file, folder).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    if meta_file.exists() {
+        fs::remove_file(meta_file).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn write_project_draft(project_id: String, project_json: String) -> Result<String, String> {
     let root = ensure_projects_root()?;
@@ -156,6 +234,16 @@ fn save_imported_image(
     Ok(asset_path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn delete_project_draft(project_id: String) -> Result<(), String> {
+    let root = ensure_projects_root()?;
+    if let Some(project_dir) = find_project_dir_by_id(&root, &project_id) {
+        fs::remove_dir_all(project_dir).map_err(|error| error.to_string())?;
+    }
+    sync_latest_project_meta(&root)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -163,7 +251,8 @@ pub fn run() {
             write_project_draft,
             read_project_draft,
             list_project_drafts,
-            save_imported_image
+            save_imported_image,
+            delete_project_draft
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

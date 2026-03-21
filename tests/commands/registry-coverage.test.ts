@@ -58,6 +58,7 @@ describe("commandRegistry coverage", () => {
     expect(Object.keys(commandRegistry).sort()).toEqual(
       [
         "createProject",
+        "setProjectType",
         "renameProject",
         "saveProject",
         "loadProject",
@@ -107,7 +108,13 @@ describe("commandRegistry coverage", () => {
       pages: [createDefaultPage(0)],
     };
 
-    await runCommand(harness, "createProject", { title: "Saved Project" });
+    await runCommand(harness, "createProject", { title: "Saved Project", type: "cg" });
+    expect(harness.readSession().project.type).toBe("cg");
+    const cgPage = (await runCommand(harness, "addPage", {})) as { width: number; height: number };
+    expect(cgPage).toMatchObject({
+      width: 1200,
+      height: 1600,
+    });
     await runCommand(harness, "renameProject", { title: "Renamed Project" });
     expect(harness.readSession().project.title).toBe("Renamed Project");
 
@@ -400,6 +407,16 @@ describe("commandRegistry coverage", () => {
     expect((updatedBubble as { spikePositions: Array<{ x: number; y: number }> }).spikePositions).toEqual(
       customSpikePositions,
     );
+
+    const movedBubbleWithoutTailUpdate = await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: bubble.id,
+      x: 360,
+      y: 380,
+    });
+    expect(
+      (movedBubbleWithoutTailUpdate as { tailTip: { x: number; y: number } }).tailTip,
+    ).toEqual((updatedBubble as { tailTip: { x: number; y: number } }).tailTip);
 
     const layerOrderBefore = [...harness.readSession().project.pages[0].layers];
     const movedLayer = await runCommand(harness, "moveLayer", {

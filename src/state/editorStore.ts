@@ -119,6 +119,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     }
 
     const input = definition.inputSchema.parse(payload);
+    const projectBefore = get().project;
     const before = createHistorySnapshot(get());
     const historyBefore = {
       past: get().past,
@@ -205,7 +206,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         },
         input,
       );
-      const projectChanged = get().project !== before.project;
+      const projectChanged = get().project !== projectBefore;
       if (projectChanged && definition.id !== "saveProject") {
         try {
           const savedAt = await saveLocalDraft(get().project);

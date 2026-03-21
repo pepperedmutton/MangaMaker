@@ -1,7 +1,10 @@
 node_modules/
 dist/
 test-results/
-projects/
+/projects/
+.codex_tmp/
+.mangamaker_runtime/
+scripts/__pycache__/
 
 *.tsbuildinfo
 *.log

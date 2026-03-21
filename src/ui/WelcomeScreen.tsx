@@ -1,4 +1,5 @@
-import type { Project } from "../domain/schema";
+import { useEffect, useRef, useState } from "react";
+import type { Project, ProjectType } from "../domain/schema";
 import type { Locale } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
 import { PageThumbnail } from "./PageThumbnail";
@@ -7,11 +8,14 @@ type WelcomeScreenProps = {
   projects: Project[];
   loading: boolean;
   title: string;
+  projectType: ProjectType;
   draftAvailable: boolean;
   onTitleChange: (value: string) => void;
+  onProjectTypeChange: (value: ProjectType) => void;
   onCreateProject: () => void;
   onRestoreDraft: () => void;
   onOpenProject: (project: Project) => void;
+  onDeleteProject: (project: Project) => void;
   onSetLocale: (locale: Locale) => void;
 };
 
@@ -27,14 +31,52 @@ export const WelcomeScreen = ({
   projects,
   loading,
   title,
+  projectType,
   draftAvailable,
   onTitleChange,
+  onProjectTypeChange,
   onCreateProject,
   onRestoreDraft,
   onOpenProject,
+  onDeleteProject,
   onSetLocale,
 }: WelcomeScreenProps) => {
   const { locale, t } = useI18n();
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [projectMenu, setProjectMenu] = useState<{
+    x: number;
+    y: number;
+    project: Project;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!projectMenu) {
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setProjectMenu(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setProjectMenu(null);
+      }
+    };
+    const handleResize = () => {
+      setProjectMenu(null);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [projectMenu]);
 
   return (
     <div className="welcome-shell">
@@ -81,6 +123,17 @@ export const WelcomeScreen = ({
                 }}
               />
             </label>
+            <label>
+              <span>{t("firstRun.projectType")}</span>
+              <select
+                aria-label={t("firstRun.projectType")}
+                value={projectType}
+                onChange={(event) => onProjectTypeChange(event.target.value as ProjectType)}
+              >
+                <option value="manga">{t("projectType.manga")}</option>
+                <option value="cg">{t("projectType.cg")}</option>
+              </select>
+            </label>
             <div className="cta-row">
               <button className="primary-button" onClick={onCreateProject}>
                 {t("firstRun.createProject")}
@@ -107,6 +160,24 @@ export const WelcomeScreen = ({
                     className="welcome-project-card"
                     type="button"
                     onClick={() => onOpenProject(project)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      const menuWidth = 220;
+                      const menuHeight = 120;
+                      const x = Math.max(
+                        8,
+                        Math.min(event.clientX, window.innerWidth - menuWidth - 8),
+                      );
+                      const y = Math.max(
+                        8,
+                        Math.min(event.clientY, window.innerHeight - menuHeight - 8),
+                      );
+                      setProjectMenu({
+                        x,
+                        y,
+                        project,
+                      });
+                    }}
                   >
                     <PageThumbnail page={project.pages[0] ?? null} />
                     <div className="welcome-project-meta">
@@ -125,6 +196,30 @@ export const WelcomeScreen = ({
           </section>
         </div>
       </section>
+      {projectMenu ? (
+        <div
+          ref={menuRef}
+          className="canvas-context-menu sidebar-context-menu"
+          style={{
+            position: "fixed",
+            left: projectMenu.x,
+            top: projectMenu.y,
+          }}
+        >
+          <p className="canvas-context-menu-title">{t("contextMenu.sidebar")}</p>
+          <div className="canvas-context-menu-actions">
+            <button
+              className="canvas-context-menu-item danger"
+              onClick={() => {
+                setProjectMenu(null);
+                onDeleteProject(projectMenu.project);
+              }}
+            >
+              {t("contextMenu.deleteProject")}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };

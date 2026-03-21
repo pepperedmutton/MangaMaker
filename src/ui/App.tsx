@@ -7,11 +7,11 @@ import {
   parseClipboardEnvelope,
   serializeClipboardEnvelope,
 } from "../domain/clipboard";
-import type { Page, Panel, Project } from "../domain/schema";
+import type { Page, Panel, Project, ProjectType } from "../domain/schema";
 import { downloadDataUrl } from "../export/download";
 import { formatLocaleTime, getDefaultProjectTitle, translate } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
-import { hasLocalDraft, listLocalProjects } from "../storage/localDraft";
+import { deleteLocalProject, hasLocalDraft, listLocalProjects } from "../storage/localDraft";
 import { persistImportedImageForProject } from "../storage/projectFiles";
 import { useEditorStore } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
@@ -90,21 +90,17 @@ const inlinePageForClipboard = async (page: Page) => {
 
 const persistClipboardImageForProject = async (
   projectId: string,
+  projectTitle: string,
   imageSrc: string,
   fileHint: string,
 ) => {
-  try {
-    const response = await fetch(imageSrc);
-    const blob = await response.blob();
-    const extension = inferImageExtension(blob.type || null);
-    const file = new File([blob], `${fileHint}.${extension}`, {
-      type: blob.type || "image/png",
-    });
-    return await persistImportedImageForProject(projectId, file);
-  } catch (error) {
-    console.warn("Failed to persist clipboard image into target project assets:", error);
-    return imageSrc;
-  }
+  const response = await fetch(imageSrc);
+  const blob = await response.blob();
+  const extension = inferImageExtension(blob.type || null);
+  const file = new File([blob], `${fileHint}.${extension}`, {
+    type: blob.type || "image/png",
+  });
+  return persistImportedImageForProject(projectId, projectTitle, file);
 };
 
 const fallbackCopyText = (text: string) => {
@@ -129,13 +125,18 @@ const writeTextToClipboard = async (text: string) => {
   return fallbackCopyText(text);
 };
 
-const normalizeClipboardItemForPaste = async (projectId: string, item: ClipboardItem) => {
+const normalizeClipboardItemForPaste = async (
+  projectId: string,
+  projectTitle: string,
+  item: ClipboardItem,
+) => {
   if (item.kind === "panel") {
     if (!item.panel.image) {
       return item;
     }
     const persistedSrc = await persistClipboardImageForProject(
       projectId,
+      projectTitle,
       item.panel.image.src,
       "clipboard-panel",
     );
@@ -159,6 +160,7 @@ const normalizeClipboardItemForPaste = async (projectId: string, item: Clipboard
         }
         const persistedSrc = await persistClipboardImageForProject(
           projectId,
+          projectTitle,
           panel.image.src,
           `clipboard-page-panel-${index + 1}`,
         );
@@ -198,6 +200,7 @@ export const App = () => {
   const { t } = useI18n();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [projectTitleInput, setProjectTitleInput] = useState("");
+  const [projectTypeInput, setProjectTypeInput] = useState<ProjectType>("manga");
   const [view, setView] = useState<"welcome" | "editor">("welcome");
   const [projectsCatalog, setProjectsCatalog] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -236,6 +239,10 @@ export const App = () => {
       setProjectTitleInput(project.title);
     }
   }, [project.title]);
+
+  useEffect(() => {
+    setProjectTypeInput(project.type);
+  }, [project.type]);
 
   useEffect(() => {
     const loadCatalog = async () => {
@@ -288,11 +295,11 @@ export const App = () => {
     setView("welcome");
   };
 
-  const handleDeleteCurrentPage = () => {
-    if (!selectedPage) {
+  const handleDeletePage = (pageId: string) => {
+    if (!project.pages.some((page) => page.id === pageId)) {
       return;
     }
-    void executeCommand("removePage", { pageId: selectedPage.id });
+    void executeCommand("removePage", { pageId });
   };
 
   const handleDeleteSelectedObject = () => {
@@ -359,11 +366,14 @@ export const App = () => {
       event.target.value = "";
       return;
     }
-    let src = URL.createObjectURL(file);
+    let src = "";
     try {
-      src = await persistImportedImageForProject(project.id, file);
+      src = await persistImportedImageForProject(project.id, project.title, file);
     } catch (error) {
-      console.warn("Failed to persist imported image; using session blob URL.", error);
+      console.warn("Failed to persist imported image; import was aborted.", error);
+      setPendingImportTarget(null);
+      event.target.value = "";
+      return;
     }
     await executeCommand("placeImageInPanel", {
       pageId: page.id,
@@ -375,11 +385,11 @@ export const App = () => {
     event.target.value = "";
   };
 
-  const handleMovePage = (direction: -1 | 1) => {
-    if (!selectedPage) {
+  const handleMovePage = (pageId: string, direction: -1 | 1) => {
+    const currentIndex = project.pages.findIndex((page) => page.id === pageId);
+    if (currentIndex < 0) {
       return;
     }
-    const currentIndex = project.pages.findIndex((page) => page.id === selectedPage.id);
     const nextIndex = currentIndex + direction;
     if (nextIndex < 0 || nextIndex >= project.pages.length) {
       return;
@@ -447,7 +457,17 @@ export const App = () => {
   };
 
   const handlePasteEnvelope = async (envelope: ClipboardEnvelope) => {
-    const normalizedItem = await normalizeClipboardItemForPaste(project.id, envelope.item);
+    let normalizedItem: ClipboardItem;
+    try {
+      normalizedItem = await normalizeClipboardItemForPaste(
+        project.id,
+        project.title,
+        envelope.item,
+      );
+    } catch (error) {
+      console.warn("Failed to persist clipboard image into target project assets; paste aborted.", error);
+      return;
+    }
     let targetPageId = selectedPage?.id ?? project.pages[0]?.id ?? null;
     if (normalizedItem.kind !== "page" && !targetPageId) {
       const createdPage = (await executeCommand("addPage", {})) as { id: string };
@@ -544,10 +564,14 @@ export const App = () => {
         return;
       }
       const items = event.clipboardData?.items;
-      if (!items) {
+      const files = event.clipboardData?.files;
+      if (!items && !files) {
         return;
       }
-      const hasImageItem = Array.from(items).some((item) => item.type.startsWith("image/"));
+      const hasImageItem = Boolean(
+        (items && Array.from(items).some((item) => item.type.startsWith("image/"))) ||
+          (files && Array.from(files).some((file) => file.type.startsWith("image/"))),
+      );
       if (hasImageItem) {
         return;
       }
@@ -569,7 +593,7 @@ export const App = () => {
 
   const handleCreateProjectFromWelcome = async () => {
     const title = projectTitleInput.trim() || getDefaultProjectTitle(locale);
-    await executeCommand("createProject", { title });
+    await executeCommand("createProject", { title, type: projectTypeInput });
     await handleSaveProject();
     setView("editor");
   };
@@ -584,17 +608,37 @@ export const App = () => {
     setView("editor");
   };
 
+  const handleDeleteProjectFromWelcome = async (targetProject: Project) => {
+    const confirmed = window.confirm(
+      t("dialog.deleteProject", {
+        name: targetProject.title || t("sidebar.untitledProject"),
+      }),
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await deleteLocalProject(targetProject.id);
+      await refreshProjectCatalog();
+    } catch (error) {
+      console.warn("Failed to delete project from welcome screen:", error);
+    }
+  };
+
   if (view === "welcome") {
     return (
       <WelcomeScreen
         projects={projectsCatalog}
         loading={projectsLoading}
         title={projectTitleInput}
+        projectType={projectTypeInput}
         draftAvailable={draftAvailable}
         onTitleChange={setProjectTitleInput}
+        onProjectTypeChange={setProjectTypeInput}
         onCreateProject={() => void handleCreateProjectFromWelcome()}
         onRestoreDraft={() => void handleRestoreDraftFromWelcome()}
         onOpenProject={(nextProject) => void handleOpenProjectFromWelcome(nextProject)}
+        onDeleteProject={(targetProject) => void handleDeleteProjectFromWelcome(targetProject)}
         onSetLocale={(nextLocale) => void executeCommand("setLocale", { locale: nextLocale })}
       />
     );
@@ -607,13 +651,12 @@ export const App = () => {
         selectedPageId={selectedPage?.id ?? null}
         onSelectPage={(pageId) => void executeCommand("selectPage", { pageId })}
         onAddPage={() => void executeCommand("addPage", {})}
-        onDuplicatePage={() =>
-          selectedPage ? void executeCommand("duplicatePage", { pageId: selectedPage.id }) : undefined
-        }
-        onDeletePage={handleDeleteCurrentPage}
-        onMovePageUp={() => handleMovePage(-1)}
-        onMovePageDown={() => handleMovePage(1)}
+        onDuplicatePage={(pageId) => void executeCommand("duplicatePage", { pageId })}
+        onDeletePage={(pageId) => handleDeletePage(pageId)}
+        onMovePageUp={(pageId) => handleMovePage(pageId, -1)}
+        onMovePageDown={(pageId) => handleMovePage(pageId, 1)}
         onRenameProject={(title) => void executeCommand("renameProject", { title })}
+        onSetProjectType={(type) => void executeCommand("setProjectType", { type })}
       />
       <main className="canvas-zone">
         <RibbonBar
@@ -640,7 +683,6 @@ export const App = () => {
               ? {
                   fontFamily: selectedText.fontFamily,
                   fontSize: selectedText.fontSize,
-                  direction: selectedText.direction,
                   onFontFamilyChange: (fontFamily: string) =>
                     void executeCommand("updateText", {
                       pageId: selection!.pageId,
@@ -652,12 +694,6 @@ export const App = () => {
                       pageId: selection!.pageId,
                       textId: selectedText.id,
                       fontSize,
-                    }),
-                  onDirectionChange: (direction: "horizontal" | "vertical") =>
-                    void executeCommand("updateText", {
-                      pageId: selection!.pageId,
-                      textId: selectedText.id,
-                      direction,
                     }),
                 }
               : undefined
@@ -676,12 +712,15 @@ export const App = () => {
         {project.pages.length === 0 ? (
           <FirstRunGuide
             title={projectTitleInput}
+            projectType={projectTypeInput}
             onTitleChange={setProjectTitleInput}
+            onProjectTypeChange={setProjectTypeInput}
             draftAvailable={draftAvailable}
             projectCreated={project.title.trim().length > 0}
             onCreateProject={() =>
               void executeCommand("createProject", {
                 title: projectTitleInput.trim() || getDefaultProjectTitle(locale),
+                type: projectTypeInput,
               })
             }
             onRestoreDraft={() => void executeCommand("loadProject", { source: "localDraft" })}

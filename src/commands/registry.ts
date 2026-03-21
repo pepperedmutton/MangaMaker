@@ -13,23 +13,33 @@ import {
 import {
   clamp,
   clampBubbleRectToWorkspace,
+  clampBubbleTailBaseLocalPoint,
   clampPanelRectToWorkspace,
   clampPointToWorkspace,
   clampTextBoxToWorkspace,
   clampImageViewBox,
   createInitialPanelViewBox,
   fitViewBoxToPanelAspect,
+  getBubbleTailBaseAngleFromLocalPoint,
   getPageById,
+  getBubbleTailBaseLocalPoint,
   insertPanelPoint,
   preservePanelImageViewBox,
   removePanelPoint,
   removeLayerRef,
+  scaleBubbleLocalPoint,
   scalePanelPoints,
   snapValue,
   toLayerRef,
 } from "../domain/helpers";
 import { clipboardItemSchema } from "../domain/clipboard";
-import { objectTypeSchema, pointSchema, projectSchema, type Project } from "../domain/schema";
+import {
+  objectTypeSchema,
+  pointSchema,
+  projectSchema,
+  projectTypeSchema,
+  type Project,
+} from "../domain/schema";
 import { renderPageToPngDataUrl, renderProjectToPdfDataUrl } from "../export/render";
 import {
   DEFAULT_LOCALE,
@@ -274,6 +284,7 @@ const createPastedBubble = (
       x: bubble.tailTip.x + deltaX,
       y: bubble.tailTip.y + deltaY,
     }),
+    ...(bubble.tailBase ? { tailBase: { ...bubble.tailBase } } : {}),
   };
 };
 
@@ -283,9 +294,10 @@ const commands = {
     label: "Create Project",
     inputSchema: z.object({
       title: z.string().trim().min(1),
+      type: projectTypeSchema.default("manga"),
     }),
     execute: (context, input) => {
-      const project = ensureProject(createBlankProject(input.title));
+      const project = ensureProject(createBlankProject(input.title, input.type));
       context.setProject(project);
       context.setSession({
         selectedPageId: null,
@@ -297,6 +309,31 @@ const commands = {
       });
       context.setHistory({ past: [], future: [] });
       return project;
+    },
+  },
+  setProjectType: {
+    id: "setProjectType",
+    label: "Set Project Type",
+    recordHistory: true,
+    inputSchema: z.object({
+      type: projectTypeSchema,
+    }),
+    execute: (context, input) => {
+      const current = context.getProject();
+      if (current.type === input.type) {
+        return current;
+      }
+      const nextProject = ensureProject(
+        touch({
+          ...current,
+          type: input.type,
+        }),
+      );
+      context.setProject(nextProject);
+      context.setSession({
+        statusMessage: createContextStatus(context, "success", "command.projectTypeUpdated"),
+      });
+      return nextProject;
     },
   },
   renameProject: {
@@ -378,7 +415,7 @@ const commands = {
     }),
     execute: (context, input) => {
       const current = context.getProject();
-      const draft = createDefaultPage(current.pages.length);
+      const draft = createDefaultPage(current.pages.length, current.type);
       const locale = getLocale(context);
       const page = {
         ...draft,
@@ -1586,11 +1623,13 @@ const commands = {
       width: z.number().positive().optional(),
       height: z.number().positive().optional(),
       tailTip: pointSchema.optional(),
+      tailBase: pointSchema.optional(),
       tailBaseAngle: z.number().optional(),
       tailWidth: z.number().positive().optional(),
       text: z.string().optional(),
       fontSize: z.number().positive().optional(),
       fontFamily: z.string().optional(),
+      direction: z.enum(["horizontal", "vertical"]).optional(),
       textAlign: z.enum(["left", "center", "right"]).optional(),
       verticalAlign: z.enum(["top", "middle", "bottom"]).optional(),
       bubbleType: z.enum(["round", "ellipse", "cloud", "square", "roundedSquare", "oval", "explosion", "thought", "jagged", "bubbleRound"]).optional(),
@@ -1620,14 +1659,37 @@ const commands = {
         width: input.width ?? bubble.width,
         height: input.height ?? bubble.height,
       });
-      const deltaX = rect.x - bubble.x;
-      const deltaY = rect.y - bubble.y;
       const tailTip = input.tailTip
         ? clampPointToWorkspace(page, input.tailTip)
-        : clampPointToWorkspace(page, {
-            x: bubble.tailTip.x + deltaX,
-            y: bubble.tailTip.y + deltaY,
-          });
+        : bubble.tailTip;
+      const nextGeometryBubble = {
+        ...bubble,
+        ...rect,
+        tailTip,
+        ...(input.bubbleType !== undefined ? { bubbleType: input.bubbleType } : {}),
+      };
+      const tailBaseSource =
+        input.tailBase !== undefined
+          ? input.tailBase
+          : bubble.tailBase
+            ? scaleBubbleLocalPoint(
+                bubble.tailBase,
+                bubble.width,
+                bubble.height,
+                rect.width,
+                rect.height,
+              )
+            : undefined;
+      const tailBase =
+        tailBaseSource !== undefined
+          ? clampBubbleTailBaseLocalPoint(nextGeometryBubble, tailBaseSource)
+          : undefined;
+      let tailBaseAngle = bubble.tailBaseAngle;
+      if (tailBase !== undefined) {
+        tailBaseAngle = getBubbleTailBaseAngleFromLocalPoint(nextGeometryBubble, tailBase);
+      } else if (input.tailBaseAngle !== undefined) {
+        tailBaseAngle = input.tailBaseAngle;
+      }
 
       const nextProject = ensureProject(
         touch(
@@ -1639,11 +1701,15 @@ const commands = {
                     ...item,
                     ...rect,
                     tailTip,
-                    ...(input.tailBaseAngle !== undefined ? { tailBaseAngle: input.tailBaseAngle } : {}),
+                    ...(tailBase !== undefined ? { tailBase } : {}),
+                    ...(tailBase !== undefined || input.tailBaseAngle !== undefined
+                      ? { tailBaseAngle }
+                      : {}),
                     ...(input.tailWidth !== undefined ? { tailWidth: input.tailWidth } : {}),
                     ...(input.text !== undefined ? { text: input.text } : {}),
                     ...(input.fontSize !== undefined ? { fontSize: input.fontSize } : {}),
                     ...(input.fontFamily !== undefined ? { fontFamily: input.fontFamily } : {}),
+                    ...(input.direction !== undefined ? { direction: input.direction } : {}),
                     ...(input.textAlign !== undefined ? { textAlign: input.textAlign } : {}),
                     ...(input.verticalAlign !== undefined ? { verticalAlign: input.verticalAlign } : {}),
                     ...(input.bubbleType !== undefined ? { bubbleType: input.bubbleType } : {}),

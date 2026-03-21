@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { MAX_ZOOM, MIN_ZOOM, ZOOM_STEP } from "../domain/defaults";
 import { getToolbarZoomLabel } from "../domain/helpers";
 import { translate, type Locale } from "../i18n";
@@ -7,10 +8,8 @@ import type { ToolMode } from "../state/types";
 export type TextFormatState = {
   fontFamily: string;
   fontSize: number;
-  direction: "horizontal" | "vertical";
   onFontFamilyChange: (value: string) => void;
   onFontSizeChange: (value: number) => void;
-  onDirectionChange: (value: "horizontal" | "vertical") => void;
 };
 
 export type PageFormatState = {
@@ -82,8 +81,61 @@ export const RibbonBar = ({
 }: RibbonBarProps) => {
   const t = (key: string, params?: Record<string, number | string>) =>
     translate(locale, key, params);
+  const [sliderZoom, setSliderZoom] = useState(zoom);
+  const isDraggingZoomRef = useRef(false);
+  const pendingZoomRef = useRef(zoom);
+  const zoomFrameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isDraggingZoomRef.current) {
+      setSliderZoom(zoom);
+      pendingZoomRef.current = zoom;
+    }
+  }, [zoom]);
+
+  useEffect(() => {
+    return () => {
+      if (zoomFrameRef.current !== null) {
+        window.cancelAnimationFrame(zoomFrameRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const handlePointerEnd = () => {
+      if (!isDraggingZoomRef.current) {
+        return;
+      }
+      isDraggingZoomRef.current = false;
+      onZoomChange(pendingZoomRef.current);
+    };
+
+    window.addEventListener("pointerup", handlePointerEnd);
+    window.addEventListener("pointercancel", handlePointerEnd);
+    return () => {
+      window.removeEventListener("pointerup", handlePointerEnd);
+      window.removeEventListener("pointercancel", handlePointerEnd);
+    };
+  }, [onZoomChange]);
+
+  const scheduleZoomCommit = () => {
+    if (zoomFrameRef.current !== null) {
+      return;
+    }
+    zoomFrameRef.current = window.requestAnimationFrame(() => {
+      zoomFrameRef.current = null;
+      onZoomChange(pendingZoomRef.current);
+    });
+  };
+
   const handleZoomInput = (value: string) => {
-    onZoomChange(Number(value));
+    const nextZoom = Number(value);
+    if (Number.isNaN(nextZoom)) {
+      return;
+    }
+    pendingZoomRef.current = nextZoom;
+    setSliderZoom(nextZoom);
+    scheduleZoomCommit();
   };
 
   return (
@@ -195,18 +247,6 @@ export const RibbonBar = ({
             value={textFormat?.fontSize ?? 24}
             onChange={(event) => textFormat?.onFontSizeChange(Number(event.target.value))}
           />
-          <RibbonButton
-            label={t("inspector.textDirectionH")}
-            active={textFormat?.direction !== "vertical"}
-            disabled={!textFormat}
-            onClick={() => textFormat?.onDirectionChange("horizontal")}
-          />
-          <RibbonButton
-            label={t("inspector.textDirectionV")}
-            active={textFormat?.direction === "vertical"}
-            disabled={!textFormat}
-            onClick={() => textFormat?.onDirectionChange("vertical")}
-          />
         </div>
       </div>
 
@@ -222,17 +262,24 @@ export const RibbonBar = ({
               aria-label={t("toolbar.zoom")}
               aria-valuemin={MIN_ZOOM}
               aria-valuemax={MAX_ZOOM}
-              aria-valuenow={zoom}
-              aria-valuetext={getToolbarZoomLabel(zoom)}
+              aria-valuenow={sliderZoom}
+              aria-valuetext={getToolbarZoomLabel(sliderZoom)}
               type="range"
               min={MIN_ZOOM}
               max={MAX_ZOOM}
               step={ZOOM_STEP}
-              value={zoom}
+              value={sliderZoom}
+              onPointerDown={() => {
+                isDraggingZoomRef.current = true;
+              }}
+              onPointerUp={() => {
+                isDraggingZoomRef.current = false;
+                onZoomChange(pendingZoomRef.current);
+              }}
               onInput={(event) => handleZoomInput(event.currentTarget.value)}
               onChange={(event) => handleZoomInput(event.currentTarget.value)}
             />
-            <span className="ribbon-zoom-value">{getToolbarZoomLabel(zoom)}</span>
+            <span className="ribbon-zoom-value">{getToolbarZoomLabel(sliderZoom)}</span>
           </label>
           <RibbonButton
             label={t("toolbar.exportPage")}

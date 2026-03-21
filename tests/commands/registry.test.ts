@@ -177,6 +177,42 @@ describe("commandRegistry", () => {
       text: "Updated dialogue",
       fontSize: 28,
     });
+    const anchoredBubble = (await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: bubble.id,
+      tailBase: {
+        x: 60,
+        y: 40,
+      },
+    })) as {
+      tailBase: { x: number; y: number };
+      width: number;
+      height: number;
+    };
+    expect(anchoredBubble).toMatchObject({
+      tailBase: {
+        x: 60,
+        y: 40,
+      },
+    });
+
+    const resizedBubble = (await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: bubble.id,
+      width: 520,
+      height: 300,
+    })) as {
+      tailBase: { x: number; y: number };
+      width: number;
+      height: number;
+    };
+    expect(resizedBubble).toMatchObject({
+      tailBase: {
+        x: (anchoredBubble.tailBase.x * resizedBubble.width) / anchoredBubble.width,
+        y: (anchoredBubble.tailBase.y * resizedBubble.height) / anchoredBubble.height,
+      },
+    });
+
     await runCommand(harness, "deleteObject", {
       pageId: page.id,
       objectType: "text",
