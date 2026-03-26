@@ -82,12 +82,20 @@ textarea {
 }
 
 .app-shell {
+  --left-sidebar-width: 220px;
+  --right-sidebar-width: 300px;
+  --splitter-width: 10px;
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr) 250px;
+  grid-template-columns:
+    minmax(180px, var(--left-sidebar-width))
+    var(--splitter-width)
+    minmax(0, 1fr)
+    var(--splitter-width)
+    minmax(240px, var(--right-sidebar-width));
   grid-template-rows: minmax(0, 1fr);
-  grid-template-areas: "left canvas right";
+  grid-template-areas: "left split-left canvas split-right right";
   height: 100vh;
-  gap: 0.4rem;
+  gap: 0.35rem;
   padding: 0.4rem;
   overflow: hidden;
 }
@@ -314,21 +322,6 @@ textarea {
   color: var(--muted);
 }
 
-.ribbon-font-select {
-  width: 10.2rem;
-  padding: 0.2rem 0.4rem;
-  border-radius: 8px;
-  font-size: 0.78rem;
-}
-
-.ribbon-font-size {
-  width: 3.25rem;
-  padding: 0.2rem 0.35rem;
-  border-radius: 8px;
-  font-size: 0.78rem;
-  text-align: center;
-}
-
 .ribbon-color {
   display: flex;
   flex-direction: column;
@@ -426,6 +419,40 @@ textarea {
   min-height: 0;
   overflow: hidden;
   position: relative;
+}
+
+.sidebar-splitter {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(249, 242, 233, 0.92));
+  cursor: col-resize;
+  touch-action: none;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.sidebar-splitter::after {
+  content: "";
+  position: absolute;
+  inset: 28% 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: rgba(110, 101, 92, 0.45);
+}
+
+.sidebar-splitter:hover,
+.app-shell.layout-resizing .sidebar-splitter {
+  border-color: var(--line-strong);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(250, 235, 220, 0.98));
+}
+
+.sidebar-splitter-left {
+  grid-area: split-left;
+}
+
+.sidebar-splitter-right {
+  grid-area: split-right;
 }
 
 .right-sidebar {
@@ -722,13 +749,13 @@ textarea {
 
 .canvas-wrap {
   position: relative;
-  overflow: hidden;
-  flex: 0 0 auto;
+  overflow: auto;
+  scrollbar-gutter: stable both-edges;
+  flex: 1 1 auto;
   min-height: 0;
-  height: 190vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  height: auto;
+  min-height: 420px;
+  display: block;
   padding: 0.24rem;
   border: 1px solid var(--line);
   border-radius: 20px;
@@ -964,6 +991,49 @@ textarea {
   font-weight: 600;
 }
 
+.bubble-library-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+  max-height: 38vh;
+  overflow: auto;
+  padding-right: 0.2rem;
+}
+
+.bubble-library-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.42rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.bubble-library-item svg {
+  width: 100%;
+  height: 56px;
+}
+
+.bubble-library-item span {
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.2;
+}
+
+.bubble-library-item:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.bubble-library-item.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(147, 78, 36, 0.2);
+}
+
 .danger-btn {
   background: transparent;
   border-color: #fca5a5;
@@ -984,6 +1054,10 @@ textarea {
       "canvas"
       "right";
     overflow: visible;
+  }
+
+  .sidebar-splitter {
+    display: none;
   }
 
   .left-sidebar,

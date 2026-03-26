@@ -5,6 +5,9 @@
   "type": "module",
   "packageManager": "pnpm@10.6.5",
   "scripts": {
+    "sync:fonts": "node scripts/syncBundledFonts.mjs",
+    "predev": "pnpm sync:fonts",
+    "prebuild": "pnpm sync:fonts",
     "dev": "node scripts/launch.mjs --dev-server",
     "build": "tsc -b && vite build",
     "start": "node scripts/launch.mjs",
@@ -17,16 +20,26 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@fontpkg/fz-fang-song-z02-s": "^5.30.0",
+    "@fontpkg/lxgw-wen-kai": "^1.520.0",
+    "@fontpkg/muyao-softbrush": "^1.0.0",
+    "@fontpkg/pang-men-zheng-dao-biao-ti-ti-mian-fei-ban": "^4.0.0",
+    "@fontpkg/source-han-sans": "^2.5.2",
+    "@fontpkg/source-han-serif-sc": "^2.3.3",
+    "@fontpkg/yrdzst": "^1.23.0",
+    "@fontpkg/zcool-ku-hei": "^3.12.0",
     "@tauri-apps/api": "^2.3.0",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-fs": "^2.2.0",
     "konva": "^9.3.22",
     "pdf-lib": "^1.17.1",
+    "polygon-clipping": "^0.15.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-konva": "^19.0.3",
-    "zustand": "^5.0.3",
-    "zod": "^3.24.2"
+    "svg-path-properties": "^2.0.2",
+    "zod": "^3.24.2",
+    "zustand": "^5.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",

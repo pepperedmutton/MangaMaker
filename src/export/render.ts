@@ -1,10 +1,47 @@
 import { PDFDocument } from "pdf-lib";
 import {
-  getBubbleBasePoints,
-  getDisplayedTextContent,
   getRenderableLayers,
 } from "../domain/helpers";
 import type { Page, Panel } from "../domain/schema";
+import {
+  getTextLineHeightByDirection,
+  layoutTextForDisplayContent,
+  resolveVerticalColumnAlignFromTextAlign,
+} from "../domain/textLayout";
+import {
+  getBubbleBodyPath,
+  getBubbleRegularTailStrokeOutlinePath,
+  getBubbleTailPath,
+  getThoughtCircles,
+} from "../ui/bubbleShapes";
+
+const PDF_EXPORT_JPEG_QUALITY = 0.84;
+const FULL_WIDTH_SPACE = "\u3000";
+const VERTICAL_QUESTION = "\uFE16";
+const VERTICAL_EXCLAMATION = "\uFE15";
+const VERTICAL_ELLIPSIS = "\uFE19";
+const VERTICAL_EM_DASH = "\uFE31";
+const VERTICAL_EN_DASH = "\uFE32";
+const VERTICAL_COMMA = "\uFE10";
+const VERTICAL_IDEOGRAPHIC_COMMA = "\uFE11";
+const VERTICAL_CENTERED_PUNCTUATION = new Set([
+  VERTICAL_QUESTION,
+  VERTICAL_EXCLAMATION,
+  VERTICAL_ELLIPSIS,
+  VERTICAL_EM_DASH,
+  VERTICAL_EN_DASH,
+  VERTICAL_COMMA,
+  VERTICAL_IDEOGRAPHIC_COMMA,
+]);
+const VERTICAL_PUNCTUATION_FINE_TUNE_X: Record<string, number> = {
+  [VERTICAL_QUESTION]: 0,
+  [VERTICAL_EXCLAMATION]: 0,
+  [VERTICAL_ELLIPSIS]: 0,
+  [VERTICAL_EM_DASH]: 0,
+  [VERTICAL_EN_DASH]: 0,
+  [VERTICAL_COMMA]: 0,
+  [VERTICAL_IDEOGRAPHIC_COMMA]: 0,
+};
 
 const loadImage = (src: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
@@ -48,42 +85,279 @@ const drawPanelImage = async (context: CanvasRenderingContext2D, panel: Panel) =
   context.restore();
 };
 
-const drawTextBlock = (
-  context: CanvasRenderingContext2D,
-  content: string,
-  x: number,
-  y: number,
-  maxWidth: number,
-  lineHeight: number,
+type TextAlign = "left" | "center" | "right";
+type VerticalAlign = "top" | "middle" | "bottom";
+
+const resolveAlignedTextX = (
+  boxX: number,
+  boxWidth: number,
+  lineWidth: number,
+  align: TextAlign,
 ) => {
-  const lines = content.split(/\r?\n/);
-  let cursorY = y;
+  if (align === "center") {
+    return boxX + (boxWidth - lineWidth) * 0.5;
+  }
+  if (align === "right") {
+    return boxX + boxWidth - lineWidth;
+  }
+  return boxX;
+};
 
-  for (const line of lines) {
-    if (line.length === 0) {
-      cursorY += lineHeight;
-      continue;
+const resolveAlignedTextYOffset = (
+  boxHeight: number,
+  blockHeight: number,
+  verticalAlign: VerticalAlign,
+) => {
+  const available = boxHeight - blockHeight;
+  if (verticalAlign === "middle") {
+    return available * 0.5;
+  }
+  if (verticalAlign === "bottom") {
+    return available;
+  }
+  return 0;
+};
+
+const createVerticalPunctuationOffsetMeasurer = (
+  context: CanvasRenderingContext2D,
+  fontSize: number,
+  fontFamily: string,
+  fontWeight: number,
+) => {
+  const font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  const cache = new Map<string, number>();
+  return (unit: string) => {
+    if (!VERTICAL_CENTERED_PUNCTUATION.has(unit)) {
+      return 0;
     }
+    const cached = cache.get(unit);
+    if (cached !== undefined) {
+      return cached;
+    }
+    context.font = font;
+    const metrics = context.measureText(unit);
+    const left =
+      Number.isFinite(metrics.actualBoundingBoxLeft) ? metrics.actualBoundingBoxLeft : 0;
+    const right =
+      Number.isFinite(metrics.actualBoundingBoxRight)
+        ? metrics.actualBoundingBoxRight
+        : metrics.width;
+    const leftEdgeX = -left;
+    const rightEdgeX = right;
+    const inkCenterX = (leftEdgeX + rightEdgeX) * 0.5;
+    const advanceCenterX = metrics.width * 0.5;
+    const offsetX =
+      advanceCenterX - inkCenterX + (VERTICAL_PUNCTUATION_FINE_TUNE_X[unit] ?? 0);
+    cache.set(unit, offsetX);
+    return offsetX;
+  };
+};
 
-    const words = line.split(/\s+/);
-    let current = "";
+const splitGraphemes = (value: string) => Array.from(value);
 
-    for (const word of words) {
-      const next = current.length > 0 ? `${current} ${word}` : word;
-      if (context.measureText(next).width > maxWidth && current.length > 0) {
-        context.fillText(current, x, cursorY);
-        current = word;
-        cursorY += lineHeight;
-      } else {
-        current = next;
+const measureLineWidthWithLetterSpacing = (
+  context: CanvasRenderingContext2D,
+  line: string,
+  letterSpacing: number,
+) => {
+  if (line.length === 0) {
+    return 0;
+  }
+  if (Math.abs(letterSpacing) < 0.0001) {
+    return context.measureText(line).width;
+  }
+  const units = splitGraphemes(line);
+  if (units.length === 0) {
+    return 0;
+  }
+  const glyphWidth = units.reduce((width, unit) => width + context.measureText(unit).width, 0);
+  return glyphWidth + (units.length - 1) * letterSpacing;
+};
+
+const drawLineWithLetterSpacing = (
+  context: CanvasRenderingContext2D,
+  line: string,
+  x: number,
+  baselineY: number,
+  letterSpacing: number,
+) => {
+  if (line.length === 0) {
+    return;
+  }
+  if (Math.abs(letterSpacing) < 0.0001) {
+    context.fillText(line, x, baselineY);
+    return;
+  }
+  const units = splitGraphemes(line);
+  let cursorX = x;
+  for (const unit of units) {
+    context.fillText(unit, cursorX, baselineY);
+    cursorX += context.measureText(unit).width + letterSpacing;
+  }
+};
+
+const drawTextInBox = (
+  context: CanvasRenderingContext2D,
+  options: {
+    content: string;
+    direction: "horizontal" | "vertical";
+    boxX: number;
+    boxY: number;
+    boxWidth: number;
+    boxHeight: number;
+    fontSize: number;
+    fontFamily: string;
+    fontWeight: number;
+    lineHeightRatio: number;
+    letterSpacing: number;
+    lineSpacing: number;
+    textAlign: TextAlign;
+    verticalAlign: VerticalAlign;
+    color: string;
+  },
+) => {
+  const lines = options.content.replace(/\r\n/g, "\n").split("\n");
+  const lineHeight = Math.max(1, options.fontSize * options.lineHeightRatio + options.lineSpacing);
+  if (options.direction === "vertical") {
+    const rowCount = Math.max(1, lines.length);
+    const columnCount = Math.max(1, ...lines.map((line) => Array.from(line).length));
+    const rowAdvance = Math.max(1, lineHeight + options.letterSpacing);
+    const sampleCellWidth = Math.max(
+      options.fontSize * 0.75,
+      context.measureText("\u56fd").width,
+      context.measureText("M").width,
+      context.measureText("\u53e3").width,
+    );
+    const columnAdvance = Math.max(1, sampleCellWidth * 1.04 + options.lineSpacing);
+    const blockWidth = columnCount * columnAdvance;
+    const blockHeight = rowCount * rowAdvance;
+    const originX = resolveAlignedTextX(
+      options.boxX,
+      options.boxWidth,
+      blockWidth,
+      options.textAlign,
+    );
+    const originY =
+      options.boxY +
+      resolveAlignedTextYOffset(options.boxHeight, blockHeight, options.verticalAlign);
+
+    context.save();
+    context.fillStyle = options.color;
+    context.beginPath();
+    context.rect(options.boxX, options.boxY, options.boxWidth, options.boxHeight);
+    context.clip();
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    const punctuationOffsetMeasurer = createVerticalPunctuationOffsetMeasurer(
+      context,
+      options.fontSize,
+      options.fontFamily,
+      options.fontWeight,
+    );
+
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = Array.from(lines[rowIndex] ?? "");
+      for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+        const unit = row[columnIndex] ?? FULL_WIDTH_SPACE;
+        if (unit.length === 0 || unit === FULL_WIDTH_SPACE) {
+          continue;
+        }
+        context.fillText(
+          unit,
+          originX +
+            columnIndex * columnAdvance +
+            columnAdvance * 0.5 +
+            punctuationOffsetMeasurer(unit),
+          originY + rowIndex * rowAdvance + rowAdvance * 0.5,
+        );
       }
     }
 
-    if (current.length > 0) {
-      context.fillText(current, x, cursorY);
-      cursorY += lineHeight;
+    context.restore();
+    return;
+  }
+
+  const blockHeight = lines.length * lineHeight;
+  const yOffset = resolveAlignedTextYOffset(
+    options.boxHeight,
+    blockHeight,
+    options.verticalAlign,
+  );
+  let baselineY = options.boxY + yOffset + options.fontSize;
+
+  context.save();
+  context.fillStyle = options.color;
+  context.beginPath();
+  context.rect(options.boxX, options.boxY, options.boxWidth, options.boxHeight);
+  context.clip();
+
+  for (const line of lines) {
+    const lineWidth = measureLineWidthWithLetterSpacing(context, line, options.letterSpacing);
+    const lineX = resolveAlignedTextX(
+      options.boxX,
+      options.boxWidth,
+      lineWidth,
+      options.textAlign,
+    );
+    drawLineWithLetterSpacing(context, line, lineX, baselineY, options.letterSpacing);
+    baselineY += lineHeight;
+  }
+
+  context.restore();
+};
+
+const drawBubble = (context: CanvasRenderingContext2D, bubble: Page["bubbles"][number]) => {
+  const bubbleOpacity = Math.max(0, Math.min(1, bubble.opacity));
+  const hasStroke = bubble.strokeWidth > 0;
+  const shouldShowTail = bubble.showTail && bubble.bubbleType !== "explosion";
+  const shouldRenderRegularTail = shouldShowTail && bubble.bubbleType !== "thought";
+  const shouldRenderThoughtTail = shouldShowTail && bubble.bubbleType === "thought";
+  const bodyPath = new Path2D(getBubbleBodyPath(bubble));
+  const tailFillPath = shouldRenderRegularTail ? new Path2D(getBubbleTailPath(bubble)) : null;
+  const strokePath = new Path2D(
+    shouldRenderRegularTail ? getBubbleRegularTailStrokeOutlinePath(bubble) : getBubbleBodyPath(bubble),
+  );
+  const fillPath = new Path2D(getBubbleBodyPath(bubble));
+  if (tailFillPath) {
+    fillPath.addPath(tailFillPath);
+  }
+
+  context.save();
+  context.translate(bubble.x, bubble.y);
+  context.lineJoin = "round";
+  context.lineCap = "round";
+
+  context.save();
+  context.globalAlpha = bubbleOpacity;
+  context.fillStyle = bubble.backgroundColor;
+  context.fill(fillPath);
+  context.restore();
+
+  if (hasStroke) {
+    context.strokeStyle = bubble.strokeColor;
+    context.lineWidth = bubble.strokeWidth;
+    context.stroke(strokePath);
+  }
+
+  if (shouldRenderThoughtTail) {
+    const circles = getThoughtCircles(bubble);
+    for (const circle of circles) {
+      context.beginPath();
+      context.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
+      context.save();
+      context.globalAlpha = bubbleOpacity;
+      context.fillStyle = bubble.backgroundColor;
+      context.fill();
+      context.restore();
+      if (hasStroke) {
+        context.strokeStyle = bubble.strokeColor;
+        context.lineWidth = bubble.strokeWidth;
+        context.stroke();
+      }
     }
   }
+
+  context.restore();
 };
 
 export const renderPageToCanvas = async (page: Page) => {
@@ -115,47 +389,41 @@ export const renderPageToCanvas = async (page: Page) => {
 
     if (entry.objectType === "text") {
       const text = entry.object;
-      context.fillStyle = text.color;
-      context.font = `${text.fontSize}px ${text.fontFamily}`;
-      drawTextBlock(
-        context,
-        getDisplayedTextContent(text),
-        text.x,
-        text.y + text.fontSize,
-        text.width,
-        Math.round(text.fontSize * (text.direction === "vertical" ? 1.1 : 1.35)),
-      );
+      const lineHeightRatio = getTextLineHeightByDirection(text.direction);
+      context.font = `${text.fontWeight} ${text.fontSize}px ${text.fontFamily}`;
+      const displayContent = layoutTextForDisplayContent(text.content, {
+        direction: text.direction,
+        maxWidth: text.width,
+        maxHeight: text.height,
+        fontSize: text.fontSize,
+        lineHeight: lineHeightRatio,
+        letterSpacing: text.letterSpacing,
+        lineSpacing: text.lineSpacing,
+        verticalColumnAlign: resolveVerticalColumnAlignFromTextAlign(text.textAlign),
+        measureText: (value) => context.measureText(value).width,
+      });
+      drawTextInBox(context, {
+        content: displayContent,
+        direction: text.direction,
+        boxX: text.x,
+        boxY: text.y,
+        boxWidth: text.width,
+        boxHeight: text.height,
+        fontSize: text.fontSize,
+        fontFamily: text.fontFamily,
+        fontWeight: text.fontWeight,
+        lineHeightRatio,
+        letterSpacing: text.letterSpacing,
+        lineSpacing: text.lineSpacing,
+        textAlign: text.textAlign,
+        verticalAlign: text.verticalAlign,
+        color: text.color,
+      });
       continue;
     }
 
     const bubble = entry.object;
-    const base = getBubbleBasePoints(bubble);
-    context.fillStyle = "#ffffff";
-    context.strokeStyle = "#111111";
-    context.lineWidth = 4;
-    context.beginPath();
-    context.roundRect(bubble.x, bubble.y, bubble.width, bubble.height, 28);
-    context.fill();
-    context.beginPath();
-    context.roundRect(bubble.x, bubble.y, bubble.width, bubble.height, 28);
-    context.stroke();
-    context.beginPath();
-    context.moveTo(base.left.x, base.left.y);
-    context.lineTo(bubble.tailTip.x, bubble.tailTip.y);
-    context.lineTo(base.right.x, base.right.y);
-    context.closePath();
-    context.fill();
-    context.stroke();
-    context.fillStyle = "#111111";
-    context.font = `${bubble.fontSize}px Georgia`;
-    drawTextBlock(
-      context,
-      bubble.text,
-      bubble.x + 24,
-      bubble.y + bubble.fontSize + 18,
-      bubble.width - 48,
-      Math.round(bubble.fontSize * 1.3),
-    );
+    drawBubble(context, bubble);
   }
 
   return canvas;
@@ -166,15 +434,23 @@ export const renderPageToPngDataUrl = async (page: Page) => {
   return canvas.toDataURL("image/png");
 };
 
+export const renderPageToJpegDataUrl = async (
+  page: Page,
+  quality = PDF_EXPORT_JPEG_QUALITY,
+) => {
+  const canvas = await renderPageToCanvas(page);
+  return canvas.toDataURL("image/jpeg", Math.max(0.1, Math.min(1, quality)));
+};
+
 export const renderProjectToPdfDataUrl = async (pages: Page[]) => {
   const pdf = await PDFDocument.create();
 
   for (const page of pages) {
-    const pngDataUrl = await renderPageToPngDataUrl(page);
-    const pngBytes = await fetch(pngDataUrl).then((response) => response.arrayBuffer());
-    const pngImage = await pdf.embedPng(pngBytes);
+    const jpegDataUrl = await renderPageToJpegDataUrl(page, PDF_EXPORT_JPEG_QUALITY);
+    const jpegBytes = await fetch(jpegDataUrl).then((response) => response.arrayBuffer());
+    const jpegImage = await pdf.embedJpg(jpegBytes);
     const pdfPage = pdf.addPage([page.width, page.height]);
-    pdfPage.drawImage(pngImage, {
+    pdfPage.drawImage(jpegImage, {
       x: 0,
       y: 0,
       width: page.width,

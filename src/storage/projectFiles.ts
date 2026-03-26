@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import type { Project } from "../domain/schema";
+import { serializeProjectForStorage } from "./projectSerialization";
 
 const isTauriRuntime = () => typeof window !== "undefined" && isTauri();
 const isWebRuntime = () => typeof window !== "undefined" && !isTauriRuntime();
@@ -26,11 +27,12 @@ export const isProjectsFilePersistenceAvailable = () =>
   isTauriRuntime() || isWebRuntime();
 
 export const saveProjectToProjectsFolder = async (project: Project) => {
+  const projectJson = serializeProjectForStorage(project);
   if (isTauriRuntime()) {
     return invoke<string>("write_project_draft", {
       project_id: project.id,
       project_title: project.title,
-      project_json: JSON.stringify(project),
+      project_json: projectJson,
     });
   }
   if (!isWebRuntime()) {
@@ -46,7 +48,7 @@ export const saveProjectToProjectsFolder = async (project: Project) => {
       body: JSON.stringify({
         project_id: project.id,
         project_title: project.title,
-        project_json: JSON.stringify(project),
+        project_json: projectJson,
       }),
     },
   );

@@ -8,6 +8,30 @@ importers:
 
   .:
     dependencies:
+      '@fontpkg/fz-fang-song-z02-s':
+        specifier: ^5.30.0
+        version: 5.30.0
+      '@fontpkg/lxgw-wen-kai':
+        specifier: ^1.520.0
+        version: 1.520.0
+      '@fontpkg/muyao-softbrush':
+        specifier: ^1.0.0
+        version: 1.0.0
+      '@fontpkg/pang-men-zheng-dao-biao-ti-ti-mian-fei-ban':
+        specifier: ^4.0.0
+        version: 4.0.0
+      '@fontpkg/source-han-sans':
+        specifier: ^2.5.2
+        version: 2.5.2
+      '@fontpkg/source-han-serif-sc':
+        specifier: ^2.3.3
+        version: 2.3.3
+      '@fontpkg/yrdzst':
+        specifier: ^1.23.0
+        version: 1.23.0
+      '@fontpkg/zcool-ku-hei':
+        specifier: ^3.12.0
+        version: 3.12.0
       '@tauri-apps/api':
         specifier: ^2.3.0
         version: 2.10.1
@@ -23,6 +47,9 @@ importers:
       pdf-lib:
         specifier: ^1.17.1
         version: 1.17.1
+      polygon-clipping:
+        specifier: ^0.15.7
+        version: 0.15.7
       react:
         specifier: ^19.0.0
         version: 19.2.4
@@ -32,6 +59,9 @@ importers:
       react-konva:
         specifier: ^19.0.3
         version: 19.2.3(@types/react@19.2.14)(konva@9.3.22)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      svg-path-properties:
+        specifier: ^2.0.2
+        version: 2.0.2
       zod:
         specifier: ^3.24.2
         version: 3.25.76
@@ -307,6 +337,30 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@fontpkg/fz-fang-song-z02-s@5.30.0':
+    resolution: {integrity: sha512-aBQdzyjFN5blLmXu3QydxDxvJR4/vOHonhKoo1cd7UZVa/jj2+8qOmr8+mfelFEgypAO4R6CMqmvzjVTis+apg==}
+
+  '@fontpkg/lxgw-wen-kai@1.520.0':
+    resolution: {integrity: sha512-IPLyfVTKz0sjgU6mMRmjxLBRZo7lgG2xVg1Aha2gPv5wp66M/Gvv2W7sHEDaEgv6zAO63xFtRuvxviInJBKWOg==}
+
+  '@fontpkg/muyao-softbrush@1.0.0':
+    resolution: {integrity: sha512-4oB7hD3Z4EM1AYufu7jmSmqidwE8UZe4tO59IONueeOOnEIZx/sSKa+HZLqj5QiWbHuSTgoZt0e4fsEaSkxfAQ==}
+
+  '@fontpkg/pang-men-zheng-dao-biao-ti-ti-mian-fei-ban@4.0.0':
+    resolution: {integrity: sha512-3FDJqyHgZ+c0Kb9Yp+7DapFIaynNAyajsaf1munWzBjJHspCEeHRT+tTNgNpmgO7YpM9kOTLDO38hCs4nMv5VQ==}
+
+  '@fontpkg/source-han-sans@2.5.2':
+    resolution: {integrity: sha512-zOcojEyWrwYorTxVZSMwsX1wuLA6Y4AIOE3Vh2urq6Z1AkW2h2quyiGKdLCei2hg8+nVvQGEJYzY8YemYSEFQg==}
+
+  '@fontpkg/source-han-serif-sc@2.3.3':
+    resolution: {integrity: sha512-i4XjDhA2tDPkoAMEA40TLmVMG9NM8/Mu89M0LoNpuOLJpmFIGEED9BAcXqLYGRnpvw1E1IKa/sx76ReUcJQoZQ==}
+
+  '@fontpkg/yrdzst@1.23.0':
+    resolution: {integrity: sha512-3OrXRguaf24RoXveacQBk4y7wDjvFKbaBg1nnMd8QTUd24ju0VTg707mV7ypWEeXsbdrXFdtxGo39Os8AnbzjA==}
+
+  '@fontpkg/zcool-ku-hei@3.12.0':
+    resolution: {integrity: sha512-O7tWr6SehokTLuiT3uoy0N/2wWslWt547ymyU5fWoTWmbpEAc10UyJFVbUlCp+prKEcDFbBIFDB2EFHrqj8g6A==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -787,6 +841,9 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  polygon-clipping@0.15.7:
+    resolution: {integrity: sha512-nhfdr83ECBg6xtqOAJab1tbksbBAOMUltN60bU+llHVOL0e5Onm1WpAXXWXVB39L8AJFssoIhEVuy/S90MmotA==}
+
   postcss@8.5.8:
     resolution: {integrity: sha512-OW/rX8O/jXnm82Ey1k44pObPtdblfiuWnrd8X7GJ7emImCOstunGbXUpp7HdBrFQX6rJzn3sPT397Wp5aCwCHg==}
     engines: {node: ^10 || ^12 || >=14}
@@ -817,6 +874,9 @@ packages:
     resolution: {integrity: sha512-9nfp2hYpCwOjAN+8TZFGhtWEwgvWHXqESH8qT89AT/lWklpLON22Lc8pEtnpsZz7VmawabSU0gCjnj8aC0euHQ==}
     engines: {node: '>=0.10.0'}
 
+  robust-predicates@3.0.3:
+    resolution: {integrity: sha512-NS3levdsRIUOmiJ8FZWCP7LG3QpJyrs/TE0Zpf1yvZu8cAJJ6QMW92H1c7kWpdIHo8RvmLxN/o2JXTKHp74lUA==}
+
   rollup@4.59.0:
     resolution: {integrity: sha512-2oMpl67a3zCH9H79LeMcbDhXW/UmWG/y2zuqnF2jQq5uq9TbM9TVyXvA4+t+ne2IIkBdrLpAaRQAvo7YI/Yyeg==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
@@ -836,6 +896,10 @@ packages:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
 
+  splaytree@3.2.3:
+    resolution: {integrity: sha512-7OXrNWzy6CK+r7Ch9OLPBDTKfB6XlWHjX4P0RU5B3IgFuWPeYN0XtRtlexGRjgbQxpfaUve6jTAwBGWuGntz/w==}
+    engines: {node: '>=18.20 || >=20'}
+
   stackback@0.0.2:
     resolution: {integrity: sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==}
 
@@ -844,6 +908,10 @@ packages:
 
   strip-literal@3.1.0:
     resolution: {integrity: sha512-8r3mkIM/2+PpjHoOtiAW8Rg3jJLHaV7xPwG+YRGrv6FP0wwk/toTpATxWYOW0BKdWwl82VT2tFYi5DlROa0Mxg==}
+
+  svg-path-properties@2.0.2:
+    resolution: {integrity: sha512-NsSMBNZmod9Gr22gxa8FOiZUIzrI8o65veuCyppoNftNfpKjP5qoouA3ZyioOsQ2a4O8cRV8rHmG9LZF2HhXvw==}
+    engines: {node: '>=22.0.0'}
 
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
@@ -1177,6 +1245,22 @@ snapshots:
 
   '@esbuild/win32-x64@0.25.12':
     optional: true
+
+  '@fontpkg/fz-fang-song-z02-s@5.30.0': {}
+
+  '@fontpkg/lxgw-wen-kai@1.520.0': {}
+
+  '@fontpkg/muyao-softbrush@1.0.0': {}
+
+  '@fontpkg/pang-men-zheng-dao-biao-ti-ti-mian-fei-ban@4.0.0': {}
+
+  '@fontpkg/source-han-sans@2.5.2': {}
+
+  '@fontpkg/source-han-serif-sc@2.3.3': {}
+
+  '@fontpkg/yrdzst@1.23.0': {}
+
+  '@fontpkg/zcool-ku-hei@3.12.0': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -1594,6 +1678,11 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.2
 
+  polygon-clipping@0.15.7:
+    dependencies:
+      robust-predicates: 3.0.3
+      splaytree: 3.2.3
+
   postcss@8.5.8:
     dependencies:
       nanoid: 3.3.11
@@ -1625,6 +1714,8 @@ snapshots:
   react-refresh@0.17.0: {}
 
   react@19.2.4: {}
+
+  robust-predicates@3.0.3: {}
 
   rollup@4.59.0:
     dependencies:
@@ -1665,6 +1756,8 @@ snapshots:
 
   source-map-js@1.2.1: {}
 
+  splaytree@3.2.3: {}
+
   stackback@0.0.2: {}
 
   std-env@3.10.0: {}
@@ -1672,6 +1765,8 @@ snapshots:
   strip-literal@3.1.0:
     dependencies:
       js-tokens: 9.0.1
+
+  svg-path-properties@2.0.2: {}
 
   tinybench@2.9.0: {}
 

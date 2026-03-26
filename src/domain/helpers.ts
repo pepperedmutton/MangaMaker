@@ -120,21 +120,243 @@ export const shiftBubbleTail = (bubble: Bubble, deltaX: number, deltaY: number):
   },
 });
 
+export const getBubbleTextBounds = (
+  bubble: Pick<Bubble, "width" | "height" | "bubbleType">,
+) => {
+  let paddingX = 24;
+  let paddingY = 24;
+
+  if (bubble.bubbleType === "thought") {
+    paddingX = bubble.width * 0.22;
+    paddingY = bubble.height * 0.2;
+  } else if (bubble.bubbleType === "cloud" || bubble.bubbleType === "cloudDense") {
+    paddingX = bubble.width * 0.18;
+    paddingY = bubble.height * 0.16;
+  } else if (bubble.bubbleType === "whisper") {
+    // Whisper has additional shape clipping now, so keep tighter insets
+    // to avoid wasting too much interior space.
+    paddingX = bubble.width * 0.16;
+    paddingY = bubble.height * 0.14;
+  } else if (
+    bubble.bubbleType === "explosion" ||
+    bubble.bubbleType === "scream" ||
+    bubble.bubbleType === "burstSoft" ||
+    bubble.bubbleType === "jagged" ||
+    bubble.bubbleType === "electric" ||
+    bubble.bubbleType === "wave" ||
+    bubble.bubbleType === "rough"
+  ) {
+    paddingX = bubble.width * 0.2;
+    paddingY = bubble.height * 0.18;
+  }
+
+  const clampedPaddingX = clamp(paddingX, 8, Math.max(8, bubble.width * 0.45 - 1));
+  const clampedPaddingY = clamp(paddingY, 8, Math.max(8, bubble.height * 0.45 - 1));
+
+  return {
+    x: clampedPaddingX,
+    y: clampedPaddingY,
+    width: Math.max(1, bubble.width - clampedPaddingX * 2),
+    height: Math.max(1, bubble.height - clampedPaddingY * 2),
+  };
+};
+
+type BubbleTextProfilePreset = {
+  exponent: number;
+  minRatio: number;
+};
+
+const getBubbleTextProfilePreset = (
+  bubbleType: Bubble["bubbleType"],
+): BubbleTextProfilePreset => {
+  switch (bubbleType) {
+    case "diamond":
+    case "speed":
+    case "arrow":
+    case "electric":
+      return { exponent: 1, minRatio: 0.24 };
+    case "hexagon":
+      return { exponent: 1.45, minRatio: 0.3 };
+    case "octagon":
+      return { exponent: 1.9, minRatio: 0.34 };
+    case "explosion":
+    case "scream":
+    case "jagged":
+    case "wave":
+      return { exponent: 1.35, minRatio: 0.3 };
+    case "whisper":
+      // Clip guard is applied for whisper, so allow wider side columns.
+      return { exponent: 2.2, minRatio: 0.42 };
+    case "ellipse":
+    case "oval":
+    case "burstSoft":
+    case "bubbleRound":
+    case "cloud":
+    case "thought":
+    case "cloudDense":
+    case "balloonTall":
+    case "rough":
+    case "droplet":
+    case "pinched":
+    case "heart":
+      return { exponent: 2.1, minRatio: 0.34 };
+    case "round":
+    case "roundedSquare":
+    case "square":
+    case "balloonWide":
+    case "caption":
+    case "bracket":
+    case "doubleOutline":
+    default:
+      return { exponent: 5.2, minRatio: 0.74 };
+  }
+};
+
+const sampleSuperellipseProfile = (position: number, exponent: number) => {
+  const clampedPosition = clamp(position, 0, 1);
+  const centerOffset = Math.abs(clampedPosition * 2 - 1);
+  if (centerOffset >= 1) {
+    return 0;
+  }
+  if (exponent <= 1.001) {
+    return 1 - centerOffset;
+  }
+  const base = Math.max(0, 1 - centerOffset ** exponent);
+  return base ** (1 / exponent);
+};
+
+const resolveBubbleProfileRatio = (
+  bubbleType: Bubble["bubbleType"],
+  position: number,
+) => {
+  const preset = getBubbleTextProfilePreset(bubbleType);
+  const shapeRatio = sampleSuperellipseProfile(position, preset.exponent);
+  return clamp(preset.minRatio + (1 - preset.minRatio) * shapeRatio, preset.minRatio, 1);
+};
+
+export const getBubbleTextFlowProfile = (
+  bubble: Pick<Bubble, "bubbleType">,
+  textBounds: Pick<Rect, "width" | "height">,
+  metrics: {
+    fontSize: number;
+    lineHeight: number;
+    measureText: (text: string) => number;
+  },
+) => {
+  const rowAdvance = Math.max(1, metrics.fontSize * metrics.lineHeight);
+  const sampleCellWidth = Math.max(
+    metrics.fontSize * 0.75,
+    metrics.measureText("\u56fd"),
+    metrics.measureText("M"),
+    metrics.measureText("\u53e3"),
+  );
+  const columnAdvance = Math.max(1, sampleCellWidth * 1.04);
+
+  const lineCount = Math.max(1, Math.floor(textBounds.height / rowAdvance));
+  const columnCount = Math.max(1, Math.floor(textBounds.width / columnAdvance));
+  const maxRows = Math.max(1, Math.floor(textBounds.height / rowAdvance));
+
+  const lineWidthProfile = Array.from({ length: lineCount }, (_, index) => {
+    if (lineCount <= 2) {
+      return textBounds.width;
+    }
+    const position = (index + 0.5) / lineCount;
+    return Math.max(
+      1,
+      textBounds.width * resolveBubbleProfileRatio(bubble.bubbleType, position),
+    );
+  });
+
+  // Vertical columns are laid out from right to left, so sample profile from right edge first.
+  const columnRowProfile = Array.from({ length: columnCount }, (_, index) => {
+    if (columnCount <= 2) {
+      return maxRows;
+    }
+    const position = 1 - (index + 0.5) / columnCount;
+    const ratio = resolveBubbleProfileRatio(bubble.bubbleType, position);
+    return Math.max(1, Math.min(maxRows, Math.floor(maxRows * ratio)));
+  });
+
+  return {
+    lineWidthProfile,
+    columnRowProfile,
+  };
+};
+
 const getBubbleLocalCenter = (bubble: Pick<Bubble, "width" | "height">) => ({
   x: bubble.width * 0.5,
   y: bubble.height * 0.5,
 });
 
+type BubbleBoundarySample = Pick<
+  Bubble,
+  | "width"
+  | "height"
+  | "bubbleType"
+  | "spikeDepth"
+  | "spikeCount"
+  | "tailBaseAngle"
+> & {
+  customPoints?: Point[];
+};
+
+const getCustomBubbleBoundaryPoint = (
+  bubble: BubbleBoundarySample,
+  target: Point,
+) => {
+  const points = bubble.customPoints;
+  if (!points || points.length < 3) {
+    return null;
+  }
+  const center = getBubbleLocalCenter(bubble);
+  const direction = {
+    x: target.x - center.x,
+    y: target.y - center.y,
+  };
+  if (Math.abs(direction.x) < 0.0001 && Math.abs(direction.y) < 0.0001) {
+    return null;
+  }
+
+  let nearestT = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < points.length; index += 1) {
+    const start = points[index];
+    const end = points[(index + 1) % points.length];
+    const segment = {
+      x: end.x - start.x,
+      y: end.y - start.y,
+    };
+    const toSegmentStart = {
+      x: start.x - center.x,
+      y: start.y - center.y,
+    };
+    const denominator = direction.x * segment.y - direction.y * segment.x;
+    if (Math.abs(denominator) < 0.000001) {
+      continue;
+    }
+    const t =
+      (toSegmentStart.x * segment.y - toSegmentStart.y * segment.x) / denominator;
+    const u =
+      (toSegmentStart.x * direction.y - toSegmentStart.y * direction.x) / denominator;
+    if (t < 0 || u < -0.0001 || u > 1.0001) {
+      continue;
+    }
+    if (t < nearestT) {
+      nearestT = t;
+    }
+  }
+
+  if (!Number.isFinite(nearestT)) {
+    return null;
+  }
+
+  return {
+    x: center.x + direction.x * nearestT,
+    y: center.y + direction.y * nearestT,
+  };
+};
+
 const getBubbleLocalBoundaryPoint = (
-  bubble: Pick<
-    Bubble,
-    | "width"
-    | "height"
-    | "bubbleType"
-    | "spikeDepth"
-    | "spikeCount"
-    | "tailBaseAngle"
-  >,
+  bubble: BubbleBoundarySample,
   target: Point,
 ) => {
   const center = getBubbleLocalCenter(bubble);
@@ -147,7 +369,18 @@ const getBubbleLocalBoundaryPoint = (
   let scale: number;
   switch (bubble.bubbleType) {
     case "ellipse":
-    case "oval": {
+    case "oval":
+    case "whisper":
+    case "burstSoft":
+    case "hexagon":
+    case "octagon":
+    case "diamond":
+    case "heart":
+    case "balloonTall":
+    case "balloonWide":
+    case "droplet":
+    case "pinched":
+    case "doubleOutline": {
       const radiusX = bubble.width * 0.5;
       const radiusY = bubble.height * 0.5;
       scale =
@@ -164,7 +397,8 @@ const getBubbleLocalBoundaryPoint = (
       break;
     }
     case "cloud":
-    case "thought": {
+    case "thought":
+    case "cloudDense": {
       const radiusX = bubble.width * 0.425;
       const radiusY = bubble.height * 0.425;
       scale =
@@ -175,15 +409,30 @@ const getBubbleLocalBoundaryPoint = (
         );
       break;
     }
-    case "explosion": {
+    case "explosion":
+    case "scream": {
       const radius = Math.min(bubble.width, bubble.height) * 0.48;
       scale = radius / Math.max(Math.hypot(dx, dy), 0.0001);
       break;
     }
-    case "jagged": {
+    case "jagged":
+    case "wave":
+    case "rough":
+    case "electric": {
       scale = Math.min(
         (bubble.width * 0.48) / Math.max(Math.abs(dx), 0.0001),
         (bubble.height * 0.48) / Math.max(Math.abs(dy), 0.0001),
+      );
+      break;
+    }
+    case "custom": {
+      const customBoundary = getCustomBubbleBoundaryPoint(bubble, target);
+      if (customBoundary) {
+        return customBoundary;
+      }
+      scale = Math.min(
+        (bubble.width * 0.5) / Math.max(Math.abs(dx), 0.0001),
+        (bubble.height * 0.5) / Math.max(Math.abs(dy), 0.0001),
       );
       break;
     }
@@ -206,15 +455,7 @@ const getBubbleLocalBoundaryPoint = (
 };
 
 const getLegacyBubbleTailBaseLocalPoint = (
-  bubble: Pick<
-    Bubble,
-    | "width"
-    | "height"
-    | "bubbleType"
-    | "spikeDepth"
-    | "spikeCount"
-    | "tailBaseAngle"
-  >,
+  bubble: BubbleBoundarySample,
 ) => {
   const center = getBubbleLocalCenter(bubble);
   const angleRad = ((bubble.tailBaseAngle - 90) * Math.PI) / 180;
@@ -225,28 +466,14 @@ const getLegacyBubbleTailBaseLocalPoint = (
 };
 
 export const getBubbleTailBaseLocalPoint = (
-  bubble: Pick<
-    Bubble,
-    | "width"
-    | "height"
-    | "bubbleType"
-    | "spikeDepth"
-    | "spikeCount"
-    | "tailBaseAngle"
-    | "tailBase"
-  >,
-) => (bubble.tailBase ? { ...bubble.tailBase } : getLegacyBubbleTailBaseLocalPoint(bubble));
+  bubble: BubbleBoundarySample & Pick<Bubble, "tailBase">,
+) =>
+  bubble.tailBase
+    ? clampBubbleTailBaseLocalPoint(bubble, bubble.tailBase)
+    : getLegacyBubbleTailBaseLocalPoint(bubble);
 
 export const clampBubbleTailBaseLocalPoint = (
-  bubble: Pick<
-    Bubble,
-    | "width"
-    | "height"
-    | "bubbleType"
-    | "spikeDepth"
-    | "spikeCount"
-    | "tailBaseAngle"
-  >,
+  bubble: BubbleBoundarySample,
   point: Point,
 ) => {
   const clampedPoint = {
@@ -254,17 +481,17 @@ export const clampBubbleTailBaseLocalPoint = (
     y: clamp(point.y, 0, bubble.height),
   };
   const center = getBubbleLocalCenter(bubble);
-  const boundary = getBubbleLocalBoundaryPoint(bubble, clampedPoint);
-  const currentDistance = Math.hypot(clampedPoint.x - center.x, clampedPoint.y - center.y);
-  const boundaryDistance = Math.hypot(boundary.x - center.x, boundary.y - center.y);
-  if (currentDistance <= boundaryDistance * 0.98 || boundaryDistance < 0.0001) {
-    return clampedPoint;
+  let boundary = getBubbleLocalBoundaryPoint(bubble, clampedPoint);
+  let boundaryDistance = Math.hypot(boundary.x - center.x, boundary.y - center.y);
+  if (boundaryDistance < 0.0001) {
+    boundary = getLegacyBubbleTailBaseLocalPoint(bubble);
+    boundaryDistance = Math.hypot(boundary.x - center.x, boundary.y - center.y);
   }
-  const ratio = (boundaryDistance * 0.98) / currentDistance;
-  return {
-    x: center.x + (clampedPoint.x - center.x) * ratio,
-    y: center.y + (clampedPoint.y - center.y) * ratio,
-  };
+  if (boundaryDistance < 0.0001) {
+    return center;
+  }
+  // Keep the base handle exactly on the bubble boundary to avoid a visible inner seam.
+  return boundary;
 };
 
 export const scaleBubbleLocalPoint = (
@@ -352,6 +579,7 @@ export const getRenderableLayers = (page: Page): RenderableLayer[] =>
 
 export const getBubbleBasePoints = (bubble: Bubble) => {
   const centerLocal = getBubbleTailBaseLocalPoint(bubble);
+  const localCenter = getBubbleLocalCenter(bubble);
   const center = {
     x: bubble.x + centerLocal.x,
     y: bubble.y + centerLocal.y,
@@ -363,18 +591,25 @@ export const getBubbleBasePoints = (bubble: Bubble) => {
     directionX = Math.cos(fallbackAngleRad);
     directionY = Math.sin(fallbackAngleRad);
   }
-  const length = Math.max(Math.hypot(directionX, directionY), 0.0001);
-  const perpendicularX = -directionY / length;
-  const perpendicularY = directionX / length;
   const halfWidth = bubble.tailWidth * 0.5;
-
-  const leftLocal = clampBubbleTailBaseLocalPoint(bubble, {
-    x: centerLocal.x + perpendicularX * halfWidth,
-    y: centerLocal.y + perpendicularY * halfWidth,
+  let radialX = centerLocal.x - localCenter.x;
+  let radialY = centerLocal.y - localCenter.y;
+  let radialLength = Math.hypot(radialX, radialY);
+  if (radialLength < 0.0001) {
+    const fallbackAngleRad = ((bubble.tailBaseAngle - 90) * Math.PI) / 180;
+    radialX = Math.cos(fallbackAngleRad);
+    radialY = Math.sin(fallbackAngleRad);
+    radialLength = 1;
+  }
+  const baseAngle = Math.atan2(radialY, radialX);
+  const angleOffset = Math.min(Math.PI * 0.45, halfWidth / Math.max(radialLength, 1));
+  const leftLocal = getBubbleLocalBoundaryPoint(bubble, {
+    x: localCenter.x + Math.cos(baseAngle + angleOffset),
+    y: localCenter.y + Math.sin(baseAngle + angleOffset),
   });
-  const rightLocal = clampBubbleTailBaseLocalPoint(bubble, {
-    x: centerLocal.x - perpendicularX * halfWidth,
-    y: centerLocal.y - perpendicularY * halfWidth,
+  const rightLocal = getBubbleLocalBoundaryPoint(bubble, {
+    x: localCenter.x + Math.cos(baseAngle - angleOffset),
+    y: localCenter.y + Math.sin(baseAngle - angleOffset),
   });
 
   return {

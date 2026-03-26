@@ -1,5 +1,6 @@
 import { commandRegistry } from "../commands/registry";
 import { projectSchema, type Project } from "../domain/schema";
+import { normalizeProjectForCurrentVersion } from "../storage/projectMigration";
 import { useEditorStore } from "../state/editorStore";
 
 declare global {
@@ -43,7 +44,9 @@ export const installAutomationApi = () => {
       load: (project) =>
         useEditorStore
           .getState()
-          .executeCommand("loadProject", { project: projectSchema.parse(project) }),
+          .executeCommand("loadProject", {
+            project: projectSchema.parse(normalizeProjectForCurrentVersion(project)),
+          }),
       reset: () => useEditorStore.getState().resetProject(),
     },
     session: {

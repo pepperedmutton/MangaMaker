@@ -1,5 +1,6 @@
 import templateProjectJson from "../generated/yukinoProject.json";
 import { projectSchema, type Project } from "../domain/schema";
+import { normalizeProjectForCurrentVersion } from "../storage/projectMigration";
 
 const DRAFT_KEY = "mangamaker:draft:v2";
 const DRAFT_POINTER_KEY = "mangamaker:draft:pointer";
@@ -31,12 +32,15 @@ const safeLocalStorageSet = (key: string, value: string) => {
   }
 };
 
+const parseNormalizedProject = (raw: unknown) =>
+  projectSchema.parse(normalizeProjectForCurrentVersion(raw));
+
 const parseProject = (raw: string | null) => {
   if (!raw) {
     return null;
   }
   try {
-    return projectSchema.parse(JSON.parse(raw));
+    return parseNormalizedProject(JSON.parse(raw));
   } catch (error) {
     console.warn("Skipped invalid MangaMaker project payload during sync:", error);
     return null;
@@ -58,7 +62,7 @@ const readProjectIndex = () => {
     return parsed
       .map((entry) => {
         try {
-          return projectSchema.parse(entry);
+          return parseNormalizedProject(entry);
         } catch (error) {
           console.warn("Skipped invalid project entry while syncing Yukino project:", error);
           return null;
@@ -80,7 +84,7 @@ const sortProjects = (projects: Project[]) =>
 const isTargetProject = (project: Project | null) =>
   Boolean(project && LEGACY_TITLES.has(project.title));
 
-const cloneTemplateProject = () => projectSchema.parse(templateProjectJson);
+const cloneTemplateProject = () => parseNormalizedProject(templateProjectJson);
 
 export const syncYukinoProject = () => {
   if (typeof window === "undefined") {

@@ -125,24 +125,67 @@ export const textItemSchema = z.object({
   content: z.string(),
   fontSize: z.number().positive(),
   fontFamily: z.string(),
+  fontWeight: z.number().int().min(100).max(900).default(400),
+  letterSpacing: z.number().min(-40).max(160).default(0),
+  lineSpacing: z.number().min(-40).max(160).default(0),
   color: z.string(),
   direction: textDirectionSchema.default("vertical"),
   textAlign: textAlignSchema.default("left"),
   verticalAlign: verticalAlignSchema.default("top"),
 });
 
-export const bubbleTypeSchema = z.enum([
-  "round",      // 圆角矩形
-  "ellipse",    // 椭圆
-  "cloud",      // 云朵
-  "square",     // 方形
-  "roundedSquare", // 圆角方形（更大圆角）
-  "oval",       // 长椭圆
-  "explosion",  // 爆炸形
-  "thought",    // 思考气泡
-  "jagged",     // 锯齿形
-  "bubbleRound", // 圆形气泡
-]);
+export const objectRefSchema = z.object({
+  objectType: z.enum(["panel", "text", "bubble"]),
+  objectId: z.string(),
+});
+
+export const groupSchema = z.object({
+  id: z.string(),
+  members: z.array(objectRefSchema).min(2),
+});
+
+export const BUBBLE_TYPE_VALUES = [
+  "round",
+  "ellipse",
+  "cloud",
+  "square",
+  "roundedSquare",
+  "oval",
+  "explosion",
+  "thought",
+  "jagged",
+  "bubbleRound",
+  "whisper",
+  "scream",
+  "burstSoft",
+  "hexagon",
+  "octagon",
+  "diamond",
+  "heart",
+  "bracket",
+  "caption",
+  "speed",
+  "cloudDense",
+  "balloonTall",
+  "balloonWide",
+  "wave",
+  "rough",
+  "droplet",
+  "arrow",
+  "pinched",
+  "doubleOutline",
+  "electric",
+  "custom",
+] as const;
+
+export const bubbleTypeSchema = z.enum(BUBBLE_TYPE_VALUES);
+
+const bubbleCustomHandleProfileSchema = z.object({
+  // Indices in customPoints that are allowed to move as merge-edit handles.
+  movableIndices: z.array(z.number().int().nonnegative()).default([]),
+  // Indices in customPoints that stay fixed to preserve preset-shape boundary.
+  lockedIndices: z.array(z.number().int().nonnegative()).default([]),
+});
 
 export const bubbleSchema = z.object({
   id: z.string(),
@@ -150,21 +193,18 @@ export const bubbleSchema = z.object({
   y: z.number(),
   width: z.number().positive(),
   height: z.number().positive(),
+  contentCenter: pointSchema,
+  showTail: z.boolean().default(true),
   // Tail configuration - tail can be attached to any point inside the bubble body
   tailTip: pointSchema,
   tailBase: pointSchema.optional(), // Local point inside the bubble body where the tail connects
   tailBaseAngle: z.number().default(90), // 0-360 degrees, default 90 (bottom)
   tailWidth: z.number().positive().default(24), // Width of tail at base
-  text: z.string(),
-  fontSize: z.number().positive(),
-  fontFamily: z.string().default("system-ui"),
-  direction: textDirectionSchema.default("vertical"),
-  textAlign: textAlignSchema.default("center"),
-  verticalAlign: verticalAlignSchema.default("middle"),
   bubbleType: bubbleTypeSchema.default("round"),
   strokeWidth: z.number().nonnegative().default(2),
   backgroundColor: z.string().default("#ffffff"),
   strokeColor: z.string().default("#111111"),
+  opacity: z.number().min(0).max(1).default(1),
   // Type-specific properties
   cornerRadius: z.number().nonnegative().default(12), // for round, roundedSquare
   bumpiness: z.number().min(0).max(1).default(0.5), // for cloud (0=smooth, 1=very bumpy)
@@ -175,6 +215,10 @@ export const bubbleSchema = z.object({
   activeSpikeIndex: z.number().int().min(-1).max(15).default(-1), // which spike is being dragged (-1 = none)
   jaggedness: z.number().min(2).max(12).default(6), // for jagged (number of zigzags per edge)
   thoughtCircles: z.number().int().min(2).max(5).default(3), // for thought (number of trailing circles)
+  customPoints: z.array(pointSchema).default([]), // for custom click-drawn contour (bubble-local points)
+  customSmoothness: z.number().min(0).max(1).default(0.45), // 0 = sharp polygon, 1 = smooth contour
+  customPointSmoothness: z.array(z.number().min(0).max(1)).default([]), // per-corner smoothness for customPoints
+  customHandleProfile: bubbleCustomHandleProfileSchema.optional(),
 });
 
 export const objectTypeSchema = z.enum(["panel", "text", "bubble"]);
@@ -189,6 +233,7 @@ export const pageSchema = z.object({
   panels: z.array(panelSchema),
   texts: z.array(textItemSchema),
   bubbles: z.array(bubbleSchema),
+  groups: z.array(groupSchema).default([]),
   layers: z.array(z.string()),
 });
 
@@ -208,9 +253,12 @@ export type ImagePlacement = z.infer<typeof imagePlacementSchema>;
 export type Panel = z.infer<typeof panelSchema>;
 export type TextDirection = z.infer<typeof textDirectionSchema>;
 export type TextItem = z.infer<typeof textItemSchema>;
+export type ObjectRef = z.infer<typeof objectRefSchema>;
+export type Group = z.infer<typeof groupSchema>;
 export type Bubble = z.infer<typeof bubbleSchema>;
 export type BubbleType = z.infer<typeof bubbleTypeSchema>;
 export type ObjectType = z.infer<typeof objectTypeSchema>;
 export type ProjectType = z.infer<typeof projectTypeSchema>;
 export type Page = z.infer<typeof pageSchema>;
 export type Project = z.infer<typeof projectSchema>;
+

@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { syncYukinoProject } from "./bootstrap/syncYukinoProject";
 import { App } from "./ui/App";
+import "./ui/fonts.css";
 import "./ui/styles.css";
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);

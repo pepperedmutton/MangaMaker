@@ -1,0 +1,215 @@
+@font-face {
+  font-family: "Source Han Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200;
+  src: url("../assets/fonts/SourceHanSans-200.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300;
+  src: url("../assets/fonts/SourceHanSans-300.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../assets/fonts/SourceHanSans-400.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("../assets/fonts/SourceHanSans-500.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("../assets/fonts/SourceHanSans-700.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 900;
+  src: url("../assets/fonts/SourceHanSans-900.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200;
+  src: url("../assets/fonts/SourceHanSerif-200.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300;
+  src: url("../assets/fonts/SourceHanSerif-300.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../assets/fonts/SourceHanSerif-400.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("../assets/fonts/SourceHanSerif-500.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("../assets/fonts/SourceHanSerif-600.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("../assets/fonts/SourceHanSerif-700.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "Source Han Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 900;
+  src: url("../assets/fonts/SourceHanSerif-900.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "LXGW WenKai";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300;
+  src: url("../assets/fonts/LXGWWenKai-300.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "LXGW WenKai";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../assets/fonts/LXGWWenKai-400.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "LXGW WenKai";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("../assets/fonts/LXGWWenKai-500.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "FZFangSong-Z02";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../assets/fonts/FZFangSong-Z02.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "YRDZST";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200;
+  src: url("../assets/fonts/YRDZST-200.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "YRDZST";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300;
+  src: url("../assets/fonts/YRDZST-300.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "YRDZST";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../assets/fonts/YRDZST-400.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "YRDZST";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("../assets/fonts/YRDZST-500.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "YRDZST";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("../assets/fonts/YRDZST-600.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "YRDZST";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("../assets/fonts/YRDZST-700.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "YRDZST";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 900;
+  src: url("../assets/fonts/YRDZST-900.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "PangMenZhengDao";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("../assets/fonts/PangMenZhengDao-700.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "ZCOOL KuHei";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("../assets/fonts/ZCOOLKuHei-700.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Muyao-Softbrush";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../assets/fonts/Muyao-Softbrush-400.ttf") format("truetype");
+}

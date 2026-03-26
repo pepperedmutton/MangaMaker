@@ -1,4 +1,5 @@
 import { projectSchema, type Project } from "../domain/schema";
+import { normalizeProjectForCurrentVersion } from "./projectMigration";
 import {
   deleteProjectFromProjectsFolder,
   isProjectsFilePersistenceAvailable,
@@ -7,6 +8,10 @@ import {
   persistImportedImageForProject,
   saveProjectToProjectsFolder,
 } from "./projectFiles";
+import { serializeProjectForStorage } from "./projectSerialization";
+
+const parseStoredProject = (raw: unknown) =>
+  projectSchema.parse(normalizeProjectForCurrentVersion(raw));
 
 const DRAFT_KEY = "mangamaker:draft:v2";
 const DRAFT_POINTER_KEY = "mangamaker:draft:pointer";
@@ -132,9 +137,8 @@ const materializeProjectImageSources = async (project: Project) => {
               `Failed to materialize injected image source for page ${pageIndex + 1}, panel ${panelIndex + 1}:`,
               error,
             );
-            if (isProjectsFilePersistenceAvailable()) {
-              throw error;
-            }
+            // Keep project persistence moving even if one image source cannot be materialized.
+            // This preserves text/bubble/page edits instead of dropping the whole save.
             return panel;
           }
         }),
@@ -181,7 +185,7 @@ const readProjectsFromIndex = () => {
     if (!Array.isArray(parsed)) {
       return [] as Project[];
     }
-    return parsed.map((entry) => projectSchema.parse(entry));
+    return parsed.map((entry) => parseStoredProject(entry));
   } catch (error) {
     console.warn("Failed to parse project index from localStorage:", error);
     return [] as Project[];
@@ -189,7 +193,10 @@ const readProjectsFromIndex = () => {
 };
 
 const writeProjectsToIndex = (projects: Project[]) => {
-  safeLocalStorageSet(PROJECT_INDEX_KEY, JSON.stringify(sortProjectsByUpdatedAt(projects)));
+  const compactProjects = sortProjectsByUpdatedAt(projects).map((project) =>
+    JSON.parse(serializeProjectForStorage(project)),
+  );
+  safeLocalStorageSet(PROJECT_INDEX_KEY, JSON.stringify(compactProjects));
 };
 
 const upsertProjectInIndex = (project: Project) => {
@@ -202,7 +209,7 @@ const parseProjectsFromRawList = (rawList: string[]) =>
     rawList
       .map((raw) => {
         try {
-          return projectSchema.parse(JSON.parse(raw));
+          return parseStoredProject(JSON.parse(raw));
         } catch (error) {
           console.warn("Skipped invalid project draft while listing projects:", error);
           return null;
@@ -250,7 +257,7 @@ export const saveLocalDraft = async (project: Project) => {
       );
     }
 
-    const payload = JSON.stringify(parsed);
+    const payload = serializeProjectForStorage(parsed);
     const wroteDraft = safeLocalStorageSet(DRAFT_KEY, payload);
     const wrotePointer = safeLocalStorageSet(DRAFT_POINTER_KEY, parsed.id);
     if (wroteDraft && wrotePointer) {
@@ -296,7 +303,7 @@ export const listLocalProjects = async () => {
     return [] as Project[];
   }
   try {
-    const project = projectSchema.parse(JSON.parse(rawDraft));
+    const project = parseStoredProject(JSON.parse(rawDraft));
     upsertProjectInIndex(project);
     return [project];
   } catch (error) {
@@ -328,7 +335,7 @@ export const loadLocalDraft = async (projectId?: string) => {
   try {
     const rawFromProjects = await loadProjectFromProjectsFolder();
     if (rawFromProjects) {
-      const project = projectSchema.parse(JSON.parse(rawFromProjects));
+      const project = parseStoredProject(JSON.parse(rawFromProjects));
       safeLocalStorageSet(DRAFT_KEY, JSON.stringify(project));
       safeLocalStorageSet(DRAFT_POINTER_KEY, project.id);
       upsertProjectInIndex(project);
@@ -351,7 +358,7 @@ export const loadLocalDraft = async (projectId?: string) => {
   if (!raw) {
     return null;
   }
-  const project = projectSchema.parse(JSON.parse(raw));
+  const project = parseStoredProject(JSON.parse(raw));
   upsertProjectInIndex(project);
   return project;
 };
@@ -379,7 +386,7 @@ export const deleteLocalProject = async (projectId: string) => {
     const draftMatchesDeletedProject = rawDraft
       ? (() => {
           try {
-            return projectSchema.parse(JSON.parse(rawDraft)).id === projectId;
+            return parseStoredProject(JSON.parse(rawDraft)).id === projectId;
           } catch {
             return false;
           }

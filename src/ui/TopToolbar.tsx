@@ -1,84 +1,15 @@
 import { MAX_ZOOM, MIN_ZOOM, ZOOM_STEP } from "../domain/defaults";
 import { getToolbarZoomLabel } from "../domain/helpers";
 import { translate, type Locale } from "../i18n";
+import { LOCAL_FONTS } from "../platform/localFonts";
 import type { ToolMode } from "../state/types";
 
-export const FONT_BAR_FONT_LIST: string[] = [
-  "Arial",
-  "Arial Black",
-  "Arial Narrow",
-  "Arial Rounded MT Bold",
-  "Bahnschrift",
-  "Book Antiqua",
-  "Calibri",
-  "Cambria",
-  "Candara",
-  "Cascadia Code Regular",
-  "Century Gothic",
-  "Comic Sans MS",
-  "Consolas",
-  "Constantia",
-  "Corbel",
-  "Courier New",
-  "DengXian",
-  "Ebrima",
-  "FangSong",
-  "Franklin Gothic Medium",
-  "Gabriola",
-  "Garamond",
-  "Georgia",
-  "Gill Sans MT",
-  "Impact",
-  "Ink Free",
-  "KaiTi",
-  "Lato",
-  "Lucida Console",
-  "Lucida Sans Unicode",
-  "Malgun Gothic",
-  "Meiryo",
-  "Microsoft JhengHei",
-  "Microsoft Sans Serif",
-  "Microsoft YaHei",
-  "MS Gothic",
-  "MS Mincho",
-  "Noto Sans JP",
-  "Noto Sans SC",
-  "Noto Serif JP",
-  "Noto Serif SC",
-  "Palatino Linotype",
-  "Rockwell",
-  "Segoe Print",
-  "Segoe Script",
-  "Segoe UI",
-  "Segoe UI Variable",
-  "SimHei",
-  "SimSun",
-  "Tahoma",
-  "Times New Roman",
-  "Trebuchet MS",
-  "Verdana",
-  "Yu Gothic",
-  "Yu Mincho",
-  "方正舒体",
-  "方正姚体",
-  "华文彩云",
-  "华文仿宋",
-  "华文琥珀",
-  "华文楷体",
-  "华文隶书",
-  "华文宋体",
-  "华文细黑",
-  "华文新魏",
-  "华文行楷",
-  "华文中宋",
-  "隶书",
-  "幼圆",
-];
+export const FONT_BAR_FONT_LIST: string[] = [...LOCAL_FONTS];
 
 type FontBarState = {
   fontFamily: string;
   fontSize: number;
-  /** text direction — only available for text items */
+  /** text direction - only available for text items */
   direction?: "horizontal" | "vertical";
   onFontFamilyChange: (fontFamily: string) => void;
   onFontSizeChange: (fontSize: number) => void;

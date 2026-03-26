@@ -358,7 +358,7 @@ describe("commandRegistry coverage", () => {
       width: 201,
       height: 281,
       fontSize: 42,
-      fontFamily: "Noto Serif SC",
+      fontFamily: "LXGW WenKai",
       color: "#334455",
       direction: "vertical",
     });
@@ -369,7 +369,7 @@ describe("commandRegistry coverage", () => {
       width: 200,
       height: 280,
       fontSize: 42,
-      fontFamily: "Noto Serif SC",
+      fontFamily: "LXGW WenKai",
       color: "#334455",
       direction: "vertical",
     });

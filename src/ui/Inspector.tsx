@@ -3,17 +3,16 @@ import {
   getSelectedObject,
 } from "../domain/helpers";
 import {
-  MIN_BUBBLE_HEIGHT,
-  MIN_BUBBLE_WIDTH,
+  createDefaultBubble,
   MIN_PANEL_SIZE,
-  MIN_TEXT_BOX_HEIGHT,
-  MIN_TEXT_BOX_WIDTH,
 } from "../domain/defaults";
 import type { Bubble, Page, Panel, TextItem } from "../domain/schema";
 import { formatLocaleTime } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
-import { LOCAL_FONTS } from "../platform/localFonts";
+import { CURATED_FONTS } from "../platform/localFonts";
+import type { ToolMode } from "../state/types";
 import { useEditorStore } from "../state/editorStore";
+import { getBubbleBodyPath } from "./bubbleShapes";
 
 // Reusable range input with slider and number field
 const RangeInput = ({
@@ -53,9 +52,11 @@ const RangeInput = ({
 
 type InspectorProps = {
   page: Page | null;
+  activeTool: ToolMode;
   onExportProjectPdf: () => void;
   onImportImage: () => void;
   onCreatePanel?: () => void;
+  onInsertBubble?: (bubbleType: Exclude<Bubble["bubbleType"], "custom">) => void;
 };
 
 const DeleteButton = ({
@@ -367,9 +368,6 @@ const PanelDescriptionList = ({ page }: { page: Page }) => {
 const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const { t } = useI18n();
-  const workspace = getPageWorkspace(page);
-  const maxTextX = Math.ceil(workspace.x + workspace.width - text.width);
-  const maxTextY = Math.ceil(workspace.y + workspace.height - text.height);
 
   return (
     <>
@@ -412,9 +410,13 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
                 })
               }
             >
-              {LOCAL_FONTS.map((font) => (
-                <option key={font} value={font} style={{ fontFamily: font }}>
-                  {font}
+              {CURATED_FONTS.map((font) => (
+                <option
+                  key={font.fontFamily}
+                  value={font.fontFamily}
+                  style={{ fontFamily: font.fontFamily }}
+                >
+                  {font.nameCn} ({font.fontFamily})
                 </option>
               ))}
             </select>
@@ -431,6 +433,22 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
                   pageId: page.id,
                   textId: text.id,
                   fontSize: value,
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>{t("inspector.fontWeight")}</span>
+            <RangeInput
+              min={100}
+              max={900}
+              step={100}
+              value={text.fontWeight}
+              onChange={(value) =>
+                void executeCommand("updateText", {
+                  pageId: page.id,
+                  textId: text.id,
+                  fontWeight: Math.round(value / 100) * 100,
                 })
               }
             />
@@ -553,40 +571,8 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
       </section>
 
       <section>
-        <p className="eyebrow">{t("inspector.textBoxSize")}</p>
+        <p className="eyebrow">{t("inspector.textStyle")}</p>
         <div className="field-grid">
-          <label>
-            <span>{t("common.width")}</span>
-            <RangeInput
-              min={MIN_TEXT_BOX_WIDTH}
-              max={Math.ceil(workspace.width)}
-              step={1}
-              value={Math.round(text.width)}
-              onChange={(value) =>
-                void executeCommand("updateText", {
-                  pageId: page.id,
-                  textId: text.id,
-                  width: value,
-                })
-              }
-            />
-          </label>
-          <label>
-            <span>{t("common.height")}</span>
-            <RangeInput
-              min={MIN_TEXT_BOX_HEIGHT}
-              max={Math.ceil(workspace.height)}
-              step={1}
-              value={Math.round(text.height)}
-              onChange={(value) =>
-                void executeCommand("updateText", {
-                  pageId: page.id,
-                  textId: text.id,
-                  height: value,
-                })
-              }
-            />
-          </label>
           <label>
             <span>{t("common.color")}</span>
             <input
@@ -602,33 +588,33 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
             />
           </label>
           <label>
-            <span>{t("common.x")}</span>
+            <span>{t("inspector.letterSpacing")}</span>
             <RangeInput
-              min={Math.floor(workspace.x)}
-              max={maxTextX}
+              min={-20}
+              max={120}
               step={1}
-              value={Math.round(text.x)}
+              value={Math.round(text.letterSpacing)}
               onChange={(value) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  x: value,
+                  letterSpacing: value,
                 })
               }
             />
           </label>
           <label>
-            <span>{t("common.y")}</span>
+            <span>{t("inspector.lineSpacing")}</span>
             <RangeInput
-              min={Math.floor(workspace.y)}
-              max={maxTextY}
+              min={-20}
+              max={120}
               step={1}
-              value={Math.round(text.y)}
+              value={Math.round(text.lineSpacing)}
               onChange={(value) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  y: value,
+                  lineSpacing: value,
                 })
               }
             />
@@ -639,7 +625,10 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
   );
 };
 
-const BUBBLE_TYPES: Array<{ type: Bubble["bubbleType"]; labelKey: string }> = [
+const PRESET_BUBBLE_TYPES: Array<{
+  type: Exclude<Bubble["bubbleType"], "custom">;
+  labelKey: string;
+}> = [
   { type: "round", labelKey: "inspector.bubbleType.round" },
   { type: "ellipse", labelKey: "inspector.bubbleType.ellipse" },
   { type: "cloud", labelKey: "inspector.bubbleType.cloud" },
@@ -650,14 +639,161 @@ const BUBBLE_TYPES: Array<{ type: Bubble["bubbleType"]; labelKey: string }> = [
   { type: "thought", labelKey: "inspector.bubbleType.thought" },
   { type: "jagged", labelKey: "inspector.bubbleType.jagged" },
   { type: "bubbleRound", labelKey: "inspector.bubbleType.bubbleRound" },
+  { type: "whisper", labelKey: "inspector.bubbleType.whisper" },
+  { type: "scream", labelKey: "inspector.bubbleType.scream" },
+  { type: "burstSoft", labelKey: "inspector.bubbleType.burstSoft" },
+  { type: "hexagon", labelKey: "inspector.bubbleType.hexagon" },
+  { type: "octagon", labelKey: "inspector.bubbleType.octagon" },
+  { type: "diamond", labelKey: "inspector.bubbleType.diamond" },
+  { type: "heart", labelKey: "inspector.bubbleType.heart" },
+  { type: "bracket", labelKey: "inspector.bubbleType.bracket" },
+  { type: "caption", labelKey: "inspector.bubbleType.caption" },
+  { type: "speed", labelKey: "inspector.bubbleType.speed" },
+  { type: "cloudDense", labelKey: "inspector.bubbleType.cloudDense" },
+  { type: "balloonTall", labelKey: "inspector.bubbleType.balloonTall" },
+  { type: "balloonWide", labelKey: "inspector.bubbleType.balloonWide" },
+  { type: "wave", labelKey: "inspector.bubbleType.wave" },
+  { type: "rough", labelKey: "inspector.bubbleType.rough" },
+  { type: "droplet", labelKey: "inspector.bubbleType.droplet" },
+  { type: "arrow", labelKey: "inspector.bubbleType.arrow" },
+  { type: "pinched", labelKey: "inspector.bubbleType.pinched" },
+  { type: "doubleOutline", labelKey: "inspector.bubbleType.doubleOutline" },
+  { type: "electric", labelKey: "inspector.bubbleType.electric" },
 ];
+
+const BUBBLE_TYPES: Array<{ type: Bubble["bubbleType"]; labelKey: string }> = [
+  ...PRESET_BUBBLE_TYPES,
+  { type: "custom", labelKey: "inspector.bubbleType.custom" },
+];
+
+const BubbleInsertLibrary = ({
+  onInsertBubble,
+}: {
+  onInsertBubble?: (bubbleType: Exclude<Bubble["bubbleType"], "custom">) => void;
+}) => {
+  const executeCommand = useEditorStore((state) => state.executeCommand);
+  const bubbleInsert = useEditorStore((state) => state.bubbleInsert);
+  const { t } = useI18n();
+  const presetModeActive = bubbleInsert.mode === "preset";
+
+  return (
+    <>
+      <section>
+        <p className="eyebrow">{t("inspector.insertBubble")}</p>
+        <h3>{t("inspector.insertBubble")}</h3>
+        <p>{t("inspector.bubbleInsertModeHint")}</p>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.bubbleInsertMode")}</p>
+        <div className="insp-seg">
+          <button
+            className={presetModeActive ? "active" : ""}
+            onClick={() =>
+              void executeCommand("setBubbleInsertState", {
+                mode: "preset",
+              })
+            }
+          >
+            {t("inspector.bubbleInsertModePreset")}
+          </button>
+          <button
+            className={presetModeActive ? "" : "active"}
+            onClick={() =>
+              void executeCommand("setBubbleInsertState", {
+                mode: "customClickDraw",
+              })
+            }
+          >
+            {t("inspector.bubbleInsertModeCustom")}
+          </button>
+        </div>
+      </section>
+
+      {presetModeActive ? (
+        <section>
+          <p className="eyebrow">{t("inspector.insertBubble")}</p>
+          <p>{t("inspector.bubbleInsertPresetHint")}</p>
+          <div className="bubble-library-grid">
+            {PRESET_BUBBLE_TYPES.map(({ type, labelKey }) => {
+              const previewBubble: Bubble = {
+                id: `preview-${type}`,
+                ...createDefaultBubble({
+                  x: 0,
+                  y: 0,
+                  width: 92,
+                  height: 68,
+                  showTail: false,
+                  bubbleType: type,
+                  bumpiness: 0.75,
+                  spikeCount: 10,
+                  jaggedness: 8,
+                }),
+              };
+
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  className={`bubble-library-item${
+                    bubbleInsert.presetBubbleType === type ? " active" : ""
+                  }`}
+                  onClick={() => {
+                    void executeCommand("setBubbleInsertState", {
+                      mode: "preset",
+                      presetBubbleType: type,
+                    });
+                    onInsertBubble?.(type);
+                  }}
+                  title={t(labelKey)}
+                >
+                  <svg viewBox="-8 -8 108 84" role="img" aria-label={t(labelKey)}>
+                    <path
+                      d={getBubbleBodyPath(previewBubble)}
+                      fill="#ffffff"
+                      stroke="#111111"
+                      strokeWidth={2}
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span>{t(labelKey)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ) : (
+        <section>
+          <p className="eyebrow">{t("inspector.bubbleInsertCustomSettings")}</p>
+          <p>{t("inspector.bubbleInsertCustomHint")}</p>
+          <div className="field-grid">
+            <label>
+              <span>{t("inspector.bubbleInsertSmoothness")}</span>
+              <RangeInput
+                min={0}
+                max={1}
+                step={0.01}
+                value={bubbleInsert.customSmoothness}
+                onChange={(value) =>
+                  void executeCommand("setBubbleInsertState", {
+                    customSmoothness: value,
+                  })
+                }
+              />
+            </label>
+          </div>
+          <p>{t("inspector.bubbleInsertCustomHintDetail")}</p>
+          <p>{t("inspector.bubbleInsertCustomHintClose")}</p>
+          <p>{t("inspector.bubbleInsertCustomHintCancel")}</p>
+        </section>
+      )}
+    </>
+  );
+};
 
 const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const { t } = useI18n();
-  const workspace = getPageWorkspace(page);
-  const maxBubbleX = Math.ceil(workspace.x + workspace.width - bubble.width);
-  const maxBubbleY = Math.ceil(workspace.y + workspace.height - bubble.height);
 
   return (
     <>
@@ -667,21 +803,6 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
           <DeleteButton pageId={page.id} objectType="bubble" objectId={bubble.id} />
         </div>
         <h3>{t("common.bubble")}</h3>
-      </section>
-
-      <section>
-        <p className="eyebrow">{t("common.content")}</p>
-        <textarea
-          rows={6}
-          value={bubble.text}
-          onChange={(event) =>
-            void executeCommand("updateBubble", {
-              pageId: page.id,
-              bubbleId: bubble.id,
-              text: event.target.value,
-            })
-          }
-        />
       </section>
 
       <section>
@@ -723,6 +844,40 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
               }
             />
           </label>
+          <label>
+            <span>{t("inspector.opacity")}</span>
+            <RangeInput
+              min={0}
+              max={1}
+              step={0.01}
+              value={bubble.opacity}
+              onChange={(value) =>
+                void executeCommand("updateBubble", {
+                  pageId: page.id,
+                  bubbleId: bubble.id,
+                  opacity: value,
+                })
+              }
+            />
+          </label>
+          {bubble.bubbleType === "custom" ? (
+            <label>
+              <span>{t("inspector.bubbleInsertSmoothness")}</span>
+              <RangeInput
+                min={0}
+                max={1}
+                step={0.01}
+                value={bubble.customSmoothness}
+                onChange={(value) =>
+                  void executeCommand("updateBubble", {
+                    pageId: page.id,
+                    bubbleId: bubble.id,
+                    customSmoothness: value,
+                  })
+                }
+              />
+            </label>
+          ) : null}
           {(bubble.bubbleType === "round" || bubble.bubbleType === "roundedSquare") && (
             <label>
               <span>{t("inspector.cornerRadius")}</span>
@@ -813,7 +968,7 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
                 />
               </label>
           )}
-          {bubble.bubbleType === "thought" && (
+          {bubble.bubbleType === "thought" && bubble.showTail && (
             <label>
               <span>{t("inspector.thoughtCircles")}</span>
                 <RangeInput
@@ -832,22 +987,55 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
               </label>
           )}
           {bubble.bubbleType !== "explosion" && (
-            <label>
-              <span>{t("inspector.tailWidth")}</span>
-              <RangeInput
-                min={8}
-                max={96}
-                step={1}
-                value={bubble.tailWidth}
-                onChange={(value) =>
-                  void executeCommand("updateBubble", {
-                    pageId: page.id,
-                    bubbleId: bubble.id,
-                    tailWidth: value,
-                  })
-                }
-              />
-            </label>
+            <>
+              <label>
+                <span>{t("inspector.tailVisibility")}</span>
+                <div className="insp-seg">
+                  <button
+                    className={bubble.showTail ? "active" : ""}
+                    onClick={() =>
+                      void executeCommand("updateBubble", {
+                        pageId: page.id,
+                        bubbleId: bubble.id,
+                        showTail: true,
+                      })
+                    }
+                  >
+                    {t("inspector.tailVisible")}
+                  </button>
+                  <button
+                    className={bubble.showTail ? "" : "active"}
+                    onClick={() =>
+                      void executeCommand("updateBubble", {
+                        pageId: page.id,
+                        bubbleId: bubble.id,
+                        showTail: false,
+                      })
+                    }
+                  >
+                    {t("inspector.tailHidden")}
+                  </button>
+                </div>
+              </label>
+              {bubble.showTail ? (
+                <label>
+                  <span>{t("inspector.tailWidth")}</span>
+                  <RangeInput
+                    min={8}
+                    max={96}
+                    step={1}
+                    value={bubble.tailWidth}
+                    onChange={(value) =>
+                      void executeCommand("updateBubble", {
+                        pageId: page.id,
+                        bubbleId: bubble.id,
+                        tailWidth: value,
+                      })
+                    }
+                  />
+                </label>
+              ) : null}
+            </>
           )}
           {bubble.bubbleType === "explosion" && (
             <button
@@ -894,232 +1082,6 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
           </label>
         </div>
       </section>
-
-      <section>
-        <p className="eyebrow">{t("inspector.fontSection")}</p>
-        <div className="field-grid">
-          <label>
-            <span>{t("inspector.fontFamily")}</span>
-            <select
-              value={bubble.fontFamily}
-              style={{ fontFamily: bubble.fontFamily }}
-              onChange={(event) =>
-                void executeCommand("updateBubble", {
-                  pageId: page.id,
-                  bubbleId: bubble.id,
-                  fontFamily: event.target.value,
-                })
-              }
-            >
-              {LOCAL_FONTS.map((font) => (
-                <option key={font} value={font} style={{ fontFamily: font }}>
-                  {font}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>{t("common.fontSize")}</span>
-            <RangeInput
-              min={6}
-              max={300}
-              step={1}
-              value={bubble.fontSize}
-              onChange={(value) =>
-                void executeCommand("updateBubble", {
-                  pageId: page.id,
-                  bubbleId: bubble.id,
-                  fontSize: value,
-                })
-              }
-            />
-          </label>
-        </div>
-      </section>
-
-      <section>
-        <p className="eyebrow">{t("inspector.textDirection")}</p>
-        <div className="insp-seg">
-          <button
-            className={bubble.direction === "horizontal" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                direction: "horizontal",
-              })
-            }
-          >
-            {t("inspector.textDirectionH")}
-          </button>
-          <button
-            className={bubble.direction === "vertical" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                direction: "vertical",
-              })
-            }
-          >
-            {t("inspector.textDirectionV")}
-          </button>
-        </div>
-      </section>
-
-      <section>
-        <p className="eyebrow">{t("inspector.textAlign")}</p>
-        <div className="insp-seg">
-          <button
-            className={bubble.textAlign === "left" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                textAlign: "left",
-              })
-            }
-          >
-            {t("inspector.textAlignLeft")}
-          </button>
-          <button
-            className={bubble.textAlign === "center" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                textAlign: "center",
-              })
-            }
-          >
-            {t("inspector.textAlignCenter")}
-          </button>
-          <button
-            className={bubble.textAlign === "right" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                textAlign: "right",
-              })
-            }
-          >
-            {t("inspector.textAlignRight")}
-          </button>
-        </div>
-      </section>
-
-      <section>
-        <p className="eyebrow">{t("inspector.verticalAlign")}</p>
-        <div className="insp-seg">
-          <button
-            className={bubble.verticalAlign === "top" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                verticalAlign: "top",
-              })
-            }
-          >
-            {t("inspector.verticalAlignTop")}
-          </button>
-          <button
-            className={bubble.verticalAlign === "middle" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                verticalAlign: "middle",
-              })
-            }
-          >
-            {t("inspector.verticalAlignMiddle")}
-          </button>
-          <button
-            className={bubble.verticalAlign === "bottom" ? "active" : ""}
-            onClick={() =>
-              void executeCommand("updateBubble", {
-                pageId: page.id,
-                bubbleId: bubble.id,
-                verticalAlign: "bottom",
-              })
-            }
-          >
-            {t("inspector.verticalAlignBottom")}
-          </button>
-        </div>
-      </section>
-
-      <section>
-        <p className="eyebrow">{t("inspector.sizeSection")}</p>
-        <div className="field-grid">
-          <label>
-            <span>{t("common.width")}</span>
-            <RangeInput
-              min={MIN_BUBBLE_WIDTH}
-              max={Math.ceil(workspace.width)}
-              step={1}
-              value={Math.round(bubble.width)}
-              onChange={(value) =>
-                void executeCommand("updateBubble", {
-                  pageId: page.id,
-                  bubbleId: bubble.id,
-                  width: value,
-                })
-              }
-            />
-          </label>
-          <label>
-            <span>{t("common.height")}</span>
-            <RangeInput
-              min={MIN_BUBBLE_HEIGHT}
-              max={Math.ceil(workspace.height)}
-              step={1}
-              value={Math.round(bubble.height)}
-              onChange={(value) =>
-                void executeCommand("updateBubble", {
-                  pageId: page.id,
-                  bubbleId: bubble.id,
-                  height: value,
-                })
-              }
-            />
-          </label>
-          <label>
-            <span>{t("common.x")}</span>
-            <RangeInput
-              min={Math.floor(workspace.x)}
-              max={maxBubbleX}
-              step={1}
-              value={Math.round(bubble.x)}
-              onChange={(value) =>
-                void executeCommand("updateBubble", {
-                  pageId: page.id,
-                  bubbleId: bubble.id,
-                  x: value,
-                })
-              }
-            />
-          </label>
-          <label>
-            <span>{t("common.y")}</span>
-            <RangeInput
-              min={Math.floor(workspace.y)}
-              max={maxBubbleY}
-              step={1}
-              value={Math.round(bubble.y)}
-              onChange={(value) =>
-                void executeCommand("updateBubble", {
-                  pageId: page.id,
-                  bubbleId: bubble.id,
-                  y: value,
-                })
-              }
-            />
-          </label>
-        </div>
-      </section>
     </>
   );
 };
@@ -1137,7 +1099,14 @@ const getRecommendedNextStepKey = (page: Page) => {
   return "inspector.nextStep.export";
 };
 
-export const Inspector = ({ page, onExportProjectPdf, onImportImage, onCreatePanel }: InspectorProps) => {
+export const Inspector = ({
+  page,
+  activeTool,
+  onExportProjectPdf,
+  onImportImage,
+  onCreatePanel,
+  onInsertBubble,
+}: InspectorProps) => {
   const selection = useEditorStore((state) => state.selection);
   const lastExport = useEditorStore((state) => state.lastExport);
   const saveStatus = useEditorStore((state) => state.saveStatus);
@@ -1156,10 +1125,19 @@ export const Inspector = ({ page, onExportProjectPdf, onImportImage, onCreatePan
   }
 
   const selectedObject = getSelectedObject(page, selection);
+  const bubbleIsExplicitlySelected =
+    selection?.pageId === page.id &&
+    selection.objectType === "bubble" &&
+    selectedObject !== null &&
+    !("style" in selectedObject) &&
+    !("content" in selectedObject);
+  const isBubbleInsertState = activeTool === "bubble" && !bubbleIsExplicitlySelected;
 
   return (
     <aside className="right-sidebar">
-      {!selectedObject ? (
+      {isBubbleInsertState ? (
+        <BubbleInsertLibrary onInsertBubble={onInsertBubble} />
+      ) : !selectedObject ? (
         <>
           <section>
             <p className="eyebrow">{t("inspector.page")}</p>

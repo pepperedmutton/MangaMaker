@@ -882,7 +882,7 @@ test("text boxes support home-tab font controls and vertical text direction", as
   await page.locator(".right-sidebar textarea").fill("Vertical test");
 
   const fontCount = await page.locator(".ribbon-font-select option").count();
-  expect(fontCount).toBeGreaterThan(10);
+  expect(fontCount).toBe(7);
 
   const nextFont = await page.locator(".ribbon-font-select").evaluate((element) => {
     const select = element as HTMLSelectElement;

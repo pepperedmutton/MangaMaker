@@ -169,7 +169,7 @@ var pickProjectFolderName = function (root, projectId, preferredName) { return _
     });
 }); };
 var resolveProjectDir = function (root, projectId, projectTitle) { return __awaiter(void 0, void 0, void 0, function () {
-    var existingDir, targetFolder, targetDir, targetStats;
+    var existingDir, targetFolder, targetDir, targetStats, error_1;
     return __generator(this, function (_a) {
         switch (_a.label) {
             case 0: return [4 /*yield*/, findProjectDirById(root, projectId)];
@@ -179,17 +179,29 @@ var resolveProjectDir = function (root, projectId, projectTitle) { return __awai
             case 2:
                 targetFolder = _a.sent();
                 targetDir = path.join(root, targetFolder);
-                if (!(existingDir && path.resolve(existingDir) !== path.resolve(targetDir))) return [3 /*break*/, 6];
+                if (!(existingDir && path.resolve(existingDir) !== path.resolve(targetDir))) return [3 /*break*/, 7];
                 return [4 /*yield*/, fsp.stat(targetDir).catch(function () { return null; })];
             case 3:
                 targetStats = _a.sent();
-                if (!!targetStats) return [3 /*break*/, 5];
-                return [4 /*yield*/, fsp.rename(existingDir, targetDir)];
+                if (targetStats) {
+                    return [2 /*return*/, existingDir];
+                }
+                _a.label = 4;
             case 4:
+                _a.trys.push([4, 6, , 7]);
+                return [4 /*yield*/, fsp.rename(existingDir, targetDir)];
+            case 5:
                 _a.sent();
-                _a.label = 5;
-            case 5: return [2 /*return*/, targetDir];
+                return [2 /*return*/, targetDir];
             case 6:
+                error_1 = _a.sent();
+                console.warn("Project folder rename failed; keeping existing folder.", {
+                    existingDir: existingDir,
+                    targetDir: targetDir,
+                    error: error_1,
+                });
+                return [2 /*return*/, existingDir];
+            case 7:
                 if (existingDir) {
                     return [2 /*return*/, existingDir];
                 }
@@ -333,7 +345,7 @@ var inferContentType = function (filePath) {
 };
 var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
     var handler = function (req, res, next) { return __awaiter(void 0, void 0, void 0, function () {
-        var method, host, url, pathname, root_1, relative, candidate, rootWithSep, stats, stream, root, payload, titleFromJson, parsed, projectTitle, projectDir, projectFolder, assetsDir, metaFile, metaExists, latestProject, folder, projectFile, projectExists, projectJson, entries, drafts, _i, entries_3, entry, projectFile, stats, projectJson, payload, projectTitle, projectDir, projectFolder, assetsDir, originalPath, stem, ext, timestamp, index, fileName, assetPath, payload, projectDir, error_1, message;
+        var method, host, url, pathname, root_1, relative, candidate, rootWithSep, stats, stream, root, payload, titleFromJson, parsed, projectTitle, projectDir, projectFolder, assetsDir, metaFile, metaExists, latestProject, folder, projectFile, projectExists, projectJson, entries, drafts, _i, entries_3, entry, projectFile, stats, projectJson, payload, projectTitle, projectDir, projectFolder, assetsDir, originalPath, stem, ext, timestamp, index, fileName, assetPath, payload, projectDir, error_2, message;
         var _a, _b, _c;
         return __generator(this, function (_d) {
             switch (_d.label) {
@@ -530,8 +542,8 @@ var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
                     text(res, 404, "Not Found");
                     return [3 /*break*/, 39];
                 case 38:
-                    error_1 = _d.sent();
-                    message = error_1 instanceof Error ? error_1.message : String(error_1);
+                    error_2 = _d.sent();
+                    message = error_2 instanceof Error ? error_2.message : String(error_2);
                     json(res, 500, { error: message });
                     return [3 /*break*/, 39];
                 case 39: return [2 /*return*/];

@@ -1,4 +1,4 @@
-import type { ChangeEvent } from "react";
+import type { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { installAutomationApi } from "../automation/api";
 import type { ClipboardEnvelope, ClipboardItem } from "../domain/clipboard";
@@ -11,7 +11,13 @@ import type { Page, Panel, Project, ProjectType } from "../domain/schema";
 import { downloadDataUrl } from "../export/download";
 import { formatLocaleTime, getDefaultProjectTitle, translate } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
-import { deleteLocalProject, hasLocalDraft, listLocalProjects } from "../storage/localDraft";
+import { createId } from "../domain/defaults";
+import {
+  deleteLocalProject,
+  hasLocalDraft,
+  listLocalProjects,
+  saveLocalDraft,
+} from "../storage/localDraft";
 import { persistImportedImageForProject } from "../storage/projectFiles";
 import { useEditorStore } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
@@ -185,10 +191,18 @@ const normalizeClipboardItemForPaste = async (
   return item;
 };
 
+const LEFT_SIDEBAR_MIN_WIDTH = 180;
+const LEFT_SIDEBAR_MAX_WIDTH = 460;
+const RIGHT_SIDEBAR_MIN_WIDTH = 240;
+const RIGHT_SIDEBAR_MAX_WIDTH = 560;
+const CANVAS_MIN_WIDTH = 540;
+const SHELL_SPLITTER_WIDTH = 10;
+
 export const App = () => {
   const project = useEditorStore((state) => state.project);
   const selectedPageId = useEditorStore((state) => state.selectedPageId);
   const selection = useEditorStore((state) => state.selection);
+  const multiSelection = useEditorStore((state) => state.multiSelection);
   const locale = useEditorStore((state) => state.locale);
   const activeTool = useEditorStore((state) => state.activeTool);
   const zoom = useEditorStore((state) => state.zoom);
@@ -208,6 +222,18 @@ export const App = () => {
     pageId: string;
     panelId: string;
   } | null>(null);
+  const appShellRef = useRef<HTMLDivElement>(null);
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(220);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(300);
+  const [isLayoutResizing, setIsLayoutResizing] = useState(false);
+  const leftSidebarWidthRef = useRef(leftSidebarWidth);
+  const rightSidebarWidthRef = useRef(rightSidebarWidth);
+  const sidebarDragRef = useRef<{
+    side: "left" | "right";
+    startX: number;
+    startLeftWidth: number;
+    startRightWidth: number;
+  } | null>(null);
 
   const selectedPage =
     project.pages.find((page) => page.id === selectedPageId) ?? project.pages[0] ?? null;
@@ -215,15 +241,74 @@ export const App = () => {
     selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "panel"
       ? selectedPage.panels.find((panel) => panel.id === selection.objectId) ?? null
       : null;
-  const selectedText =
-    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "text"
-      ? selectedPage.texts.find((text) => text.id === selection.objectId) ?? null
-      : null;
-  const selectedBubble =
-    selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "bubble"
-      ? selectedPage.bubbles.find((bubble) => bubble.id === selection.objectId) ?? null
-      : null;
   const draftAvailable = hasLocalDraft();
+
+  useEffect(() => {
+    leftSidebarWidthRef.current = leftSidebarWidth;
+  }, [leftSidebarWidth]);
+
+  useEffect(() => {
+    rightSidebarWidthRef.current = rightSidebarWidth;
+  }, [rightSidebarWidth]);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const drag = sidebarDragRef.current;
+      if (!drag) {
+        return;
+      }
+      const shellWidth = appShellRef.current?.clientWidth ?? window.innerWidth;
+      const availableSidebarWidth = Math.max(
+        0,
+        shellWidth - CANVAS_MIN_WIDTH - SHELL_SPLITTER_WIDTH * 2,
+      );
+
+      if (drag.side === "left") {
+        const maxLeft = Math.max(
+          LEFT_SIDEBAR_MIN_WIDTH,
+          Math.min(LEFT_SIDEBAR_MAX_WIDTH, availableSidebarWidth - rightSidebarWidthRef.current),
+        );
+        const nextLeft = Math.min(
+          maxLeft,
+          Math.max(LEFT_SIDEBAR_MIN_WIDTH, drag.startLeftWidth + (event.clientX - drag.startX)),
+        );
+        setLeftSidebarWidth(nextLeft);
+        return;
+      }
+
+      const maxRight = Math.max(
+        RIGHT_SIDEBAR_MIN_WIDTH,
+        Math.min(RIGHT_SIDEBAR_MAX_WIDTH, availableSidebarWidth - leftSidebarWidthRef.current),
+      );
+      const nextRight = Math.min(
+        maxRight,
+        Math.max(RIGHT_SIDEBAR_MIN_WIDTH, drag.startRightWidth - (event.clientX - drag.startX)),
+      );
+      setRightSidebarWidth(nextRight);
+    };
+
+    const endResize = () => {
+      if (!sidebarDragRef.current) {
+        return;
+      }
+      sidebarDragRef.current = null;
+      setIsLayoutResizing(false);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", endResize);
+    window.addEventListener("pointercancel", endResize);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", endResize);
+      window.removeEventListener("pointercancel", endResize);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, []);
 
   useEffect(() => {
     installAutomationApi();
@@ -267,6 +352,36 @@ export const App = () => {
     }
   };
 
+  const handleSidebarResizeStart =
+    (side: "left" | "right") => (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (window.matchMedia("(max-width: 1180px)").matches) {
+        return;
+      }
+      event.preventDefault();
+      sidebarDragRef.current = {
+        side,
+        startX: event.clientX,
+        startLeftWidth: leftSidebarWidthRef.current,
+        startRightWidth: rightSidebarWidthRef.current,
+      };
+      setIsLayoutResizing(true);
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+    };
+
+  const handleInsertBubble = (
+    bubbleType: Exclude<Page["bubbles"][number]["bubbleType"], "custom">,
+  ) => {
+    if (!selectedPage) {
+      return;
+    }
+    void executeCommand("createBubble", {
+      pageId: selectedPage.id,
+      bubbleType,
+      keepTool: true,
+    });
+  };
+
   const handleExportPage = async () => {
     if (!selectedPage) {
       return;
@@ -291,7 +406,11 @@ export const App = () => {
   };
 
   const handleReturnHome = async () => {
-    await handleSaveProject();
+    try {
+      await handleSaveProject();
+    } catch (error) {
+      console.warn("Failed to save project before returning home:", error);
+    }
     setView("welcome");
   };
 
@@ -510,6 +629,44 @@ export const App = () => {
         return;
       }
 
+      if (usesModifier && key === "g") {
+        event.preventDefault();
+        const pageId = selectedPage?.id ?? selection?.pageId ?? selectedPageId ?? null;
+        if (!pageId) {
+          return;
+        }
+        const objects = multiSelection
+          .filter((entry) => entry.pageId === pageId)
+          .map((entry) => ({
+            objectType: entry.objectType,
+            objectId: entry.objectId,
+          }));
+        void executeCommand("groupSelection", {
+          pageId,
+          ...(objects.length > 0 ? { objects } : {}),
+        });
+        return;
+      }
+
+      if (event.altKey && !usesModifier && key === "g") {
+        event.preventDefault();
+        const pageId = selectedPage?.id ?? selection?.pageId ?? selectedPageId ?? null;
+        if (!pageId) {
+          return;
+        }
+        const objects = multiSelection
+          .filter((entry) => entry.pageId === pageId)
+          .map((entry) => ({
+            objectType: entry.objectType,
+            objectId: entry.objectId,
+          }));
+        void executeCommand("ungroupSelection", {
+          pageId,
+          ...(objects.length > 0 ? { objects } : {}),
+        });
+        return;
+      }
+
       if (usesModifier && key === "c") {
         event.preventDefault();
         void handleCopySelection();
@@ -556,7 +713,7 @@ export const App = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [executeCommand, selectedPage, selectedPanel, selection]);
+  }, [executeCommand, selectedPage, selectedPanel, selection, selectedPageId, multiSelection]);
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -625,6 +782,26 @@ export const App = () => {
     }
   };
 
+  const handleDuplicateProjectFromWelcome = async (targetProject: Project) => {
+    const now = new Date().toISOString();
+    const baseTitle = targetProject.title.trim() || t("sidebar.untitledProject");
+    const copySuffix = locale === "zh-CN" ? "\u526F\u672C" : "Copy";
+    const duplicatedProject: Project = {
+      ...structuredClone(targetProject),
+      id: createId("project"),
+      title: `${baseTitle} ${copySuffix}`,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    try {
+      await saveLocalDraft(duplicatedProject);
+      await refreshProjectCatalog();
+    } catch (error) {
+      console.warn("Failed to duplicate project from welcome screen:", error);
+    }
+  };
+
   if (view === "welcome") {
     return (
       <WelcomeScreen
@@ -638,6 +815,9 @@ export const App = () => {
         onCreateProject={() => void handleCreateProjectFromWelcome()}
         onRestoreDraft={() => void handleRestoreDraftFromWelcome()}
         onOpenProject={(nextProject) => void handleOpenProjectFromWelcome(nextProject)}
+        onDuplicateProject={(targetProject) =>
+          void handleDuplicateProjectFromWelcome(targetProject)
+        }
         onDeleteProject={(targetProject) => void handleDeleteProjectFromWelcome(targetProject)}
         onSetLocale={(nextLocale) => void executeCommand("setLocale", { locale: nextLocale })}
       />
@@ -645,18 +825,38 @@ export const App = () => {
   }
 
   return (
-    <div className="app-shell">
+    <div
+      ref={appShellRef}
+      className={`app-shell${isLayoutResizing ? " layout-resizing" : ""}`}
+      style={
+        {
+          "--left-sidebar-width": `${leftSidebarWidth}px`,
+          "--right-sidebar-width": `${rightSidebarWidth}px`,
+        } as CSSProperties
+      }
+    >
       <Sidebar
         project={project}
         selectedPageId={selectedPage?.id ?? null}
         onSelectPage={(pageId) => void executeCommand("selectPage", { pageId })}
-        onAddPage={() => void executeCommand("addPage", {})}
+        onAddPage={(insertAfterPageId) =>
+          void executeCommand(
+            "addPage",
+            insertAfterPageId ? { insertAfterPageId } : {},
+          )
+        }
         onDuplicatePage={(pageId) => void executeCommand("duplicatePage", { pageId })}
         onDeletePage={(pageId) => handleDeletePage(pageId)}
         onMovePageUp={(pageId) => handleMovePage(pageId, -1)}
         onMovePageDown={(pageId) => handleMovePage(pageId, 1)}
         onRenameProject={(title) => void executeCommand("renameProject", { title })}
         onSetProjectType={(type) => void executeCommand("setProjectType", { type })}
+      />
+      <div
+        className="sidebar-splitter sidebar-splitter-left"
+        role="separator"
+        aria-orientation="vertical"
+        onPointerDown={handleSidebarResizeStart("left")}
       />
       <main className="canvas-zone">
         <RibbonBar
@@ -674,26 +874,6 @@ export const App = () => {
                     void executeCommand("setPageBackground", {
                       pageId: selectedPage.id,
                       background,
-                    }),
-                }
-              : undefined
-          }
-          textFormat={
-            selectedText
-              ? {
-                  fontFamily: selectedText.fontFamily,
-                  fontSize: selectedText.fontSize,
-                  onFontFamilyChange: (fontFamily: string) =>
-                    void executeCommand("updateText", {
-                      pageId: selection!.pageId,
-                      textId: selectedText.id,
-                      fontFamily,
-                    }),
-                  onFontSizeChange: (fontSize: number) =>
-                    void executeCommand("updateText", {
-                      pageId: selection!.pageId,
-                      textId: selectedText.id,
-                      fontSize,
                     }),
                 }
               : undefined
@@ -732,6 +912,7 @@ export const App = () => {
               <CanvasView
                 page={selectedPage}
                 onRequestImportImage={(pageId, panelId) => handleImportImageForPanel(pageId, panelId)}
+                isLayoutResizing={isLayoutResizing}
               />
             ) : null}
             <div className="status-bar">
@@ -747,13 +928,21 @@ export const App = () => {
           </>
         )}
       </main>
+      <div
+        className="sidebar-splitter sidebar-splitter-right"
+        role="separator"
+        aria-orientation="vertical"
+        onPointerDown={handleSidebarResizeStart("right")}
+      />
       <Inspector
         page={selectedPage}
+        activeTool={activeTool}
         onExportProjectPdf={() => void handleExportProjectPdf()}
         onImportImage={handleImportImage}
         onCreatePanel={() =>
           selectedPage ? void executeCommand("setTool", { tool: "panel" }) : undefined
         }
+        onInsertBubble={(bubbleType) => handleInsertBubble(bubbleType)}
       />
       <input
         ref={fileInputRef}

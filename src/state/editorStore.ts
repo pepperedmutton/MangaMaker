@@ -6,7 +6,12 @@ import { createBlankProject, DEFAULT_ZOOM } from "../domain/defaults";
 import { objectTypeSchema, projectSchema, type Project } from "../domain/schema";
 import { resolveInitialLocale, type Locale } from "../i18n";
 import { saveLocalDraft } from "../storage/localDraft";
+import {
+  loadStoredTextInsertDefaults,
+  persistTextInsertDefaults,
+} from "../storage/textDefaults";
 import type {
+  EditorMultiSelection,
   EditorSelection,
   EditorSessionState,
   ExportArtifact,
@@ -28,12 +33,16 @@ type EditorStore = EditorSessionState & {
 const createInitialProject = () => createBlankProject("");
 const initialProject = createInitialProject();
 const initialLocale = resolveInitialLocale();
+const initialTextInsertDefaults = loadStoredTextInsertDefaults();
 
-const isSelectionValid = (project: Project, selection: EditorSelection) => {
-  if (!selection) {
-    return true;
-  }
-
+const isSelectionItemValid = (
+  project: Project,
+  selection: {
+    pageId: string;
+    objectType: "panel" | "text" | "bubble";
+    objectId: string;
+  },
+) => {
   const page = project.pages.find((entry) => entry.id === selection.pageId);
   if (!page) {
     return false;
@@ -47,6 +56,13 @@ const isSelectionValid = (project: Project, selection: EditorSelection) => {
     return page.texts.some((text) => text.id === selection.objectId);
   }
   return page.bubbles.some((bubble) => bubble.id === selection.objectId);
+};
+
+const isSelectionValid = (project: Project, selection: EditorSelection) => {
+  if (!selection) {
+    return true;
+  }
+  return isSelectionItemValid(project, selection);
 };
 
 const resolveSelectedPageId = (project: Project, currentPageId: string | null) =>
@@ -71,15 +87,20 @@ const sanitizeProjectState = (
   project: Project,
   selectedPageId: string | null,
   selection: EditorSelection,
+  multiSelection: EditorMultiSelection,
   panelImageEditing: PanelImageEditingState,
 ) => {
   const nextProject = projectSchema.parse(project);
   const nextSelectedPageId = resolveSelectedPageId(nextProject, selectedPageId);
   const nextSelection = isSelectionValid(nextProject, selection) ? selection : null;
+  const nextMultiSelection = multiSelection.filter((entry) =>
+    isSelectionItemValid(nextProject, entry),
+  );
   return {
     project: nextProject,
     selectedPageId: nextSelectedPageId,
     selection: nextSelection,
+    multiSelection: nextMultiSelection,
     panelImageEditing: isPanelImageEditingValid(nextProject, panelImageEditing)
       ? panelImageEditing
       : null,
@@ -90,6 +111,7 @@ const createHistorySnapshot = (state: EditorSessionState): HistoryEntry => ({
   project: structuredClone(state.project),
   selectedPageId: state.selectedPageId,
   selection: state.selection ? { ...state.selection } : null,
+  multiSelection: state.multiSelection.map((entry) => ({ ...entry })),
   panelImageEditing: state.panelImageEditing ? { ...state.panelImageEditing } : null,
 });
 
@@ -97,9 +119,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   project: initialProject,
   selectedPageId: null,
   selection: null,
+  multiSelection: [],
   panelImageEditing: null,
   locale: initialLocale,
   activeTool: "select",
+  textInsertDefaults: { ...initialTextInsertDefaults },
+  bubbleInsert: {
+    mode: "preset",
+    presetBubbleType: "round",
+    customSmoothness: 0.45,
+  },
   zoom: DEFAULT_ZOOM,
   lastExport: null,
   statusMessage: null,
@@ -143,6 +172,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
                 project,
                 state.selectedPageId,
                 state.selection,
+                state.multiSelection,
                 state.panelImageEditing,
               ),
             })),
@@ -150,9 +180,12 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
             project: get().project,
             selectedPageId: get().selectedPageId,
             selection: get().selection,
+            multiSelection: get().multiSelection,
             panelImageEditing: get().panelImageEditing,
             locale: get().locale,
             activeTool: get().activeTool,
+            textInsertDefaults: get().textInsertDefaults,
+            bubbleInsert: get().bubbleInsert,
             zoom: get().zoom,
             lastExport: get().lastExport,
             statusMessage: get().statusMessage,
@@ -163,6 +196,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
               const nextPatch = typeof patch === "function" ? patch(state) : patch;
               const selection =
                 nextPatch.selection !== undefined ? nextPatch.selection : state.selection;
+              const multiSelection =
+                nextPatch.multiSelection !== undefined
+                  ? (nextPatch.multiSelection as EditorMultiSelection)
+                  : state.multiSelection;
               const selectedPageId =
                 nextPatch.selectedPageId !== undefined
                   ? nextPatch.selectedPageId
@@ -171,6 +208,24 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
                 nextPatch.panelImageEditing !== undefined
                   ? (nextPatch.panelImageEditing as PanelImageEditingState)
                   : state.panelImageEditing;
+              const nextTextInsertDefaults =
+                nextPatch.textInsertDefaults !== undefined
+                  ? {
+                      ...state.textInsertDefaults,
+                      ...(nextPatch.textInsertDefaults as Partial<typeof state.textInsertDefaults>),
+                    }
+                  : state.textInsertDefaults;
+              const nextBubbleInsert =
+                nextPatch.bubbleInsert !== undefined
+                  ? {
+                      ...state.bubbleInsert,
+                      ...(nextPatch.bubbleInsert as Partial<typeof state.bubbleInsert>),
+                    }
+                  : state.bubbleInsert;
+
+              if (nextTextInsertDefaults !== state.textInsertDefaults) {
+                persistTextInsertDefaults(nextTextInsertDefaults);
+              }
 
               return {
                 ...state,
@@ -180,6 +235,8 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
                   nextPatch.activeTool !== undefined
                     ? (nextPatch.activeTool as ToolMode)
                     : state.activeTool,
+                textInsertDefaults: nextTextInsertDefaults,
+                bubbleInsert: nextBubbleInsert,
                 zoom: nextPatch.zoom !== undefined ? nextPatch.zoom : state.zoom,
                 lastExport:
                   nextPatch.lastExport !== undefined
@@ -195,6 +252,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
                     : state.saveStatus,
                 selectedPageId,
                 selection,
+                multiSelection,
                 panelImageEditing,
               };
             }),
@@ -237,6 +295,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         project,
         state.selectedPageId,
         state.selection,
+        state.multiSelection,
         state.panelImageEditing,
       ),
     })),
@@ -245,9 +304,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       project: createInitialProject(),
       selectedPageId: null,
       selection: null,
+      multiSelection: [],
       panelImageEditing: null,
       locale: resolveInitialLocale(),
       activeTool: "select",
+      textInsertDefaults: loadStoredTextInsertDefaults(),
+      bubbleInsert: {
+        mode: "preset",
+        presetBubbleType: "round",
+        customSmoothness: 0.45,
+      },
       zoom: DEFAULT_ZOOM,
       lastExport: null,
       statusMessage: null,

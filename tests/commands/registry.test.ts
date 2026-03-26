@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getPageWorkspace } from "../../src/domain/helpers";
 import { createHarness, runCommand } from "./harness";
 
 describe("commandRegistry", () => {
@@ -17,6 +18,22 @@ describe("commandRegistry", () => {
     });
 
     expect(harness.readSession().project.pages).toHaveLength(1);
+  });
+
+  it("inserts a page directly below the target page when insertAfterPageId is provided", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Insert Below" });
+    const firstPage = (await runCommand(harness, "addPage", { name: "First" })) as { id: string };
+    const secondPage = (await runCommand(harness, "addPage", { name: "Second" })) as { id: string };
+    const insertedPage = (await runCommand(harness, "addPage", {
+      name: "Inserted",
+      insertAfterPageId: firstPage.id,
+    })) as { id: string };
+
+    const pageOrder = harness.readSession().project.pages.map((page) => page.id);
+    expect(pageOrder).toEqual([firstPage.id, insertedPage.id, secondPage.id]);
+    expect(harness.readSession().selectedPageId).toBe(insertedPage.id);
   });
 
   it("treats panel images as crop-based panel-bound sources", async () => {
@@ -149,7 +166,7 @@ describe("commandRegistry", () => {
       width: 200,
       height: 280,
       direction: "vertical",
-      fontFamily: "Microsoft YaHei",
+      fontFamily: "Source Han Sans",
       fontSize: 42,
       color: "#334455",
     });
@@ -158,7 +175,7 @@ describe("commandRegistry", () => {
       width: 200,
       height: 280,
       direction: "vertical",
-      fontFamily: "Microsoft YaHei",
+      fontFamily: "Source Han Sans",
       fontSize: 42,
       color: "#334455",
     });
@@ -177,6 +194,18 @@ describe("commandRegistry", () => {
       text: "Updated dialogue",
       fontSize: 28,
     });
+    const tailHiddenBubble = (await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: bubble.id,
+      showTail: false,
+    })) as { showTail: boolean };
+    expect(tailHiddenBubble.showTail).toBe(false);
+    const translucentBubble = (await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: bubble.id,
+      opacity: 0.42,
+    })) as { opacity: number };
+    expect(translucentBubble.opacity).toBeCloseTo(0.42, 2);
     const anchoredBubble = (await runCommand(harness, "updateBubble", {
       pageId: page.id,
       bubbleId: bubble.id,
@@ -232,6 +261,167 @@ describe("commandRegistry", () => {
 
     expect(harness.readSession().project.pages[0].texts).toHaveLength(0);
     expect(harness.readSession().project.pages[0].bubbles[0].text).toBe("Updated dialogue");
+    expect(harness.readSession().project.pages[0].bubbles[0].showTail).toBe(false);
+    expect(harness.readSession().project.pages[0].bubbles[0].opacity).toBeCloseTo(0.42, 2);
+  });
+
+  it("reuses updated text typography and box size as defaults for the next inserted text and bubble", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Text Defaults" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const firstText = (await runCommand(harness, "createText", {
+      pageId: page.id,
+      x: 100,
+      y: 140,
+      content: "First",
+    })) as { id: string };
+
+    await runCommand(harness, "updateText", {
+      pageId: page.id,
+      textId: firstText.id,
+      width: 520,
+      height: 260,
+      fontFamily: "LXGW WenKai",
+      fontSize: 48,
+      fontWeight: 700,
+    });
+
+    const secondText = (await runCommand(harness, "createText", {
+      pageId: page.id,
+      x: 260,
+      y: 300,
+      content: "Second",
+    })) as {
+      id: string;
+      width: number;
+      height: number;
+      fontFamily: string;
+      fontSize: number;
+      fontWeight: number;
+    };
+
+    expect(secondText).toMatchObject({
+      width: 520,
+      height: 260,
+      fontFamily: "LXGW WenKai",
+      fontSize: 48,
+      fontWeight: 700,
+    });
+
+    const bubble = (await runCommand(harness, "createBubble", {
+      pageId: page.id,
+    })) as {
+      id: string;
+      fontFamily: string;
+      fontSize: number;
+      fontWeight: number;
+    };
+
+    expect(bubble).toMatchObject({
+      fontFamily: "LXGW WenKai",
+      fontSize: 48,
+      fontWeight: 700,
+    });
+  });
+
+  it("centers text alignment by default for vertical text and when switching from legacy left alignment", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Vertical Center" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const text = (await runCommand(harness, "createText", {
+      pageId: page.id,
+      x: 120,
+      y: 160,
+      content: "Vertical",
+    })) as { id: string; textAlign: string };
+
+    expect(text.textAlign).toBe("center");
+
+    await runCommand(harness, "updateText", {
+      pageId: page.id,
+      textId: text.id,
+      textAlign: "left",
+    });
+    const switched = (await runCommand(harness, "updateText", {
+      pageId: page.id,
+      textId: text.id,
+      direction: "vertical",
+    })) as { textAlign: string };
+
+    expect(switched.textAlign).toBe("center");
+  });
+
+  it("promotes updated bubble typography to global text defaults", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Bubble Typography Defaults" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const firstBubble = (await runCommand(harness, "createBubble", {
+      pageId: page.id,
+    })) as { id: string };
+
+    await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: firstBubble.id,
+      fontFamily: "Source Han Sans",
+      fontSize: 52,
+      fontWeight: 800,
+    });
+
+    const nextBubble = (await runCommand(harness, "createBubble", {
+      pageId: page.id,
+    })) as {
+      id: string;
+      fontFamily: string;
+      fontSize: number;
+      fontWeight: number;
+    };
+    const nextText = (await runCommand(harness, "createText", {
+      pageId: page.id,
+      x: 220,
+      y: 260,
+      content: "From bubble defaults",
+    })) as {
+      id: string;
+      fontFamily: string;
+      fontSize: number;
+      fontWeight: number;
+    };
+
+    expect(nextBubble).toMatchObject({
+      fontFamily: "Source Han Sans",
+      fontSize: 52,
+      fontWeight: 800,
+    });
+    expect(nextText).toMatchObject({
+      fontFamily: "Source Han Sans",
+      fontSize: 52,
+      fontWeight: 800,
+    });
+  });
+
+  it("creates centered bubbles when coordinates are omitted", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Centered Bubble" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const bubble = (await runCommand(harness, "createBubble", {
+      pageId: page.id,
+      bubbleType: "diamond",
+    })) as { id: string; x: number; y: number; width: number; height: number };
+    const pageState = harness.readSession().project.pages.find((entry) => entry.id === page.id);
+
+    expect(pageState).toBeTruthy();
+    const workspace = getPageWorkspace(pageState!);
+    const workspaceCenterX = workspace.x + workspace.width * 0.5;
+    const workspaceCenterY = workspace.y + workspace.height * 0.5;
+    const bubbleCenterX = bubble.x + bubble.width * 0.5;
+    const bubbleCenterY = bubble.y + bubble.height * 0.5;
+
+    expect(Math.abs(bubbleCenterX - workspaceCenterX)).toBeLessThanOrEqual(12);
+    expect(Math.abs(bubbleCenterY - workspaceCenterY)).toBeLessThanOrEqual(12);
   });
 
   it("pastes copied page and object payloads as new entities", async () => {

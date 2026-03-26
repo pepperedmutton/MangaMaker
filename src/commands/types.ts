@@ -2,13 +2,16 @@ import { z } from "zod";
 import type { Project } from "../domain/schema";
 import type { Locale } from "../i18n";
 import type {
+  BubbleInsertState,
   EditorSelection,
+  EditorMultiSelection,
   EditorSessionState,
   ExportArtifact,
   HistoryEntry,
   PanelImageEditingState,
   SaveStatus,
   StatusMessage,
+  TextInsertDefaults,
   ToolMode,
 } from "../state/types";
 
@@ -21,9 +24,12 @@ export type CommandContext = {
       | Partial<{
           selectedPageId: string | null;
           selection: EditorSelection;
+          multiSelection: EditorMultiSelection;
           panelImageEditing: PanelImageEditingState;
           locale: Locale;
           activeTool: ToolMode;
+          textInsertDefaults: TextInsertDefaults;
+          bubbleInsert: BubbleInsertState;
           zoom: number;
           lastExport: ExportArtifact;
           statusMessage: StatusMessage;

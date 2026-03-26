@@ -7,7 +7,7 @@ type SidebarProps = {
   project: Project;
   selectedPageId: string | null;
   onSelectPage: (pageId: string) => void;
-  onAddPage: () => void;
+  onAddPage: (insertAfterPageId?: string) => void;
   onDuplicatePage: (pageId: string) => void;
   onDeletePage: (pageId: string) => void;
   onMovePageUp: (pageId: string) => void;
@@ -158,7 +158,12 @@ export const Sidebar = ({
   const contextMenuActions: SidebarContextAction[] = [
     {
       label: t("sidebar.addPage"),
-      onSelect: () => runMenuAction(onAddPage),
+      onSelect: () =>
+        runMenuAction(() =>
+          contextMenu?.target.kind === "page" && contextTargetPage
+            ? onAddPage(contextTargetPage.id)
+            : onAddPage(),
+        ),
     },
     ...(contextMenu?.target.kind === "page" && contextTargetPage
       ? [

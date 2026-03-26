@@ -1,4 +1,5 @@
 import type { Bubble, Page, PanelStyle, Point, Project, ProjectType, TextItem } from "./schema";
+import { DEFAULT_TEXT_FONT_FAMILY } from "../platform/localFonts";
 
 export const GRID_SIZE = 20;
 export const MIN_PANEL_SIZE = 160;
@@ -12,11 +13,20 @@ export const CG_PAGE_WIDTH = 1200;
 export const CG_PAGE_HEIGHT = 1600;
 export const DEFAULT_PAGE_WIDTH = MANGA_PAGE_WIDTH;
 export const DEFAULT_PAGE_HEIGHT = MANGA_PAGE_HEIGHT;
-export const WORKSPACE_PAGE_AREA_RATIO = 0.125;
+export const WORKSPACE_PAGE_AREA_RATIO = 0.1;
 export const MIN_ZOOM = 0.25;
-export const MAX_ZOOM = 2;
+export const MAX_ZOOM = 6;
 export const DEFAULT_ZOOM = 1;
 export const ZOOM_STEP = 0.01;
+export const DEFAULT_TEXT_INSERT_DEFAULTS = {
+  width: 360,
+  height: 360,
+  fontSize: 36,
+  fontFamily: DEFAULT_TEXT_FONT_FAMILY,
+  fontWeight: 400,
+  letterSpacing: 0,
+  lineSpacing: 0,
+} as const;
 
 const now = () => new Date().toISOString();
 
@@ -65,6 +75,7 @@ export const createDefaultPage = (index: number, projectType: ProjectType = "man
   panels: [],
   texts: [],
   bubbles: [],
+  groups: [],
   layers: [],
 });
 
@@ -73,14 +84,17 @@ export const createDefaultText = (
 ): Omit<TextItem, "id"> => ({
   x: 120,
   y: 120,
-  width: 360,
-  height: 360,
+  width: DEFAULT_TEXT_INSERT_DEFAULTS.width,
+  height: DEFAULT_TEXT_INSERT_DEFAULTS.height,
   content: "Type here",
-  fontSize: 36,
-  fontFamily: "Georgia",
+  fontSize: DEFAULT_TEXT_INSERT_DEFAULTS.fontSize,
+  fontFamily: DEFAULT_TEXT_INSERT_DEFAULTS.fontFamily,
+  fontWeight: DEFAULT_TEXT_INSERT_DEFAULTS.fontWeight,
+  letterSpacing: DEFAULT_TEXT_INSERT_DEFAULTS.letterSpacing,
+  lineSpacing: DEFAULT_TEXT_INSERT_DEFAULTS.lineSpacing,
   color: "#121212",
   direction: "vertical",
-  textAlign: "left",
+  textAlign: "center",
   verticalAlign: "top",
   ...overrides,
 });
@@ -92,19 +106,16 @@ export const createDefaultBubble = (
   y: 180,
   width: 260,
   height: 150,
+  contentCenter: { x: 130, y: 75 },
+  showTail: true,
   tailTip: { x: 310, y: 390 },
   tailBaseAngle: 90,
   tailWidth: 24,
-  text: "Dialogue",
-  fontSize: 26,
-  fontFamily: "system-ui",
-  direction: "vertical",
-  textAlign: "center",
-  verticalAlign: "middle",
   bubbleType: "round",
   strokeWidth: 2,
   backgroundColor: "#ffffff",
   strokeColor: "#111111",
+  opacity: 1,
   cornerRadius: 12,
   bumpiness: 0.5,
   spikeCount: 8,
@@ -114,6 +125,10 @@ export const createDefaultBubble = (
   activeSpikeIndex: -1,
   jaggedness: 6,
   thoughtCircles: 3,
+  customPoints: [],
+  customSmoothness: 0.45,
+  customPointSmoothness: [],
+  customHandleProfile: undefined,
   ...overrides,
 });
 
@@ -145,13 +160,62 @@ export const clonePage = (page: Page): Page => {
   const bubbles = page.bubbles.map((bubble) => {
     const id = createId("bubble");
     bubbleIdMap.set(bubble.id, id);
-  return {
-    ...bubble,
-    id,
-    tailTip: { ...bubble.tailTip },
-    ...(bubble.tailBase ? { tailBase: { ...bubble.tailBase } } : {}),
-  };
-});
+    return {
+      ...bubble,
+      id,
+      contentCenter: { ...bubble.contentCenter },
+      tailTip: { ...bubble.tailTip },
+      ...(bubble.tailBase ? { tailBase: { ...bubble.tailBase } } : {}),
+      customPoints: bubble.customPoints.map((point) => ({ ...point })),
+      customPointSmoothness: [...bubble.customPointSmoothness],
+      ...(bubble.customHandleProfile
+        ? {
+            customHandleProfile: {
+              movableIndices: [...bubble.customHandleProfile.movableIndices],
+              lockedIndices: [...bubble.customHandleProfile.lockedIndices],
+            },
+          }
+        : {}),
+    };
+  });
+
+  const groups = page.groups
+    .map((group) => ({
+      ...group,
+      id: createId("group"),
+      members: group.members
+        .map((member) => {
+          if (member.objectType === "panel") {
+            const mappedId = panelIdMap.get(member.objectId);
+            return mappedId
+              ? {
+                  objectType: "panel" as const,
+                  objectId: mappedId,
+                }
+              : null;
+          }
+          if (member.objectType === "text") {
+            const mappedId = textIdMap.get(member.objectId);
+            return mappedId
+              ? {
+                  objectType: "text" as const,
+                  objectId: mappedId,
+                }
+              : null;
+          }
+          const mappedId = bubbleIdMap.get(member.objectId);
+          return mappedId
+            ? {
+                objectType: "bubble" as const,
+                objectId: mappedId,
+              }
+            : null;
+        })
+        .filter((member): member is { objectType: "panel" | "text" | "bubble"; objectId: string } =>
+          member !== null,
+        ),
+    }))
+    .filter((group) => group.members.length >= 2);
 
   return {
     ...page,
@@ -160,6 +224,7 @@ export const clonePage = (page: Page): Page => {
     panels,
     texts,
     bubbles,
+    groups,
     layers: page.layers.map((layer) => {
       if (layer.startsWith("panel:")) {
         return `panel:${panelIdMap.get(layer.slice("panel:".length)) ?? layer.slice("panel:".length)}`;

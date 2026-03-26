@@ -1,5 +1,9 @@
 import { commandRegistry } from "../../src/commands/registry";
-import { createBlankProject, DEFAULT_ZOOM } from "../../src/domain/defaults";
+import {
+  createBlankProject,
+  DEFAULT_TEXT_INSERT_DEFAULTS,
+  DEFAULT_ZOOM,
+} from "../../src/domain/defaults";
 import type { Project } from "../../src/domain/schema";
 import type { EditorSessionState, HistoryEntry } from "../../src/state/types";
 
@@ -11,6 +15,7 @@ export const createHarness = () => {
     panelImageEditing: null,
     locale: "en",
     activeTool: "select",
+    textInsertDefaults: { ...DEFAULT_TEXT_INSERT_DEFAULTS },
     zoom: DEFAULT_ZOOM,
     lastExport: null,
     statusMessage: null,

@@ -101,10 +101,20 @@ const resolveProjectDir = async (
 
   if (existingDir && path.resolve(existingDir) !== path.resolve(targetDir)) {
     const targetStats = await fsp.stat(targetDir).catch(() => null);
-    if (!targetStats) {
-      await fsp.rename(existingDir, targetDir);
+    if (targetStats) {
+      return existingDir;
     }
-    return targetDir;
+    try {
+      await fsp.rename(existingDir, targetDir);
+      return targetDir;
+    } catch (error) {
+      console.warn("Project folder rename failed; keeping existing folder.", {
+        existingDir,
+        targetDir,
+        error,
+      });
+      return existingDir;
+    }
   }
 
   if (existingDir) {

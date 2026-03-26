@@ -2,15 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { MAX_ZOOM, MIN_ZOOM, ZOOM_STEP } from "../domain/defaults";
 import { getToolbarZoomLabel } from "../domain/helpers";
 import { translate, type Locale } from "../i18n";
-import { LOCAL_FONTS } from "../platform/localFonts";
 import type { ToolMode } from "../state/types";
-
-export type TextFormatState = {
-  fontFamily: string;
-  fontSize: number;
-  onFontFamilyChange: (value: string) => void;
-  onFontSizeChange: (value: number) => void;
-};
 
 export type PageFormatState = {
   background: string;
@@ -24,7 +16,6 @@ type RibbonBarProps = {
   canUndo: boolean;
   canRedo: boolean;
   canExport: boolean;
-  textFormat?: TextFormatState;
   pageFormat?: PageFormatState;
   onSetTool: (tool: ToolMode) => void;
   onSave: () => void;
@@ -68,7 +59,6 @@ export const RibbonBar = ({
   canUndo,
   canRedo,
   canExport,
-  textFormat,
   pageFormat,
   onSetTool,
   onSave,
@@ -216,37 +206,6 @@ export const RibbonBar = ({
               onChange={(event) => pageFormat?.onBackgroundChange(event.target.value)}
             />
           </label>
-        </div>
-      </div>
-
-      <Divider />
-
-      <div className={`ribbon-group${textFormat ? "" : " ribbon-group-dim"}`}>
-        <span className="ribbon-group-label">{t("ribbon.font")}</span>
-        <div className="ribbon-group-row">
-          <select
-            className="ribbon-font-select"
-            disabled={!textFormat}
-            value={textFormat?.fontFamily ?? "Arial"}
-            style={textFormat ? { fontFamily: textFormat.fontFamily } : undefined}
-            onChange={(event) => textFormat?.onFontFamilyChange(event.target.value)}
-          >
-            {LOCAL_FONTS.map((font) => (
-              <option key={font} value={font} style={{ fontFamily: font }}>
-                {font}
-              </option>
-            ))}
-          </select>
-          <input
-            className="ribbon-font-size"
-            type="number"
-            min={6}
-            max={300}
-            step={1}
-            disabled={!textFormat}
-            value={textFormat?.fontSize ?? 24}
-            onChange={(event) => textFormat?.onFontSizeChange(Number(event.target.value))}
-          />
         </div>
       </div>
 

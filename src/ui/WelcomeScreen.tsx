@@ -15,6 +15,7 @@ type WelcomeScreenProps = {
   onCreateProject: () => void;
   onRestoreDraft: () => void;
   onOpenProject: (project: Project) => void;
+  onDuplicateProject: (project: Project) => void;
   onDeleteProject: (project: Project) => void;
   onSetLocale: (locale: Locale) => void;
 };
@@ -38,6 +39,7 @@ export const WelcomeScreen = ({
   onCreateProject,
   onRestoreDraft,
   onOpenProject,
+  onDuplicateProject,
   onDeleteProject,
   onSetLocale,
 }: WelcomeScreenProps) => {
@@ -163,7 +165,7 @@ export const WelcomeScreen = ({
                     onContextMenu={(event) => {
                       event.preventDefault();
                       const menuWidth = 220;
-                      const menuHeight = 120;
+                      const menuHeight = 164;
                       const x = Math.max(
                         8,
                         Math.min(event.clientX, window.innerWidth - menuWidth - 8),
@@ -208,6 +210,15 @@ export const WelcomeScreen = ({
         >
           <p className="canvas-context-menu-title">{t("contextMenu.sidebar")}</p>
           <div className="canvas-context-menu-actions">
+            <button
+              className="canvas-context-menu-item"
+              onClick={() => {
+                setProjectMenu(null);
+                onDuplicateProject(projectMenu.project);
+              }}
+            >
+              {t("contextMenu.duplicateProject")}
+            </button>
             <button
               className="canvas-context-menu-item danger"
               onClick={() => {
