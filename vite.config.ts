@@ -24,6 +24,15 @@ const SHARE_ALLOWED_HOSTS = [
   "ngrok.io",
   ".ngrok.io",
 ];
+const RENDER_ALLOWED_HOSTS = ["onrender.com", ".onrender.com"];
+const renderExternalHostname = process.env.RENDER_EXTERNAL_HOSTNAME?.trim();
+const ALLOWED_HOSTS = Array.from(
+  new Set([
+    ...SHARE_ALLOWED_HOSTS,
+    ...RENDER_ALLOWED_HOSTS,
+    ...(renderExternalHostname ? [renderExternalHostname] : []),
+  ]),
+);
 
 const sanitizePathComponent = (value: string, fallback: string) => {
   const sanitized = value
@@ -388,9 +397,9 @@ const webPersistencePlugin = () => ({
 export default defineConfig({
   plugins: [react(), webPersistencePlugin()],
   server: {
-    allowedHosts: SHARE_ALLOWED_HOSTS,
+    allowedHosts: ALLOWED_HOSTS,
   },
   preview: {
-    allowedHosts: SHARE_ALLOWED_HOSTS,
+    allowedHosts: ALLOWED_HOSTS,
   },
 });

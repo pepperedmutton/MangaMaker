@@ -41,6 +41,16 @@ var __asyncValues = (this && this.__asyncValues) || function (o) {
     function verb(n) { i[n] = o[n] && function (v) { return new Promise(function (resolve, reject) { v = o[n](v), settle(resolve, reject, v.done, v.value); }); }; }
     function settle(resolve, reject, d, v) { Promise.resolve(v).then(function(v) { resolve({ value: v, done: d }); }, reject); }
 };
+var __spreadArray = (this && this.__spreadArray) || function (to, from, pack) {
+    if (pack || arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+        if (ar || !(i in from)) {
+            if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+            ar[i] = from[i];
+        }
+    }
+    return to.concat(ar || Array.prototype.slice.call(from));
+};
+var _a;
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
@@ -65,6 +75,9 @@ var SHARE_ALLOWED_HOSTS = [
     "ngrok.io",
     ".ngrok.io",
 ];
+var RENDER_ALLOWED_HOSTS = ["onrender.com", ".onrender.com"];
+var renderExternalHostname = (_a = process.env.RENDER_EXTERNAL_HOSTNAME) === null || _a === void 0 ? void 0 : _a.trim();
+var ALLOWED_HOSTS = Array.from(new Set(__spreadArray(__spreadArray(__spreadArray([], SHARE_ALLOWED_HOSTS, true), RENDER_ALLOWED_HOSTS, true), (renderExternalHostname ? [renderExternalHostname] : []), true)));
 var sanitizePathComponent = function (value, fallback) {
     var sanitized = value
         .split("")
@@ -581,9 +594,9 @@ var webPersistencePlugin = function () { return ({
 export default defineConfig({
     plugins: [react(), webPersistencePlugin()],
     server: {
-        allowedHosts: SHARE_ALLOWED_HOSTS,
+        allowedHosts: ALLOWED_HOSTS,
     },
     preview: {
-        allowedHosts: SHARE_ALLOWED_HOSTS,
+        allowedHosts: ALLOWED_HOSTS,
     },
 });
