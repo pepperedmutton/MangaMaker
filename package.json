@@ -6,12 +6,11 @@
   "packageManager": "pnpm@10.6.5",
   "scripts": {
     "sync:fonts": "node scripts/syncBundledFonts.mjs",
-    "sync:seed-projects": "node scripts/syncSeedProjects.mjs",
     "predev": "pnpm sync:fonts",
     "prebuild": "pnpm sync:fonts",
     "dev": "node scripts/launch.mjs --dev-server",
     "build": "tsc -b && vite build",
-    "start": "pnpm sync:seed-projects && node scripts/launch.mjs",
+    "start": "node scripts/launch.mjs",
     "share": "node scripts/launch.mjs --share",
     "preview": "node scripts/launch.mjs",
     "preview:vite": "vite preview",
