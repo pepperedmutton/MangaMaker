@@ -51,7 +51,7 @@ Required scope:
 - Progress persists after every mutating operation.
 - In web runtime, persistence lands immediately in repository-root `projects/` folders.
 - In desktop runtime, persistence lands immediately in a local untracked `projects/` folder.
-- The default web launcher creates a 72-hour Gradio share link unless `--no-share` is passed.
+- The default web launcher creates a public share link unless `--no-share` is passed. Gradio remains the default provider, and `ngrok` is supported through `--share-provider ngrok`.
 - The UI and governing documents remain readable in Chinese and English.
 - All major GUI actions have command/API parity.
 
@@ -132,7 +132,7 @@ Non-goals:
 - Shared command model for UI, tests, and automation.
 - Local automation bridge via `window.mangaMaker`.
 - Immediate persistence after every mutation.
-- Default web share launcher with terminal-printed Gradio link.
+- Default web share launcher with terminal-printed public link output for the active share provider.
 
 ## Required UX Rules / 必需易用性规则
 - A new user must be able to create a project, choose `manga` or `cg`, add a page, create panels, import or paste images, add text or bubbles, and export without outside help.
@@ -204,7 +204,7 @@ Current status:
 - Crop-based panel images, live selected-image dragging, polygon editing, layer controls, and panel description metadata are present.
 - Default vertical text, bubble Inspector typography controls, and tail-base editing for non-explosion bubbles are present.
 - Immediate persistence is present in both web and desktop runtimes, with web persistence rooted at repository `projects/`.
-- The default web launcher starts in share mode and prints a Gradio link in the terminal.
+- The default web launcher starts in share mode and prints the active provider link in the terminal.
 - Validation currently passes with `pnpm test`, `pnpm test:e2e`, and `pnpm build`.
 
 - 本文档要求的范围已经在当前仓库状态中实现。
@@ -248,6 +248,12 @@ Web shared mode:
 ```bash
 pnpm install
 pnpm dev
+```
+
+Web shared mode with ngrok:
+
+```bash
+pnpm dev -- --share-provider ngrok
 ```
 
 Web local-only mode:

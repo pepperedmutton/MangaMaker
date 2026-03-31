@@ -133,6 +133,113 @@ const collectForwardArc = (
   return points;
 };
 
+const getWrappedRingIndex = (ringLength: number, index: number) =>
+  ((index % ringLength) + ringLength) % ringLength;
+
+const getRingPerimeter = (ring: OutlinePoint[]) => {
+  if (ring.length < 2) {
+    return 0;
+  }
+  let perimeter = 0;
+  for (let index = 0; index < ring.length; index += 1) {
+    const current = ring[index];
+    const next = ring[(index + 1) % ring.length];
+    perimeter += Math.hypot(next[0] - current[0], next[1] - current[1]);
+  }
+  return perimeter;
+};
+
+const getRingPointAtDistance = (
+  ring: OutlinePoint[],
+  startIndex: number,
+  direction: 1 | -1,
+  distance: number,
+) => {
+  const safeStartIndex = getWrappedRingIndex(ring.length, startIndex);
+  if (distance <= 0) {
+    return {
+      point: ring[safeStartIndex],
+      index: safeStartIndex,
+    };
+  }
+
+  let remaining = distance;
+  let currentIndex = safeStartIndex;
+  for (let guard = 0; guard <= ring.length; guard += 1) {
+    const nextIndex = getWrappedRingIndex(ring.length, currentIndex + direction);
+    const currentPoint = ring[currentIndex];
+    const nextPoint = ring[nextIndex];
+    const segmentLength = Math.hypot(
+      nextPoint[0] - currentPoint[0],
+      nextPoint[1] - currentPoint[1],
+    );
+
+    if (segmentLength > 0.0001) {
+      if (segmentLength >= remaining) {
+        const ratio = remaining / segmentLength;
+        return {
+          point: toOutlinePoint(
+            currentPoint[0] + (nextPoint[0] - currentPoint[0]) * ratio,
+            currentPoint[1] + (nextPoint[1] - currentPoint[1]) * ratio,
+          ),
+          index: nextIndex,
+        };
+      }
+      remaining -= segmentLength;
+    }
+
+    currentIndex = nextIndex;
+    if (currentIndex === safeStartIndex) {
+      break;
+    }
+  }
+
+  return {
+    point: ring[currentIndex],
+    index: currentIndex,
+  };
+};
+
+const getTailBasePointsOnBodyRing = (
+  bubble: Bubble,
+  liveSpikePositions?: Array<{ x: number; y: number }> | null,
+) => {
+  const bodyRing = sampleClosedPathRing(getBubbleBodyPath(bubble, liveSpikePositions));
+  if (bodyRing.length < 3) {
+    return null;
+  }
+
+  const fallbackBase = getBubbleBasePoints(bubble);
+  const centerCandidate = toOutlinePoint(
+    fallbackBase.center.x - bubble.x,
+    fallbackBase.center.y - bubble.y,
+  );
+  const centerIndex = getNearestRingIndex(bodyRing, centerCandidate);
+  if (centerIndex < 0) {
+    return null;
+  }
+
+  const perimeter = getRingPerimeter(bodyRing);
+  if (!Number.isFinite(perimeter) || perimeter <= 0.001) {
+    return null;
+  }
+
+  const halfWidth = Math.max(0.5, bubble.tailWidth * 0.5);
+  const clampedDistance = Math.min(halfWidth, Math.max(0.5, perimeter * 0.24));
+  const left = getRingPointAtDistance(bodyRing, centerIndex, -1, clampedDistance);
+  const right = getRingPointAtDistance(bodyRing, centerIndex, 1, clampedDistance);
+  if (left.index === right.index) {
+    return null;
+  }
+
+  return {
+    ring: bodyRing,
+    center: bodyRing[centerIndex],
+    left,
+    right,
+  };
+};
+
 const buildPathFromPoints = (points: PathPoint[]) => {
   if (points.length === 0) {
     return "";
@@ -596,22 +703,46 @@ export const getBubbleBodyPath = (
 
 // Generate tail path for bubble (separate from body)
 export const getBubbleTailPath = (bubble: Bubble): string => {
-  const base = getBubbleBasePoints(bubble);
+  const tailBaseOnRing = getTailBasePointsOnBodyRing(bubble);
+  const base = tailBaseOnRing
+    ? {
+        left: { x: tailBaseOnRing.left.point[0], y: tailBaseOnRing.left.point[1] },
+        right: { x: tailBaseOnRing.right.point[0], y: tailBaseOnRing.right.point[1] },
+      }
+    : (() => {
+        const fallback = getBubbleBasePoints(bubble);
+        return {
+          left: { x: fallback.left.x - bubble.x, y: fallback.left.y - bubble.y },
+          right: { x: fallback.right.x - bubble.x, y: fallback.right.y - bubble.y },
+        };
+      })();
 
   return (
-    `M ${base.left.x - bubble.x} ${base.left.y - bubble.y} ` +
+    `M ${base.left.x} ${base.left.y} ` +
     `L ${bubble.tailTip.x - bubble.x} ${bubble.tailTip.y - bubble.y} ` +
-    `L ${base.right.x - bubble.x} ${base.right.y - bubble.y} Z`
+    `L ${base.right.x} ${base.right.y} Z`
   );
 };
 
 // Tail outer contour only (no closing edge to bubble body), used to avoid an inner seam.
 export const getBubbleTailStrokePath = (bubble: Bubble): string => {
-  const base = getBubbleBasePoints(bubble);
+  const tailBaseOnRing = getTailBasePointsOnBodyRing(bubble);
+  const base = tailBaseOnRing
+    ? {
+        left: { x: tailBaseOnRing.left.point[0], y: tailBaseOnRing.left.point[1] },
+        right: { x: tailBaseOnRing.right.point[0], y: tailBaseOnRing.right.point[1] },
+      }
+    : (() => {
+        const fallback = getBubbleBasePoints(bubble);
+        return {
+          left: { x: fallback.left.x - bubble.x, y: fallback.left.y - bubble.y },
+          right: { x: fallback.right.x - bubble.x, y: fallback.right.y - bubble.y },
+        };
+      })();
   return (
-    `M ${base.left.x - bubble.x} ${base.left.y - bubble.y} ` +
+    `M ${base.left.x} ${base.left.y} ` +
     `L ${bubble.tailTip.x - bubble.x} ${bubble.tailTip.y - bubble.y} ` +
-    `L ${base.right.x - bubble.x} ${base.right.y - bubble.y}`
+    `L ${base.right.x} ${base.right.y}`
   );
 };
 
@@ -623,25 +754,19 @@ export const getBubbleRegularTailStrokeOutlinePath = (
     return getBubbleBodyPath(bubble, liveSpikePositions);
   }
 
-  const bodyRing = sampleClosedPathRing(getBubbleBodyPath(bubble, liveSpikePositions));
-  if (bodyRing.length < 3) {
+  const tailBaseOnRing = getTailBasePointsOnBodyRing(bubble, liveSpikePositions);
+  if (!tailBaseOnRing) {
     return getBubbleBodyPath(bubble, liveSpikePositions);
   }
-  const tailBase = getBubbleBasePoints(bubble);
-  const leftPoint = toOutlinePoint(
-    tailBase.left.x - bubble.x,
-    tailBase.left.y - bubble.y,
-  );
-  const rightPoint = toOutlinePoint(
-    tailBase.right.x - bubble.x,
-    tailBase.right.y - bubble.y,
-  );
+  const bodyRing = tailBaseOnRing.ring;
+  const leftPoint = tailBaseOnRing.left.point;
+  const rightPoint = tailBaseOnRing.right.point;
   const tipPoint = toOutlinePoint(
     bubble.tailTip.x - bubble.x,
     bubble.tailTip.y - bubble.y,
   );
-  const leftIndex = getNearestRingIndex(bodyRing, leftPoint);
-  const rightIndex = getNearestRingIndex(bodyRing, rightPoint);
+  const leftIndex = tailBaseOnRing.left.index;
+  const rightIndex = tailBaseOnRing.right.index;
   if (leftIndex < 0 || rightIndex < 0 || leftIndex === rightIndex) {
     return getBubbleBodyPath(bubble, liveSpikePositions);
   }

@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 
 GRADIO_API_SERVER = "https://api.gradio.app/v3/tunnel-request"
+GRADIO_SHARE_SERVER_ADDRESS = os.getenv("GRADIO_SHARE_SERVER_ADDRESS")
 FRPC_VERSION = "0.3"
 TUNNEL_START_TIMEOUT_SECONDS = 30
 DOWNLOAD_TIMEOUT_SECONDS = 30
@@ -105,6 +106,9 @@ def ensure_frpc_binary() -> Path:
 
 
 def fetch_tunnel_config() -> tuple[str, int]:
+    if GRADIO_SHARE_SERVER_ADDRESS:
+        remote_host, remote_port = GRADIO_SHARE_SERVER_ADDRESS.split(":")
+        return remote_host, int(remote_port)
     raw = download(GRADIO_API_SERVER)
     payload = json.loads(raw.decode("utf-8"))[0]
     CERTIFICATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -112,7 +116,7 @@ def fetch_tunnel_config() -> tuple[str, int]:
     return payload["host"], int(payload["port"])
 
 
-def preflight_remote_endpoint(host: str, port: int) -> None:
+def preflight_remote_endpoint(host: str, port: int) -> str:
     status(f"Resolving {host}:{port}...")
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     if not infos:
@@ -122,13 +126,14 @@ def preflight_remote_endpoint(host: str, port: int) -> None:
     with socket.create_connection((host, port), timeout=REMOTE_CONNECT_TIMEOUT_SECONDS):
         pass
     status(f"Remote endpoint {host}:{port} is reachable.")
+    return resolved_ip
 
 
 def start_tunnel_process(
     binary: Path,
     local_host: str,
     local_port: int,
-    remote_host: str,
+    remote_server_addr: str,
     remote_port: int,
     share_token: str,
 ) -> subprocess.Popen[bytes]:
@@ -146,7 +151,7 @@ def start_tunnel_process(
         "random",
         "--ue",
         "--server_addr",
-        f"{remote_host}:{remote_port}",
+        f"{remote_server_addr}:{remote_port}",
         "--disable_log_color",
         "--tls_enable",
         "--tls_trusted_ca_file",
@@ -198,6 +203,7 @@ def create_tunnel_with_retry(
     remote_port: int,
 ) -> tuple[subprocess.Popen[bytes], str]:
     last_error: Exception | None = None
+    resolved_ip: str | None = None
 
     for attempt in range(1, TUNNEL_START_RETRY_COUNT + 1):
         tunnel_proc: subprocess.Popen[bytes] | None = None
@@ -205,7 +211,7 @@ def create_tunnel_with_retry(
             status(
                 f"Tunnel attempt {attempt}/{TUNNEL_START_RETRY_COUNT}: preflighting {remote_host}:{remote_port}...",
             )
-            preflight_remote_endpoint(remote_host, remote_port)
+            resolved_ip = preflight_remote_endpoint(remote_host, remote_port)
             status(
                 f"Tunnel attempt {attempt}/{TUNNEL_START_RETRY_COUNT}: starting frpc login...",
             )
@@ -213,7 +219,7 @@ def create_tunnel_with_retry(
                 binary=binary,
                 local_host=local_host,
                 local_port=local_port,
-                remote_host=remote_host,
+                remote_server_addr=remote_host,
                 remote_port=remote_port,
                 share_token=secrets.token_urlsafe(32),
             )
@@ -222,6 +228,35 @@ def create_tunnel_with_retry(
         except Exception as error:
             last_error = error if isinstance(error, Exception) else RuntimeError(str(error))
             terminate_process(tunnel_proc)
+            error_text = str(last_error)
+            should_try_resolved_ip = (
+                resolved_ip is not None
+                and "lookup " in error_text
+                and "i/o timeout" in error_text
+            )
+            if should_try_resolved_ip:
+                status(
+                    "frpc failed to resolve the Gradio host even though preflight DNS succeeded. "
+                    f"Retrying login with resolved IP {resolved_ip}...",
+                )
+                try:
+                    tunnel_proc = start_tunnel_process(
+                        binary=binary,
+                        local_host=local_host,
+                        local_port=local_port,
+                        remote_server_addr=resolved_ip,
+                        remote_port=remote_port,
+                        share_token=secrets.token_urlsafe(32),
+                    )
+                    share_url = read_share_url(tunnel_proc)
+                    return tunnel_proc, share_url
+                except Exception as fallback_error:
+                    last_error = (
+                        fallback_error
+                        if isinstance(fallback_error, Exception)
+                        else RuntimeError(str(fallback_error))
+                    )
+                    terminate_process(tunnel_proc)
             if attempt >= TUNNEL_START_RETRY_COUNT:
                 break
             status(
@@ -291,7 +326,13 @@ def main() -> int:
         return 0
     except Exception as error:
         terminate_process(tunnel_proc)
-        eprint(f"SHARE_ERROR={error}")
+        eprint(
+            "SHARE_ERROR="
+            + (
+                "Gradio public share tunnel failed. The local preview server is still available. "
+                f"Details: {error}"
+            ),
+        )
         return 1
 
 

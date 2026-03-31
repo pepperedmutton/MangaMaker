@@ -15,6 +15,14 @@ const SHARE_ALLOWED_HOSTS = [
   ".gradio.live",
   "gradio-live.com",
   ".gradio-live.com",
+  "ngrok-free.app",
+  ".ngrok-free.app",
+  "ngrok.app",
+  ".ngrok.app",
+  "ngrok.dev",
+  ".ngrok.dev",
+  "ngrok.io",
+  ".ngrok.io",
 ];
 
 const sanitizePathComponent = (value: string, fallback: string) => {

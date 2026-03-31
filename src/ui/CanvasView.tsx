@@ -2265,7 +2265,6 @@ const BubbleNode = ({
   ]);
 
   const bodyPath = getBubbleBodyPath(displayBubble, liveSpikePositions);
-  const tailPath = getBubbleTailPath(displayBubble);
   const explosionSpikes = displayBubble.bubbleType === "explosion" ? getExplosionSpikePoints(displayBubble, liveSpikePositions) : [];
   // When strokeWidth is 0, don't render stroke at all
   const hasStroke = displayBubble.strokeWidth > 0;
@@ -2274,6 +2273,7 @@ const BubbleNode = ({
   const shouldShowTail = displayBubble.showTail && displayBubble.bubbleType !== "explosion";
   const shouldRenderRegularTail = shouldShowTail && displayBubble.bubbleType !== "thought";
   const shouldRenderThoughtTail = shouldShowTail && displayBubble.bubbleType === "thought";
+  const tailPath = shouldRenderRegularTail ? getBubbleTailPath(displayBubble) : "";
   const combinedFillPath = shouldRenderRegularTail ? `${bodyPath} ${tailPath}` : bodyPath;
   const strokePath = shouldRenderRegularTail
     ? getBubbleRegularTailStrokeOutlinePath(displayBubble, liveSpikePositions)

@@ -888,10 +888,13 @@ const doMergeGeometriesOverlap = (
   }
 };
 
-const getBubbleOuterRingFromGeometry = (
-  bubbleId: string,
-  geometryByBubbleId: Map<string, BubbleMergeGeometry>,
-) => getLargestOuterRing(geometryByBubbleId.get(bubbleId)?.fillMultiPolygon ?? null);
+const getBubbleBodyRingInWorld = (bubble: BubbleEntity) => {
+  const bodyRing = sampleClosedPathRing(getBubbleBodyPath(bubble));
+  if (bodyRing.length < 3) {
+    return null;
+  }
+  return translateRing(bodyRing, bubble.x, bubble.y);
+};
 
 const getBubbleEndpointCandidates = (
   bubble: BubbleEntity,
@@ -904,7 +907,6 @@ const getBubbleEndpointCandidates = (
 
 const collectComponentIntersectionPoints = (
   componentBubbles: BubbleEntity[],
-  geometryByBubbleId: Map<string, BubbleMergeGeometry>,
 ): MergePoint[] => {
   const intersectionPoints: MergePoint[] = [];
   for (let sourceIndex = 0; sourceIndex < componentBubbles.length; sourceIndex += 1) {
@@ -915,8 +917,8 @@ const collectComponentIntersectionPoints = (
       targetIndex += 1
     ) {
       const targetBubble = componentBubbles[targetIndex];
-      const sourceRing = getBubbleOuterRingFromGeometry(sourceBubble.id, geometryByBubbleId);
-      const targetRing = getBubbleOuterRingFromGeometry(targetBubble.id, geometryByBubbleId);
+      const sourceRing = getBubbleBodyRingInWorld(sourceBubble);
+      const targetRing = getBubbleBodyRingInWorld(targetBubble);
       if (!sourceRing || !targetRing) {
         continue;
       }
@@ -928,7 +930,6 @@ const collectComponentIntersectionPoints = (
 
 const createMergedBubbleHandleProfile = (
   componentBubbles: BubbleEntity[],
-  geometryByBubbleId: Map<string, BubbleMergeGeometry>,
   mergedRing: MergePoint[],
 ): BubbleCustomHandleProfile | undefined => {
   if (mergedRing.length === 0) {
@@ -937,18 +938,19 @@ const createMergedBubbleHandleProfile = (
   const originalEndpointPoints = componentBubbles.flatMap((bubble) =>
     getBubbleEndpointCandidates(bubble),
   );
-  const intersectionCandidates = collectComponentIntersectionPoints(
-    componentBubbles,
-    geometryByBubbleId,
-  );
+  const intersectionCandidates = collectComponentIntersectionPoints(componentBubbles);
   const intersectionEndpoints =
     intersectionCandidates.length > MERGE_INTERSECTION_ENDPOINT_COUNT
       ? pickFarthestPointPair(intersectionCandidates)
       : intersectionCandidates;
-  const movableIndices = dedupeNumberList([
+  let movableIndices = dedupeNumberList([
     ...mapPointsToRingIndices(mergedRing, originalEndpointPoints),
     ...mapPointsToRingIndices(mergedRing, intersectionEndpoints),
   ]).sort((left, right) => left - right);
+  if (movableIndices.length === 0 && mergedRing.length > 0) {
+    // Fallback: ensure at least one opposite control pair remains draggable after merge.
+    movableIndices = dedupeNumberList([0, Math.floor(mergedRing.length * 0.5)]);
+  }
   return sanitizeBubbleCustomHandleProfile(
     {
       movableIndices,
@@ -1001,7 +1003,6 @@ const createMergedBubbleFromComponent = (
   }
   const customHandleProfile = createMergedBubbleHandleProfile(
     bubbles,
-    geometryByBubbleId,
     simplifiedOuterRing,
   );
 

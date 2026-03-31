@@ -7,11 +7,14 @@ import { spawn } from "node:child_process";
 const rootDir = process.cwd();
 const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const pythonCommand = process.platform === "win32" ? "python" : "python3";
+const defaultNgrokCommand = process.platform === "win32" ? "ngrok.exe" : "ngrok";
 const defaultHost = "127.0.0.1";
 const defaultPreviewPort = 4173;
 const defaultDevPort = 5173;
 const defaultTtlHours = 72;
 const healthPath = "/__mangamaker__/persistence/health";
+const defaultShareProvider = "gradio";
+const defaultNgrokApiUrl = "http://127.0.0.1:4040";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -27,10 +30,10 @@ const createLineBuffer = (onLine) => {
   };
 };
 
-const printShareBanner = (shareUrl, expiresAt) => {
+const printShareBanner = (providerLabel, shareUrl, expiresAt) => {
   const lines = [
     "===================================",
-    "Gradio Share Link Ready",
+    `${providerLabel} Share Link Ready`,
     "===================================",
     `Share URL: ${shareUrl}`,
   ];
@@ -54,6 +57,7 @@ const quoteWindowsArg = (value) => {
 const parseArgs = (argv) => {
   const options = {
     share: true,
+    shareProvider: defaultShareProvider,
     host: defaultHost,
     port: null,
     ttlHours: defaultTtlHours,
@@ -74,6 +78,11 @@ const parseArgs = (argv) => {
     }
     if (arg === "--no-share") {
       options.share = false;
+      continue;
+    }
+    if (arg === "--share-provider") {
+      options.shareProvider = argv[index + 1] ?? defaultShareProvider;
+      index += 1;
       continue;
     }
     if (arg === "--host") {
@@ -117,25 +126,74 @@ const parseArgs = (argv) => {
   if (!Number.isFinite(options.ttlHours) || options.ttlHours < 0) {
     throw new Error(`Invalid ttl-hours: ${options.ttlHours}`);
   }
+  if (!["gradio", "ngrok"].includes(options.shareProvider)) {
+    throw new Error(`Invalid share-provider: ${options.shareProvider}`);
+  }
 
   return options;
 };
 
 const printHelp = () => {
-  console.log(`Usage: pnpm start -- [--dev-server] [--no-share] [--host 127.0.0.1] [--port 4173] [--ttl-hours 72] [--rebuild]
+  console.log(`Usage: pnpm start -- [--dev-server] [--no-share] [--share-provider gradio|ngrok] [--host 127.0.0.1] [--port 4173] [--ttl-hours 72] [--rebuild]
 
 Starts the web app through vite preview or vite dev server.
 
 Flags:
   --dev-server  Start through vite dev instead of vite preview. Default dev port: 5173
-  --share       Explicitly enable a Gradio public share link for the local preview server.
-  --no-share    Disable the Gradio public share link. Share mode is enabled by default.
+  --share       Explicitly enable a public share link for the local web server.
+  --no-share    Disable the public share link. Share mode is enabled by default.
+  --share-provider  Select the share provider. Supported values: gradio, ngrok. Default: gradio
   --host        Local bind host for the web server. Default: 127.0.0.1
   --port        Local port for the web server. Default: 4173 for preview, 5173 for dev server
   --ttl-hours   Maximum share-link lifetime before the tunnel is closed. Default: 72
   --rebuild     Force a fresh pnpm build before starting preview.
   --help, -h    Show this help message.
+
+Environment:
+  GRADIO_SHARE_SERVER_ADDRESS  Override the share tunnel server address, for example 44.237.78.176:7000
+  NGROK_BIN                    Absolute path to the ngrok executable
+  NGROK_API_URL                Override the local ngrok API URL. Default: http://127.0.0.1:4040
 `);
+};
+
+const fetchJson = async (url, timeoutMs = 5_000) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Request failed with status ${response.status}`);
+    }
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const waitForNgrokTunnel = async (apiUrl, timeoutMs = 30_000) => {
+  const startedAt = Date.now();
+  const tunnelApiUrl = `${apiUrl.replace(/\/$/, "")}/api/tunnels`;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const payload = await fetchJson(tunnelApiUrl, 2_000);
+      const tunnels = Array.isArray(payload.tunnels) ? payload.tunnels : [];
+      const httpsTunnel = tunnels.find(
+        (entry) => typeof entry.public_url === "string" && entry.public_url.startsWith("https://"),
+      );
+      if (httpsTunnel?.public_url) {
+        return httpsTunnel.public_url;
+      }
+      if (typeof tunnels[0]?.public_url === "string") {
+        return tunnels[0].public_url;
+      }
+    } catch {
+      // Keep polling until timeout.
+    }
+    await sleep(500);
+  }
+  throw new Error(`Timed out while waiting for ngrok tunnel at ${tunnelApiUrl}`);
 };
 
 const spawnChild = (command, args, options = {}) =>
@@ -297,82 +355,135 @@ const main = async () => {
       return;
     }
 
-    console.log(`Creating Gradio share link (expires in ${options.ttlHours} hours)...`);
+    const shareProviderLabel = options.shareProvider === "ngrok" ? "ngrok" : "Gradio";
+    console.log(`Creating ${shareProviderLabel} share link${options.ttlHours > 0 ? ` (expires in ${options.ttlHours} hours)` : ""}...`);
     let currentShareUrl = "";
     let currentExpiresAt = null;
-    shareChild = spawnChild(
-      pythonCommand,
-      [
-        "-u",
-        path.join("scripts", "gradio_share_tunnel.py"),
-        "--host",
-        options.host,
-        "--port",
-        String(options.port),
-        "--ttl-hours",
-        String(options.ttlHours),
-      ],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          PYTHONUNBUFFERED: "1",
+    if (options.shareProvider === "ngrok") {
+      const ngrokCommand = process.env.NGROK_BIN || defaultNgrokCommand;
+      const ngrokApiUrl = process.env.NGROK_API_URL || defaultNgrokApiUrl;
+      shareChild = spawnChild(
+        ngrokCommand,
+        ["http", String(options.port)],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
         },
-      },
-    );
+      );
+      shareChild.stdout.setEncoding("utf8");
+      shareChild.stderr.setEncoding("utf8");
+      shareChild.stdout.on(
+        "data",
+        createLineBuffer((line) => {
+          const text = line.trim();
+          if (!text) {
+            return;
+          }
+          if (/err(or)?/i.test(text)) {
+            console.error(text);
+          }
+        }),
+      );
+      shareChild.stderr.on(
+        "data",
+        createLineBuffer((line) => {
+          const text = line.trim();
+          if (!text) {
+            return;
+          }
+          console.error(text);
+        }),
+      );
 
-    shareChild.stdout.setEncoding("utf8");
-    shareChild.stderr.setEncoding("utf8");
+      currentShareUrl = await waitForNgrokTunnel(ngrokApiUrl);
+      currentExpiresAt =
+        options.ttlHours > 0 ? new Date(Date.now() + options.ttlHours * 60 * 60 * 1000) : null;
+      printShareBanner("ngrok", currentShareUrl, currentExpiresAt);
+      if (currentExpiresAt) {
+        console.log(`Share expires at: ${currentExpiresAt.toLocaleString()}`);
+        setTimeout(() => {
+          console.log("ngrok share tunnel TTL reached. Stopping tunnel.");
+          killChild(shareChild);
+        }, options.ttlHours * 60 * 60 * 1000);
+      }
+    } else {
+      shareChild = spawnChild(
+        pythonCommand,
+        [
+          "-u",
+          path.join("scripts", "gradio_share_tunnel.py"),
+          "--host",
+          options.host,
+          "--port",
+          String(options.port),
+          "--ttl-hours",
+          String(options.ttlHours),
+        ],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            PYTHONUNBUFFERED: "1",
+          },
+        },
+      );
 
-    const handleShareStdoutLine = (line) => {
-      if (!line) {
-        return;
-      }
-      if (line.startsWith("SHARE_URL=")) {
-        currentShareUrl = line.slice("SHARE_URL=".length);
-        printShareBanner(currentShareUrl, currentExpiresAt);
-        return;
-      }
-      if (line.startsWith("SHARE_EXPIRES_AT=")) {
-        const timestamp = Number(line.slice("SHARE_EXPIRES_AT=".length));
-        currentExpiresAt = Number.isFinite(timestamp) ? new Date(timestamp * 1000) : null;
-        if (currentExpiresAt) {
-          console.log(`Share expires at: ${currentExpiresAt.toLocaleString()}`);
+      shareChild.stdout.setEncoding("utf8");
+      shareChild.stderr.setEncoding("utf8");
+
+      const handleShareStdoutLine = (line) => {
+        if (!line) {
+          return;
         }
-        return;
-      }
-      if (line === "SHARE_STOPPED=1") {
-        console.log("Gradio share tunnel stopped.");
-        return;
-      }
-      console.log(line);
-    };
+        if (line.startsWith("SHARE_URL=")) {
+          currentShareUrl = line.slice("SHARE_URL=".length);
+          printShareBanner("Gradio", currentShareUrl, currentExpiresAt);
+          return;
+        }
+        if (line.startsWith("SHARE_EXPIRES_AT=")) {
+          const timestamp = Number(line.slice("SHARE_EXPIRES_AT=".length));
+          currentExpiresAt = Number.isFinite(timestamp) ? new Date(timestamp * 1000) : null;
+          if (currentExpiresAt) {
+            console.log(`Share expires at: ${currentExpiresAt.toLocaleString()}`);
+          }
+          return;
+        }
+        if (line === "SHARE_STOPPED=1") {
+          console.log("Gradio share tunnel stopped.");
+          return;
+        }
+        console.log(line);
+      };
 
-    const handleShareStderrLine = (line) => {
-      const text = line.trim();
-      if (!text) {
-        return;
-      }
-      if (text.startsWith("SHARE_STATUS=")) {
-        console.log(text.slice("SHARE_STATUS=".length));
-        return;
-      }
-      if (text.startsWith("SHARE_ERROR=")) {
-        console.error(text.slice("SHARE_ERROR=".length));
-        return;
-      }
-      console.error(text);
-    };
+      const handleShareStderrLine = (line) => {
+        const text = line.trim();
+        if (!text) {
+          return;
+        }
+        if (text.startsWith("SHARE_STATUS=")) {
+          console.log(text.slice("SHARE_STATUS=".length));
+          return;
+        }
+        if (text.startsWith("SHARE_ERROR=")) {
+          console.error(text.slice("SHARE_ERROR=".length));
+          return;
+        }
+        console.error(text);
+      };
 
-    shareChild.stdout.on("data", createLineBuffer(handleShareStdoutLine));
-    shareChild.stderr.on("data", createLineBuffer(handleShareStderrLine));
+      shareChild.stdout.on("data", createLineBuffer(handleShareStdoutLine));
+      shareChild.stderr.on("data", createLineBuffer(handleShareStderrLine));
+    }
 
     shareChild.on("exit", (code) => {
       if (code !== 0) {
-        console.error(`Gradio share tunnel exited with code ${code ?? "unknown"}.`);
+        console.error(
+          `${shareProviderLabel} share tunnel exited with code ${code ?? "unknown"}. Local preview remains available at ${localUrl}.`,
+        );
       }
     });
     shareChild.on("error", (error) => {
-      console.error(`Failed to start Gradio share tunnel: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        `Failed to start ${shareProviderLabel} share tunnel: ${error instanceof Error ? error.message : String(error)}`,
+      );
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

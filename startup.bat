@@ -20,7 +20,13 @@ if %ERRORLEVEL% neq 0 (
         )
         echo.
         echo [2/2] Starting Web Application with npm...
-        call npm run dev
+        if exist "%USERPROFILE%\Desktop\ngrok.exe" (
+            set "NGROK_BIN=%USERPROFILE%\Desktop\ngrok.exe"
+            echo Using ngrok binary: %NGROK_BIN%
+        )
+        echo Share provider: ngrok
+        echo.
+        call npm run dev -- --share --share-provider ngrok --port 5173
         pause
         exit /b 0
     )
@@ -37,8 +43,13 @@ echo.
 
 echo [2/2] Starting Web Application...
 echo The application will start at http://localhost:5173
+if exist "%USERPROFILE%\Desktop\ngrok.exe" (
+    set "NGROK_BIN=%USERPROFILE%\Desktop\ngrok.exe"
+    echo Using ngrok binary: %NGROK_BIN%
+)
+echo Share provider: ngrok
 echo.
-call pnpm dev
+call pnpm dev -- --share --share-provider ngrok --port 5173
 
 pause
  
