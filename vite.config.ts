@@ -10,6 +10,8 @@ const PROJECT_META_FILE = ".latest_project";
 const PROJECT_JSON_FILE = "project.json";
 const PROJECT_ASSETS_DIR = "assets";
 const API_BASE = "/__mangamaker__/persistence";
+const AUTH_PASSWORD = "19260817";
+const AUTH_REALM = "MangaMaker";
 const SHARE_ALLOWED_HOSTS = [
   "gradio.live",
   ".gradio.live",
@@ -182,20 +184,86 @@ const json = (res: ServerResponse, status: number, payload: unknown) => {
 
 const text = (res: ServerResponse, status: number, body: string) => {
   res.statusCode = status;
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  const trimmed = body.trimStart().toLowerCase();
+  const isHtml = trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
+  res.setHeader("Content-Type", isHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8");
   res.end(body);
 };
 
-const readJsonBody = async <T>(req: IncomingMessage): Promise<T> => {
+const readRawBody = async (req: IncomingMessage): Promise<string> => {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  const raw = Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks).toString("utf8");
+};
+
+const readJsonBody = async <T>(req: IncomingMessage): Promise<T> => {
+  const raw = await readRawBody(req);
   if (!raw) {
     throw new Error("Empty request body");
   }
   return JSON.parse(raw) as T;
+};
+
+const requestExpectsJson = (req: IncomingMessage, pathname: string) => {
+  const accept = String(req.headers.accept ?? "").toLowerCase();
+  const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
+  return pathname.startsWith(API_BASE) || accept.includes("application/json") || contentType.includes("application/json");
+};
+
+const hasValidBasicPassword = (req: IncomingMessage) => {
+  const authHeader = String(req.headers.authorization ?? "");
+  if (!authHeader.startsWith("Basic ")) {
+    return false;
+  }
+  const encoded = authHeader.slice("Basic ".length).trim();
+  if (!encoded) {
+    return false;
+  }
+  let decoded = "";
+  try {
+    decoded = Buffer.from(encoded, "base64").toString("utf8");
+  } catch {
+    return false;
+  }
+  const separator = decoded.indexOf(":");
+  if (separator < 0) {
+    return false;
+  }
+  const password = decoded.slice(separator + 1);
+  return password === AUTH_PASSWORD;
+};
+
+const attachWebAuthMiddleware = (
+  middlewares: { use: (handler: (req: IncomingMessage, res: ServerResponse, next: () => void) => void) => void },
+) => {
+  const handler = async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    const method = req.method?.toUpperCase() ?? "GET";
+    const host = req.headers.host;
+    const url = new URL(req.url ?? "/", host ? `http://${host}` : "http://localhost");
+    const pathname = url.pathname;
+
+    if (pathname === `${API_BASE}/health`) {
+      next();
+      return;
+    }
+
+    if (hasValidBasicPassword(req)) {
+      next();
+      return;
+    }
+
+    res.setHeader("WWW-Authenticate", `Basic realm="${AUTH_REALM}", charset="UTF-8"`);
+    if (requestExpectsJson(req, pathname) || method !== "GET") {
+      json(res, 401, { error: "Authentication required" });
+      return;
+    }
+
+    text(res, 401, "Authentication required.");
+  };
+
+  middlewares.use(handler);
 };
 
 const inferContentType = (filePath: string) => {
@@ -394,8 +462,18 @@ const webPersistencePlugin = () => ({
   },
 });
 
+const webAuthPlugin = () => ({
+  name: "mangamaker-web-auth",
+  configureServer(server: ViteDevServer) {
+    attachWebAuthMiddleware(server.middlewares);
+  },
+  configurePreviewServer(server: PreviewServer) {
+    attachWebAuthMiddleware(server.middlewares);
+  },
+});
+
 export default defineConfig({
-  plugins: [react(), webPersistencePlugin()],
+  plugins: [react(), webAuthPlugin(), webPersistencePlugin()],
   server: {
     allowedHosts: ALLOWED_HOSTS,
   },

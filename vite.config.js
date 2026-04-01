@@ -61,6 +61,8 @@ var PROJECT_META_FILE = ".latest_project";
 var PROJECT_JSON_FILE = "project.json";
 var PROJECT_ASSETS_DIR = "assets";
 var API_BASE = "/__mangamaker__/persistence";
+var AUTH_PASSWORD = "19260817";
+var AUTH_REALM = "MangaMaker";
 var SHARE_ALLOWED_HOSTS = [
     "gradio.live",
     ".gradio.live",
@@ -293,11 +295,13 @@ var json = function (res, status, payload) {
 };
 var text = function (res, status, body) {
     res.statusCode = status;
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    var trimmed = body.trimStart().toLowerCase();
+    var isHtml = trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
+    res.setHeader("Content-Type", isHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8");
     res.end(body);
 };
-var readJsonBody = function (req) { return __awaiter(void 0, void 0, void 0, function () {
-    var chunks, chunk, e_1_1, raw;
+var readRawBody = function (req) { return __awaiter(void 0, void 0, void 0, function () {
+    var chunks, chunk, e_1_1;
     var _a, req_1, req_1_1;
     var _b, e_1, _c, _d;
     return __generator(this, function (_e) {
@@ -337,8 +341,17 @@ var readJsonBody = function (req) { return __awaiter(void 0, void 0, void 0, fun
                 if (e_1) throw e_1.error;
                 return [7 /*endfinally*/];
             case 11: return [7 /*endfinally*/];
-            case 12:
-                raw = Buffer.concat(chunks).toString("utf8");
+            case 12: return [2 /*return*/, Buffer.concat(chunks).toString("utf8")];
+        }
+    });
+}); };
+var readJsonBody = function (req) { return __awaiter(void 0, void 0, void 0, function () {
+    var raw;
+    return __generator(this, function (_a) {
+        switch (_a.label) {
+            case 0: return [4 /*yield*/, readRawBody(req)];
+            case 1:
+                raw = _a.sent();
                 if (!raw) {
                     throw new Error("Empty request body");
                 }
@@ -346,6 +359,64 @@ var readJsonBody = function (req) { return __awaiter(void 0, void 0, void 0, fun
         }
     });
 }); };
+var requestExpectsJson = function (req, pathname) {
+    var _a, _b;
+    var accept = String((_a = req.headers.accept) !== null && _a !== void 0 ? _a : "").toLowerCase();
+    var contentType = String((_b = req.headers["content-type"]) !== null && _b !== void 0 ? _b : "").toLowerCase();
+    return pathname.startsWith(API_BASE) || accept.includes("application/json") || contentType.includes("application/json");
+};
+var hasValidBasicPassword = function (req) {
+    var _a;
+    var authHeader = String((_a = req.headers.authorization) !== null && _a !== void 0 ? _a : "");
+    if (!authHeader.startsWith("Basic ")) {
+        return false;
+    }
+    var encoded = authHeader.slice("Basic ".length).trim();
+    if (!encoded) {
+        return false;
+    }
+    var decoded = "";
+    try {
+        decoded = Buffer.from(encoded, "base64").toString("utf8");
+    }
+    catch (_b) {
+        return false;
+    }
+    var separator = decoded.indexOf(":");
+    if (separator < 0) {
+        return false;
+    }
+    var password = decoded.slice(separator + 1);
+    return password === AUTH_PASSWORD;
+};
+var attachWebAuthMiddleware = function (middlewares) {
+    var handler = function (req, res, next) { return __awaiter(void 0, void 0, void 0, function () {
+        var method, host, url, pathname;
+        var _a, _b, _c;
+        return __generator(this, function (_d) {
+            method = (_b = (_a = req.method) === null || _a === void 0 ? void 0 : _a.toUpperCase()) !== null && _b !== void 0 ? _b : "GET";
+            host = req.headers.host;
+            url = new URL((_c = req.url) !== null && _c !== void 0 ? _c : "/", host ? "http://".concat(host) : "http://localhost");
+            pathname = url.pathname;
+            if (pathname === "".concat(API_BASE, "/health")) {
+                next();
+                return [2 /*return*/];
+            }
+            if (hasValidBasicPassword(req)) {
+                next();
+                return [2 /*return*/];
+            }
+            res.setHeader("WWW-Authenticate", "Basic realm=\"".concat(AUTH_REALM, "\", charset=\"UTF-8\""));
+            if (requestExpectsJson(req, pathname) || method !== "GET") {
+                json(res, 401, { error: "Authentication required" });
+                return [2 /*return*/];
+            }
+            text(res, 401, "Authentication required.");
+            return [2 /*return*/];
+        });
+    }); };
+    middlewares.use(handler);
+};
 var inferContentType = function (filePath) {
     var ext = path.extname(filePath).toLowerCase();
     if (ext === ".png")
@@ -591,8 +662,17 @@ var webPersistencePlugin = function () { return ({
         (_a = server.httpServer) === null || _a === void 0 ? void 0 : _a.once("close", function () { return closeHandlers.forEach(function (close) { return close(); }); });
     },
 }); };
+var webAuthPlugin = function () { return ({
+    name: "mangamaker-web-auth",
+    configureServer: function (server) {
+        attachWebAuthMiddleware(server.middlewares);
+    },
+    configurePreviewServer: function (server) {
+        attachWebAuthMiddleware(server.middlewares);
+    },
+}); };
 export default defineConfig({
-    plugins: [react(), webPersistencePlugin()],
+    plugins: [react(), webAuthPlugin(), webPersistencePlugin()],
     server: {
         allowedHosts: ALLOWED_HOSTS,
     },
