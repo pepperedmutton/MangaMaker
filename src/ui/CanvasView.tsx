@@ -1764,6 +1764,13 @@ const TextNode = ({
     group.members.some((member) => member.objectType === "text" && member.objectId === item.id),
   );
   const isHighlighted = highlighted || selected;
+  const [liveRect, setLiveRect] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const displayRect = liveRect ?? item;
   const lineHeight = getTextLineHeightByDirection(item.direction);
   const letterSpacing = item.letterSpacing ?? 0;
   const lineSpacing = item.lineSpacing ?? 0;
@@ -1785,8 +1792,8 @@ const TextNode = ({
     () =>
       layoutTextForDisplayLines(item.content, {
         direction: item.direction,
-        maxWidth: item.width,
-        maxHeight: item.height,
+        maxWidth: displayRect.width,
+        maxHeight: displayRect.height,
         fontSize: item.fontSize,
         lineHeight,
         letterSpacing,
@@ -1797,8 +1804,8 @@ const TextNode = ({
     [
       item.content,
       item.direction,
-      item.width,
-      item.height,
+      displayRect.width,
+      displayRect.height,
       item.fontSize,
       item.textAlign,
       letterSpacing,
@@ -1823,15 +1830,15 @@ const TextNode = ({
   const verticalBlockHeight = verticalRowCount * verticalRowAdvance;
   const verticalOffsetX =
     item.textAlign === "center"
-      ? (item.width * scale - verticalBlockWidth) * 0.5
+      ? (displayRect.width * scale - verticalBlockWidth) * 0.5
       : item.textAlign === "right"
-        ? item.width * scale - verticalBlockWidth
+        ? displayRect.width * scale - verticalBlockWidth
         : 0;
   const verticalOffsetY =
     item.verticalAlign === "middle"
-      ? (item.height * scale - verticalBlockHeight) * 0.5
+      ? (displayRect.height * scale - verticalBlockHeight) * 0.5
       : item.verticalAlign === "bottom"
-        ? item.height * scale - verticalBlockHeight
+        ? displayRect.height * scale - verticalBlockHeight
         : 0;
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
     event.cancelBubble = true;
@@ -1876,9 +1883,9 @@ const TextNode = ({
   return (
     <>
       <Group
-        x={item.x * scale}
-        y={item.y * scale}
-        draggable={activeTool === "select"}
+        x={displayRect.x * scale}
+        y={displayRect.y * scale}
+        draggable={activeTool === "select" && !liveRect}
         onContextMenu={(event) => {
           if (!isInMultiSelection) {
             event.cancelBubble = true;
@@ -1991,15 +1998,15 @@ const TextNode = ({
         <Rect
           x={0}
           y={0}
-          width={item.width * scale}
-          height={item.height * scale}
+          width={displayRect.width * scale}
+          height={displayRect.height * scale}
           fill="rgba(0,0,0,0.001)"
         />
         {item.direction === "vertical" ? (
           <Group
             clipFunc={(ctx) => {
               ctx.beginPath();
-              ctx.rect(0, 0, item.width * scale, item.height * scale);
+              ctx.rect(0, 0, displayRect.width * scale, displayRect.height * scale);
               ctx.closePath();
             }}
           >
@@ -2041,8 +2048,8 @@ const TextNode = ({
             fontStyle={String(item.fontWeight)}
             letterSpacing={letterSpacing * scale}
             fill={item.color}
-            width={item.width * scale}
-            height={item.height * scale}
+            width={displayRect.width * scale}
+            height={displayRect.height * scale}
             align={item.textAlign}
             verticalAlign={item.verticalAlign}
             wrap="none"
@@ -2054,20 +2061,24 @@ const TextNode = ({
       {selected ? (
         <>
           <Rect
-            x={item.x * scale}
-            y={item.y * scale}
-            width={item.width * scale}
-            height={item.height * scale}
+            x={displayRect.x * scale}
+            y={displayRect.y * scale}
+            width={displayRect.width * scale}
+            height={displayRect.height * scale}
             stroke={isHighlighted ? "#c36d2f" : "#8f5b2f"}
             dash={[10, 6]}
             strokeWidth={2}
             fillEnabled={false}
           />
           <ResizeHandles
-            rect={item}
+            rect={displayRect}
             scale={scale}
             color="#c36d2f"
+            mode="corners-and-edges"
+            resizeBehavior="anchored"
+            onLiveChange={setLiveRect}
             onCommit={(_, nextRect) => {
+              setLiveRect(null);
               void executeCommand("updateText", {
                 pageId: page.id,
                 textId: item.id,
@@ -2081,10 +2092,10 @@ const TextNode = ({
         </>
       ) : isHighlighted ? (
         <Rect
-          x={item.x * scale}
-          y={item.y * scale}
-          width={item.width * scale}
-          height={item.height * scale}
+          x={displayRect.x * scale}
+          y={displayRect.y * scale}
+          width={displayRect.width * scale}
+          height={displayRect.height * scale}
           stroke="#c36d2f"
           dash={[8, 6]}
           strokeWidth={1.5}
