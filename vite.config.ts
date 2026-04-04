@@ -115,32 +115,68 @@ const resolveProjectDir = async (
   projectTitle: string,
 ) => {
   const existingDir = await findProjectDirById(root, projectId);
-  const targetFolder = await pickProjectFolderName(root, projectId, projectTitle);
-  const targetDir = path.join(root, targetFolder);
-
-  if (existingDir && path.resolve(existingDir) !== path.resolve(targetDir)) {
-    const targetStats = await fsp.stat(targetDir).catch(() => null);
-    if (targetStats) {
-      return existingDir;
-    }
-    try {
-      await fsp.rename(existingDir, targetDir);
-      return targetDir;
-    } catch (error) {
-      console.warn("Project folder rename failed; keeping existing folder.", {
-        existingDir,
-        targetDir,
-        error,
-      });
-      return existingDir;
-    }
-  }
-
   if (existingDir) {
     return existingDir;
   }
 
-  return targetDir;
+  const targetFolder = await pickProjectFolderName(root, projectId, projectTitle);
+  return path.join(root, targetFolder);
+};
+
+const normalizeProjectAssetPaths = (projectJson: string, projectFolder: string) => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(projectJson);
+  } catch {
+    return projectJson;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return projectJson;
+  }
+
+  const draft = parsed as {
+    pages?: Array<{ panels?: Array<{ image?: { src?: unknown } }> }>;
+  };
+
+  if (!Array.isArray(draft.pages)) {
+    return projectJson;
+  }
+
+  let changed = false;
+
+  for (const page of draft.pages) {
+    if (!page || typeof page !== "object" || !Array.isArray(page.panels)) {
+      continue;
+    }
+    for (const panel of page.panels) {
+      if (!panel || typeof panel !== "object" || !panel.image || typeof panel.image !== "object") {
+        continue;
+      }
+      const src = panel.image.src;
+      if (typeof src !== "string") {
+        continue;
+      }
+      const prefix = "/projects/";
+      const assetsSegment = `/${PROJECT_ASSETS_DIR}/`;
+      if (!src.startsWith(prefix)) {
+        continue;
+      }
+      const assetsIndex = src.indexOf(assetsSegment, prefix.length);
+      if (assetsIndex <= prefix.length) {
+        continue;
+      }
+      const folderInSrc = src.slice(prefix.length, assetsIndex);
+      if (!folderInSrc || folderInSrc === projectFolder) {
+        continue;
+      }
+      const assetSuffix = src.slice(assetsIndex + assetsSegment.length);
+      panel.image.src = `${prefix}${projectFolder}${assetsSegment}${assetSuffix}`;
+      changed = true;
+    }
+  }
+
+  return changed ? JSON.stringify(parsed) : projectJson;
 };
 
 const findLatestProjectFolder = async (root: string) => {
@@ -345,7 +381,8 @@ const attachWebPersistenceMiddleware = (
         const projectFolder = path.basename(projectDir);
         const assetsDir = path.join(projectDir, PROJECT_ASSETS_DIR);
         await fsp.mkdir(assetsDir, { recursive: true });
-        await fsp.writeFile(path.join(projectDir, PROJECT_JSON_FILE), payload.project_json, "utf8");
+        const normalizedProjectJson = normalizeProjectAssetPaths(payload.project_json, projectFolder);
+        await fsp.writeFile(path.join(projectDir, PROJECT_JSON_FILE), normalizedProjectJson, "utf8");
         await fsp.writeFile(path.join(root, PROJECT_META_FILE), projectFolder, "utf8");
         json(res, 200, { path: `/projects/${projectFolder}/${PROJECT_JSON_FILE}` });
         return;
@@ -367,7 +404,11 @@ const attachWebPersistenceMiddleware = (
           return;
         }
         const projectJson = await fsp.readFile(projectFile, "utf8");
-        json(res, 200, { project_json: projectJson });
+        const normalizedProjectJson = normalizeProjectAssetPaths(projectJson, folder);
+        if (normalizedProjectJson !== projectJson) {
+          await fsp.writeFile(projectFile, normalizedProjectJson, "utf8");
+        }
+        json(res, 200, { project_json: normalizedProjectJson });
         return;
       }
 
@@ -384,7 +425,11 @@ const attachWebPersistenceMiddleware = (
             continue;
           }
           const projectJson = await fsp.readFile(projectFile, "utf8");
-          drafts.push({ modifiedAt: stats.mtimeMs, projectJson });
+          const normalizedProjectJson = normalizeProjectAssetPaths(projectJson, entry.name);
+          if (normalizedProjectJson !== projectJson) {
+            await fsp.writeFile(projectFile, normalizedProjectJson, "utf8");
+          }
+          drafts.push({ modifiedAt: stats.mtimeMs, projectJson: normalizedProjectJson });
         }
         drafts.sort((a, b) => b.modifiedAt - a.modifiedAt);
         json(res, 200, { projects: drafts.map((entry) => entry.projectJson) });
