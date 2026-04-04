@@ -6,9 +6,9 @@
   "packageManager": "pnpm@10.6.5",
   "scripts": {
     "sync:fonts": "node scripts/syncBundledFonts.mjs",
-    "guard:projects": "node scripts/guardProjectsUntracked.mjs",
+    "sync:projects": "node scripts/forceProjectsFromGit.mjs",
     "predev": "pnpm sync:fonts",
-    "prebuild": "pnpm sync:fonts && pnpm guard:projects",
+    "prebuild": "pnpm sync:fonts && pnpm sync:projects",
     "dev": "node scripts/launch.mjs --dev-server",
     "build": "tsc -b && vite build",
     "start": "node scripts/launch.mjs",
