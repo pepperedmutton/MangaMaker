@@ -5,6 +5,7 @@ test-results/
 .mangamaker_runtime/
 scripts/__pycache__/
 src/assets/fonts/
+projects/
 
 *.tsbuildinfo
 *.log
