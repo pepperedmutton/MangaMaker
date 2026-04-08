@@ -1,5 +1,6 @@
 import { PDFDocument } from "pdf-lib";
 import {
+  getBubbleBasePoints,
   getRenderableLayers,
 } from "../domain/helpers";
 import type { Page, Panel } from "../domain/schema";
@@ -7,16 +8,17 @@ import {
   getTextLineHeightByDirection,
   layoutTextForDisplayContent,
   resolveVerticalColumnAlignFromTextAlign,
+  splitTextToGraphemes,
 } from "../domain/textLayout";
 import {
   getBubbleBodyPath,
   getBubbleRegularTailStrokeOutlinePath,
   getBubbleTailPath,
-  getThoughtCircles,
 } from "../ui/bubbleShapes";
 
 const PDF_EXPORT_JPEG_QUALITY = 0.84;
 const FULL_WIDTH_SPACE = "\u3000";
+const DEFAULT_TEXT_COLOR = "#121212";
 const VERTICAL_QUESTION = "\uFE16";
 const VERTICAL_EXCLAMATION = "\uFE15";
 const VERTICAL_ELLIPSIS = "\uFE19";
@@ -153,7 +155,7 @@ const createVerticalPunctuationOffsetMeasurer = (
   };
 };
 
-const splitGraphemes = (value: string) => Array.from(value);
+const splitGraphemes = (value: string) => splitTextToGraphemes(value);
 
 const measureLineWidthWithLetterSpacing = (
   context: CanvasRenderingContext2D,
@@ -196,6 +198,19 @@ const drawLineWithLetterSpacing = (
   }
 };
 
+const resolveCanvasTextColor = (
+  context: CanvasRenderingContext2D,
+  color: string,
+  fallback = DEFAULT_TEXT_COLOR,
+) => {
+  const normalized = typeof color === "string" ? color.trim() : "";
+  context.fillStyle = fallback;
+  if (normalized.length > 0) {
+    context.fillStyle = normalized;
+  }
+  return String(context.fillStyle);
+};
+
 const drawTextInBox = (
   context: CanvasRenderingContext2D,
   options: {
@@ -216,19 +231,23 @@ const drawTextInBox = (
     color: string;
   },
 ) => {
+  const letterSpacing = Number.isFinite(options.letterSpacing) ? options.letterSpacing : 0;
+  const lineSpacing = Number.isFinite(options.lineSpacing) ? options.lineSpacing : 0;
+  const resolvedColor = resolveCanvasTextColor(context, options.color);
   const lines = options.content.replace(/\r\n/g, "\n").split("\n");
-  const lineHeight = Math.max(1, options.fontSize * options.lineHeightRatio + options.lineSpacing);
+  const lineAdvance = Math.max(1, options.fontSize * options.lineHeightRatio + lineSpacing);
   if (options.direction === "vertical") {
     const rowCount = Math.max(1, lines.length);
-    const columnCount = Math.max(1, ...lines.map((line) => Array.from(line).length));
-    const rowAdvance = Math.max(1, lineHeight + options.letterSpacing);
+    const columnCount = Math.max(1, ...lines.map((line) => splitGraphemes(line).length));
+    // Keep vertical row stepping consistent with CanvasView.
+    const rowAdvance = Math.max(1, options.fontSize * options.lineHeightRatio + letterSpacing);
     const sampleCellWidth = Math.max(
       options.fontSize * 0.75,
       context.measureText("\u56fd").width,
       context.measureText("M").width,
       context.measureText("\u53e3").width,
     );
-    const columnAdvance = Math.max(1, sampleCellWidth * 1.04 + options.lineSpacing);
+    const columnAdvance = Math.max(1, sampleCellWidth * 1.04 + lineSpacing);
     const blockWidth = columnCount * columnAdvance;
     const blockHeight = rowCount * rowAdvance;
     const originX = resolveAlignedTextX(
@@ -242,7 +261,7 @@ const drawTextInBox = (
       resolveAlignedTextYOffset(options.boxHeight, blockHeight, options.verticalAlign);
 
     context.save();
-    context.fillStyle = options.color;
+    context.fillStyle = resolvedColor;
     context.beginPath();
     context.rect(options.boxX, options.boxY, options.boxWidth, options.boxHeight);
     context.clip();
@@ -256,7 +275,7 @@ const drawTextInBox = (
     );
 
     for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-      const row = Array.from(lines[rowIndex] ?? "");
+      const row = splitGraphemes(lines[rowIndex] ?? "");
       for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
         const unit = row[columnIndex] ?? FULL_WIDTH_SPACE;
         if (unit.length === 0 || unit === FULL_WIDTH_SPACE) {
@@ -277,7 +296,7 @@ const drawTextInBox = (
     return;
   }
 
-  const blockHeight = lines.length * lineHeight;
+  const blockHeight = lines.length * lineAdvance;
   const yOffset = resolveAlignedTextYOffset(
     options.boxHeight,
     blockHeight,
@@ -286,24 +305,45 @@ const drawTextInBox = (
   let baselineY = options.boxY + yOffset + options.fontSize;
 
   context.save();
-  context.fillStyle = options.color;
+  context.fillStyle = resolvedColor;
   context.beginPath();
   context.rect(options.boxX, options.boxY, options.boxWidth, options.boxHeight);
   context.clip();
 
   for (const line of lines) {
-    const lineWidth = measureLineWidthWithLetterSpacing(context, line, options.letterSpacing);
+    const lineWidth = measureLineWidthWithLetterSpacing(context, line, letterSpacing);
     const lineX = resolveAlignedTextX(
       options.boxX,
       options.boxWidth,
       lineWidth,
       options.textAlign,
     );
-    drawLineWithLetterSpacing(context, line, lineX, baselineY, options.letterSpacing);
-    baselineY += lineHeight;
+    drawLineWithLetterSpacing(context, line, lineX, baselineY, letterSpacing);
+    baselineY += lineAdvance;
   }
 
   context.restore();
+};
+
+const getThoughtTailCirclesForDisplay = (bubble: Page["bubbles"][number]) => {
+  const base = getBubbleBasePoints(bubble);
+  const tailTipX = bubble.tailTip.x - bubble.x;
+  const tailTipY = bubble.tailTip.y - bubble.y;
+  const tailBaseX = base.center.x - bubble.x;
+  const tailBaseY = base.center.y - bubble.y;
+  const circleCount = bubble.thoughtCircles ?? 3;
+  const circles: Array<{ cx: number; cy: number; r: number }> = [];
+
+  for (let index = 0; index < circleCount; index += 1) {
+    const t = (index + 1) / (circleCount + 1);
+    circles.push({
+      cx: tailBaseX + (tailTipX - tailBaseX) * t,
+      cy: tailBaseY + (tailTipY - tailBaseY) * t,
+      r: Math.max(4, 12 - index * 2),
+    });
+  }
+
+  return circles;
 };
 
 const drawBubble = (context: CanvasRenderingContext2D, bubble: Page["bubbles"][number]) => {
@@ -340,7 +380,7 @@ const drawBubble = (context: CanvasRenderingContext2D, bubble: Page["bubbles"][n
   }
 
   if (shouldRenderThoughtTail) {
-    const circles = getThoughtCircles(bubble);
+    const circles = getThoughtTailCirclesForDisplay(bubble);
     for (const circle of circles) {
       context.beginPath();
       context.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
@@ -373,7 +413,14 @@ export const renderPageToCanvas = async (page: Page) => {
   context.fillStyle = page.background;
   context.fillRect(0, 0, page.width, page.height);
 
-  for (const entry of getRenderableLayers(page)) {
+  // Keep export draw order consistent with CanvasView: render text above non-text layers.
+  const renderableLayers = getRenderableLayers(page);
+  const orderedLayers = [
+    ...renderableLayers.filter((entry) => entry.objectType !== "text"),
+    ...renderableLayers.filter((entry) => entry.objectType === "text"),
+  ];
+
+  for (const entry of orderedLayers) {
     if (entry.objectType === "panel") {
       const panel = entry.object;
       context.fillStyle = panel.style.fill;
@@ -389,6 +436,8 @@ export const renderPageToCanvas = async (page: Page) => {
 
     if (entry.objectType === "text") {
       const text = entry.object;
+      const letterSpacing = text.letterSpacing ?? 0;
+      const lineSpacing = text.lineSpacing ?? 0;
       const lineHeightRatio = getTextLineHeightByDirection(text.direction);
       context.font = `${text.fontWeight} ${text.fontSize}px ${text.fontFamily}`;
       const displayContent = layoutTextForDisplayContent(text.content, {
@@ -397,8 +446,8 @@ export const renderPageToCanvas = async (page: Page) => {
         maxHeight: text.height,
         fontSize: text.fontSize,
         lineHeight: lineHeightRatio,
-        letterSpacing: text.letterSpacing,
-        lineSpacing: text.lineSpacing,
+        letterSpacing,
+        lineSpacing,
         verticalColumnAlign: resolveVerticalColumnAlignFromTextAlign(text.textAlign),
         measureText: (value) => context.measureText(value).width,
       });
@@ -413,8 +462,8 @@ export const renderPageToCanvas = async (page: Page) => {
         fontFamily: text.fontFamily,
         fontWeight: text.fontWeight,
         lineHeightRatio,
-        letterSpacing: text.letterSpacing,
-        lineSpacing: text.lineSpacing,
+        letterSpacing,
+        lineSpacing,
         textAlign: text.textAlign,
         verticalAlign: text.verticalAlign,
         color: text.color,

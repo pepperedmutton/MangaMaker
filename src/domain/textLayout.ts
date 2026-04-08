@@ -184,6 +184,8 @@ const splitGraphemes = (value: string) => {
   return Array.from(segmenter.segment(value), (entry) => entry.segment);
 };
 
+export const splitTextToGraphemes = (value: string) => splitGraphemes(value);
+
 const createLetterSpacingMeasure = (measureText: TextMeasureFn, letterSpacing: number): TextMeasureFn => {
   if (Math.abs(letterSpacing) < 0.0001) {
     return measureText;

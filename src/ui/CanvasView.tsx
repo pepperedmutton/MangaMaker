@@ -38,6 +38,7 @@ import {
   getTextLineHeightByDirection,
   layoutTextForDisplayLines,
   resolveVerticalColumnAlignFromTextAlign,
+  splitTextToGraphemes,
 } from "../domain/textLayout";
 import { useI18n } from "../i18n/useI18n";
 import { persistImportedImageForProject } from "../storage/projectFiles";
@@ -1815,7 +1816,10 @@ const TextNode = ({
     ],
   );
   const displayContent = useMemo(() => displayLines.join("\n"), [displayLines]);
-  const verticalCellGrid = useMemo(() => displayLines.map((line) => Array.from(line)), [displayLines]);
+  const verticalCellGrid = useMemo(
+    () => displayLines.map((line) => splitTextToGraphemes(line)),
+    [displayLines],
+  );
   const verticalRowCount = Math.max(1, displayLines.length);
   const verticalColumnCount = Math.max(1, ...verticalCellGrid.map((row) => row.length));
   const verticalRowAdvance = Math.max(1, item.fontSize * lineHeight + letterSpacing) * scale;
