@@ -54,6 +54,7 @@ var _a;
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 var PROJECTS_DIR_NAME = "projects";
@@ -62,7 +63,12 @@ var PROJECT_JSON_FILE = "project.json";
 var PROJECT_ASSETS_DIR = "assets";
 var API_BASE = "/__mangamaker__/persistence";
 var AUTH_PASSWORD = "19260817";
-var AUTH_REALM = "MangaMaker";
+var AUTH_COOKIE_NAME = "mangamaker_auth";
+var AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+var AUTH_LOGIN_PATH = "/__mangamaker__/auth/login";
+var AUTH_COOKIE_TOKEN = createHash("sha256")
+    .update("mangamaker:".concat(AUTH_PASSWORD))
+    .digest("hex");
 var SHARE_ALLOWED_HOSTS = [
     "gradio.live",
     ".gradio.live",
@@ -192,46 +198,72 @@ var pickProjectFolderName = function (root, projectId, preferredName) { return _
     });
 }); };
 var resolveProjectDir = function (root, projectId, projectTitle) { return __awaiter(void 0, void 0, void 0, function () {
-    var existingDir, targetFolder, targetDir, targetStats, error_1;
+    var existingDir, targetFolder;
     return __generator(this, function (_a) {
         switch (_a.label) {
             case 0: return [4 /*yield*/, findProjectDirById(root, projectId)];
             case 1:
                 existingDir = _a.sent();
-                return [4 /*yield*/, pickProjectFolderName(root, projectId, projectTitle)];
-            case 2:
-                targetFolder = _a.sent();
-                targetDir = path.join(root, targetFolder);
-                if (!(existingDir && path.resolve(existingDir) !== path.resolve(targetDir))) return [3 /*break*/, 7];
-                return [4 /*yield*/, fsp.stat(targetDir).catch(function () { return null; })];
-            case 3:
-                targetStats = _a.sent();
-                if (targetStats) {
-                    return [2 /*return*/, existingDir];
-                }
-                _a.label = 4;
-            case 4:
-                _a.trys.push([4, 6, , 7]);
-                return [4 /*yield*/, fsp.rename(existingDir, targetDir)];
-            case 5:
-                _a.sent();
-                return [2 /*return*/, targetDir];
-            case 6:
-                error_1 = _a.sent();
-                console.warn("Project folder rename failed; keeping existing folder.", {
-                    existingDir: existingDir,
-                    targetDir: targetDir,
-                    error: error_1,
-                });
-                return [2 /*return*/, existingDir];
-            case 7:
                 if (existingDir) {
                     return [2 /*return*/, existingDir];
                 }
-                return [2 /*return*/, targetDir];
+                return [4 /*yield*/, pickProjectFolderName(root, projectId, projectTitle)];
+            case 2:
+                targetFolder = _a.sent();
+                return [2 /*return*/, path.join(root, targetFolder)];
         }
     });
 }); };
+var normalizeProjectAssetPaths = function (projectJson, projectFolder) {
+    var parsed;
+    try {
+        parsed = JSON.parse(projectJson);
+    }
+    catch (_a) {
+        return projectJson;
+    }
+    if (!parsed || typeof parsed !== "object") {
+        return projectJson;
+    }
+    var draft = parsed;
+    if (!Array.isArray(draft.pages)) {
+        return projectJson;
+    }
+    var changed = false;
+    for (var _i = 0, _b = draft.pages; _i < _b.length; _i++) {
+        var page = _b[_i];
+        if (!page || typeof page !== "object" || !Array.isArray(page.panels)) {
+            continue;
+        }
+        for (var _c = 0, _d = page.panels; _c < _d.length; _c++) {
+            var panel = _d[_c];
+            if (!panel || typeof panel !== "object" || !panel.image || typeof panel.image !== "object") {
+                continue;
+            }
+            var src = panel.image.src;
+            if (typeof src !== "string") {
+                continue;
+            }
+            var prefix = "/projects/";
+            var assetsSegment = "/".concat(PROJECT_ASSETS_DIR, "/");
+            if (!src.startsWith(prefix)) {
+                continue;
+            }
+            var assetsIndex = src.indexOf(assetsSegment, prefix.length);
+            if (assetsIndex <= prefix.length) {
+                continue;
+            }
+            var folderInSrc = src.slice(prefix.length, assetsIndex);
+            if (!folderInSrc || folderInSrc === projectFolder) {
+                continue;
+            }
+            var assetSuffix = src.slice(assetsIndex + assetsSegment.length);
+            panel.image.src = "".concat(prefix).concat(projectFolder).concat(assetsSegment).concat(assetSuffix);
+            changed = true;
+        }
+    }
+    return changed ? JSON.stringify(parsed) : projectJson;
+};
 var findLatestProjectFolder = function (root) { return __awaiter(void 0, void 0, void 0, function () {
     var entries, latestFolder, latestModifiedAt, _i, entries_2, entry, projectFile, stats;
     return __generator(this, function (_a) {
@@ -365,54 +397,226 @@ var requestExpectsJson = function (req, pathname) {
     var contentType = String((_b = req.headers["content-type"]) !== null && _b !== void 0 ? _b : "").toLowerCase();
     return pathname.startsWith(API_BASE) || accept.includes("application/json") || contentType.includes("application/json");
 };
-var hasValidBasicPassword = function (req) {
+var parseCookies = function (req) {
     var _a;
-    var authHeader = String((_a = req.headers.authorization) !== null && _a !== void 0 ? _a : "");
-    if (!authHeader.startsWith("Basic ")) {
+    var raw = String((_a = req.headers.cookie) !== null && _a !== void 0 ? _a : "");
+    if (!raw) {
+        return new Map();
+    }
+    var cookies = new Map();
+    var entries = raw.split(";");
+    for (var _i = 0, entries_2 = entries; _i < entries_2.length; _i++) {
+        var entry = entries_2[_i];
+        var separator = entry.indexOf("=");
+        if (separator <= 0) {
+            continue;
+        }
+        var name_1 = entry.slice(0, separator).trim();
+        var value = entry.slice(separator + 1).trim();
+        if (!name_1) {
+            continue;
+        }
+        try {
+            cookies.set(name_1, decodeURIComponent(value));
+        }
+        catch (_b) {
+            cookies.set(name_1, value);
+        }
+    }
+    return cookies;
+};
+var isSecureRequest = function (req) {
+    var _a;
+    var forwardedProto = String((_a = req.headers["x-forwarded-proto"]) !== null && _a !== void 0 ? _a : "")
+        .split(",")[0]
+        .trim()
+        .toLowerCase();
+    if (forwardedProto === "https") {
+        return true;
+    }
+    return req.socket.encrypted === true;
+};
+var buildAuthCookie = function (req) {
+    var attributes = [
+        "".concat(AUTH_COOKIE_NAME, "=").concat(encodeURIComponent(AUTH_COOKIE_TOKEN)),
+        "Path=/",
+        "Max-Age=".concat(AUTH_COOKIE_MAX_AGE_SECONDS),
+        "HttpOnly",
+        "SameSite=Lax",
+    ];
+    if (isSecureRequest(req)) {
+        attributes.push("Secure");
+    }
+    return attributes.join("; ");
+};
+var clearAuthCookie = function (req) {
+    var attributes = [
+        "".concat(AUTH_COOKIE_NAME, "="),
+        "Path=/",
+        "Max-Age=0",
+        "HttpOnly",
+        "SameSite=Lax",
+    ];
+    if (isSecureRequest(req)) {
+        attributes.push("Secure");
+    }
+    return attributes.join("; ");
+};
+var hasValidAuthCookie = function (req) {
+    var token = parseCookies(req).get(AUTH_COOKIE_NAME);
+    if (!token) {
         return false;
     }
-    var encoded = authHeader.slice("Basic ".length).trim();
-    if (!encoded) {
+    var expected = Buffer.from(AUTH_COOKIE_TOKEN, "utf8");
+    var received = Buffer.from(token, "utf8");
+    if (received.length !== expected.length) {
         return false;
     }
-    var decoded = "";
+    return timingSafeEqual(received, expected);
+};
+var escapeHtml = function (value) {
+    return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#39;");
+};
+var normalizeNextPath = function (value) {
+    var normalized = String(value !== null && value !== void 0 ? value : "").trim();
+    if (!normalized.startsWith("/") || normalized.startsWith("//")) {
+        return "/";
+    }
+    if (normalized.startsWith(AUTH_LOGIN_PATH)) {
+        return "/";
+    }
+    return normalized;
+};
+var renderPasswordLoginPage = function (nextPath, errorMessage) {
+    var errorBlock = errorMessage
+        ? "<p class=\"auth-error\">".concat(escapeHtml(errorMessage), "</p>")
+        : "";
+    var escapedNext = escapeHtml(nextPath);
+    return "<!doctype html>\n<html lang=\"zh-CN\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>MangaMaker \u767B\u5F55</title>\n    <style>\n      :root {\n        color-scheme: light;\n      }\n      * {\n        box-sizing: border-box;\n      }\n      body {\n        margin: 0;\n        min-height: 100vh;\n        display: grid;\n        place-items: center;\n        font-family: \"Source Han Sans\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n        background: radial-gradient(circle at 20% 20%, #efe9dc 0%, #e1d3bd 48%, #cfb18c 100%);\n        color: #2d241b;\n      }\n      .auth-card {\n        width: min(420px, calc(100vw - 32px));\n        padding: 28px;\n        border-radius: 14px;\n        background: rgba(255, 255, 255, 0.92);\n        box-shadow: 0 18px 42px rgba(45, 36, 27, 0.22);\n      }\n      h1 {\n        margin: 0 0 6px;\n        font-size: 26px;\n      }\n      p {\n        margin: 0 0 18px;\n        color: #5c4a3a;\n      }\n      label {\n        display: block;\n        margin: 0 0 10px;\n        font-weight: 600;\n      }\n      input[type=\"password\"] {\n        width: 100%;\n        border: 1px solid #b89a7b;\n        border-radius: 10px;\n        padding: 12px 14px;\n        font-size: 16px;\n        outline: none;\n      }\n      input[type=\"password\"]:focus {\n        border-color: #8f5b2f;\n        box-shadow: 0 0 0 2px rgba(143, 91, 47, 0.15);\n      }\n      button {\n        margin-top: 14px;\n        width: 100%;\n        border: 0;\n        border-radius: 10px;\n        padding: 12px 14px;\n        font-size: 16px;\n        font-weight: 700;\n        color: #fff;\n        background: linear-gradient(135deg, #8f5b2f, #6f4a2c);\n        cursor: pointer;\n      }\n      .auth-error {\n        margin: 0 0 12px;\n        color: #b42318;\n        font-weight: 600;\n      }\n    </style>\n  </head>\n  <body>\n    <main class=\"auth-card\">\n      <h1>MangaMaker</h1>\n      <p>\u8BF7\u8F93\u5165\u8BBF\u95EE\u5BC6\u7801</p>\n      ".concat(errorBlock, "\n      <form method=\"post\" action=\"").concat(AUTH_LOGIN_PATH, "\">\n        <input type=\"hidden\" name=\"next\" value=\"").concat(escapedNext, "\" />\n        <label for=\"password\">\u5BC6\u7801</label>\n        <input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" autofocus required />\n        <button type=\"submit\">\u767B\u5F55</button>\n      </form>\n    </main>\n  </body>\n</html>");
+};
+var readLoginPayload = function (req) { return __awaiter(void 0, void 0, void 0, function () {
+    var _a, contentType, raw, parsed, params;
+    return __generator(this, function (_b) {
+        switch (_b.label) {
+            case 0:
+                contentType = String((_a = req.headers["content-type"]) !== null && _a !== void 0 ? _a : "").toLowerCase();
+                return [4 /*yield*/, readRawBody(req)];
+            case 1:
+                raw = _b.sent();
+                if (!raw) {
+                    return [2 /*return*/, { password: "", next: "/" }];
+                }
+                if (!contentType.includes("application/json")) return [3 /*break*/, 2];
+                parsed = JSON.parse(raw);
+                return [2 /*return*/, {
+                        password: typeof parsed.password === "string" ? parsed.password : "",
+                        next: normalizeNextPath(typeof parsed.next === "string" ? parsed.next : "/"),
+                    }];
+            case 2:
+                params = new URLSearchParams(raw);
+                return [2 /*return*/, {
+                        password: String(params.get("password") !== null ? params.get("password") : ""),
+                        next: normalizeNextPath(params.get("next")),
+                    }];
+        }
+    });
+}); };
+var appendCookieHeader = function (res, cookie) {
+    var current = res.getHeader("Set-Cookie");
+    if (!current) {
+        res.setHeader("Set-Cookie", cookie);
+        return;
+    }
+    if (Array.isArray(current)) {
+        res.setHeader("Set-Cookie", __spreadArray(__spreadArray([], current.map(String), true), [cookie], false));
+        return;
+    }
+    res.setHeader("Set-Cookie", [String(current), cookie]);
+};
+var redirect = function (res, location) {
+    res.statusCode = 302;
+    res.setHeader("Location", location);
+    res.end();
+};
+var isSafeStringEqual = function (left, right) {
+    var leftBuffer = Buffer.from(left, "utf8");
+    var rightBuffer = Buffer.from(right, "utf8");
+    if (leftBuffer.length !== rightBuffer.length) {
+        return false;
+    }
     try {
-        decoded = Buffer.from(encoded, "base64").toString("utf8");
+        return timingSafeEqual(leftBuffer, rightBuffer);
     }
-    catch (_b) {
+    catch (_a) {
         return false;
     }
-    var separator = decoded.indexOf(":");
-    if (separator < 0) {
-        return false;
-    }
-    var password = decoded.slice(separator + 1);
-    return password === AUTH_PASSWORD;
 };
 var attachWebAuthMiddleware = function (middlewares) {
     var handler = function (req, res, next) { return __awaiter(void 0, void 0, void 0, function () {
-        var method, host, url, pathname;
+        var method, host, url, pathname, payload, nextPath, nextPath, loginUrl;
         var _a, _b, _c;
         return __generator(this, function (_d) {
-            method = (_b = (_a = req.method) === null || _a === void 0 ? void 0 : _a.toUpperCase()) !== null && _b !== void 0 ? _b : "GET";
-            host = req.headers.host;
-            url = new URL((_c = req.url) !== null && _c !== void 0 ? _c : "/", host ? "http://".concat(host) : "http://localhost");
-            pathname = url.pathname;
-            if (pathname === "".concat(API_BASE, "/health")) {
-                next();
-                return [2 /*return*/];
+            switch (_d.label) {
+                case 0:
+                    method = (_b = (_a = req.method) === null || _a === void 0 ? void 0 : _a.toUpperCase()) !== null && _b !== void 0 ? _b : "GET";
+                    host = req.headers.host;
+                    url = new URL((_c = req.url) !== null && _c !== void 0 ? _c : "/", host ? "http://".concat(host) : "http://localhost");
+                    pathname = url.pathname;
+                    if (pathname === "".concat(API_BASE, "/health")) {
+                        next();
+                        return [2 /*return*/];
+                    }
+                    if (!(pathname === AUTH_LOGIN_PATH && method === "GET")) return [3 /*break*/, 1];
+                    if (hasValidAuthCookie(req)) {
+                        redirect(res, normalizeNextPath(url.searchParams.get("next")));
+                        return [2 /*return*/];
+                    }
+                    text(res, 200, renderPasswordLoginPage(normalizeNextPath(url.searchParams.get("next"))));
+                    return [2 /*return*/];
+                case 1:
+                    if (!(pathname === AUTH_LOGIN_PATH && method === "POST")) return [3 /*break*/, 3];
+                    return [4 /*yield*/, readLoginPayload(req)];
+                case 2:
+                    payload = _d.sent();
+                    nextPath = normalizeNextPath(payload.next);
+                    if (isSafeStringEqual(payload.password, AUTH_PASSWORD)) {
+                        appendCookieHeader(res, buildAuthCookie(req));
+                        if (requestExpectsJson(req, pathname)) {
+                            json(res, 200, { ok: true, next: nextPath });
+                            return [2 /*return*/];
+                        }
+                        redirect(res, nextPath);
+                        return [2 /*return*/];
+                    }
+                    appendCookieHeader(res, clearAuthCookie(req));
+                    if (requestExpectsJson(req, pathname)) {
+                        json(res, 401, { error: "Invalid password" });
+                        return [2 /*return*/];
+                    }
+                    text(res, 401, renderPasswordLoginPage(nextPath, "密码错误，请重试。"));
+                    return [2 /*return*/];
+                case 3:
+                    if (hasValidAuthCookie(req)) {
+                        next();
+                        return [2 /*return*/];
+                    }
+                    nextPath = normalizeNextPath("".concat(pathname).concat(url.search));
+                    loginUrl = "".concat(AUTH_LOGIN_PATH, "?next=").concat(encodeURIComponent(nextPath));
+                    if (requestExpectsJson(req, pathname) || method !== "GET") {
+                        json(res, 401, {
+                            error: "Authentication required",
+                            login: loginUrl,
+                        });
+                        return [2 /*return*/];
+                    }
+                    redirect(res, loginUrl);
+                    return [2 /*return*/];
             }
-            if (hasValidBasicPassword(req)) {
-                next();
-                return [2 /*return*/];
-            }
-            res.setHeader("WWW-Authenticate", "Basic realm=\"".concat(AUTH_REALM, "\", charset=\"UTF-8\""));
-            if (requestExpectsJson(req, pathname) || method !== "GET") {
-                json(res, 401, { error: "Authentication required" });
-                return [2 /*return*/];
-            }
-            text(res, 401, "Authentication required.");
-            return [2 /*return*/];
         });
     }); };
     middlewares.use(handler);
@@ -437,7 +641,7 @@ var inferContentType = function (filePath) {
 };
 var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
     var handler = function (req, res, next) { return __awaiter(void 0, void 0, void 0, function () {
-        var method, host, url, pathname, root_1, relative, candidate, rootWithSep, stats, stream, root, payload, titleFromJson, parsed, projectTitle, projectDir, projectFolder, assetsDir, metaFile, metaExists, latestProject, folder, projectFile, projectExists, projectJson, entries, drafts, _i, entries_3, entry, projectFile, stats, projectJson, payload, projectTitle, projectDir, projectFolder, assetsDir, originalPath, stem, ext, timestamp, index, fileName, assetPath, payload, projectDir, error_2, message;
+        var method, host, url, pathname, root_1, relative, candidate, rootWithSep, stats, stream, root, payload, titleFromJson, parsed, projectTitle, projectDir, projectFolder, assetsDir, normalizedProjectJson, metaFile, metaExists, latestProject, folder, projectFile, projectExists, projectJson, normalizedProjectJson, entries, drafts, _i, entries_3, entry, projectFile, stats, projectJson, normalizedProjectJson, payload, projectTitle, projectDir, projectFolder, assetsDir, originalPath, stem, ext, timestamp, index, fileName, assetPath, payload, projectDir, error_1, message;
         var _a, _b, _c;
         return __generator(this, function (_d) {
             switch (_d.label) {
@@ -448,7 +652,7 @@ var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
                     pathname = url.pathname;
                     _d.label = 1;
                 case 1:
-                    _d.trys.push([1, 38, , 39]);
+                    _d.trys.push([1, 42, , 43]);
                     if (!(method === "GET" && pathname.startsWith("/projects/"))) return [3 /*break*/, 4];
                     return [4 /*yield*/, ensureProjectsRoot()];
                 case 2:
@@ -509,7 +713,8 @@ var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
                     return [4 /*yield*/, fsp.mkdir(assetsDir, { recursive: true })];
                 case 8:
                     _d.sent();
-                    return [4 /*yield*/, fsp.writeFile(path.join(projectDir, PROJECT_JSON_FILE), payload.project_json, "utf8")];
+                    normalizedProjectJson = normalizeProjectAssetPaths(payload.project_json, projectFolder);
+                    return [4 /*yield*/, fsp.writeFile(path.join(projectDir, PROJECT_JSON_FILE), normalizedProjectJson, "utf8")];
                 case 9:
                     _d.sent();
                     return [4 /*yield*/, fsp.writeFile(path.join(root, PROJECT_META_FILE), projectFolder, "utf8")];
@@ -518,7 +723,7 @@ var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
                     json(res, 200, { path: "/projects/".concat(projectFolder, "/").concat(PROJECT_JSON_FILE) });
                     return [2 /*return*/];
                 case 11:
-                    if (!(method === "GET" && pathname === "".concat(API_BASE, "/read_project_draft"))) return [3 /*break*/, 16];
+                    if (!(method === "GET" && pathname === "".concat(API_BASE, "/read_project_draft"))) return [3 /*break*/, 18];
                     metaFile = path.join(root, PROJECT_META_FILE);
                     return [4 /*yield*/, fsp.stat(metaFile).catch(function () { return null; })];
                 case 12:
@@ -542,55 +747,69 @@ var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
                     return [4 /*yield*/, fsp.readFile(projectFile, "utf8")];
                 case 15:
                     projectJson = _d.sent();
-                    json(res, 200, { project_json: projectJson });
-                    return [2 /*return*/];
+                    normalizedProjectJson = normalizeProjectAssetPaths(projectJson, folder);
+                    if (!(normalizedProjectJson !== projectJson)) return [3 /*break*/, 17];
+                    return [4 /*yield*/, fsp.writeFile(projectFile, normalizedProjectJson, "utf8")];
                 case 16:
-                    if (!(method === "GET" && pathname === "".concat(API_BASE, "/list_project_drafts"))) return [3 /*break*/, 23];
-                    return [4 /*yield*/, fsp.readdir(root, { withFileTypes: true })];
+                    _d.sent();
+                    _d.label = 17;
                 case 17:
+                    json(res, 200, { project_json: normalizedProjectJson });
+                    return [2 /*return*/];
+                case 18:
+                    if (!(method === "GET" && pathname === "".concat(API_BASE, "/list_project_drafts"))) return [3 /*break*/, 27];
+                    return [4 /*yield*/, fsp.readdir(root, { withFileTypes: true })];
+                case 19:
                     entries = _d.sent();
                     drafts = [];
                     _i = 0, entries_3 = entries;
-                    _d.label = 18;
-                case 18:
-                    if (!(_i < entries_3.length)) return [3 /*break*/, 22];
+                    _d.label = 20;
+                case 20:
+                    if (!(_i < entries_3.length)) return [3 /*break*/, 26];
                     entry = entries_3[_i];
                     if (!entry.isDirectory()) {
-                        return [3 /*break*/, 21];
+                        return [3 /*break*/, 25];
                     }
                     projectFile = path.join(root, entry.name, PROJECT_JSON_FILE);
                     return [4 /*yield*/, fsp.stat(projectFile).catch(function () { return null; })];
-                case 19:
+                case 21:
                     stats = _d.sent();
                     if (!(stats === null || stats === void 0 ? void 0 : stats.isFile())) {
-                        return [3 /*break*/, 21];
+                        return [3 /*break*/, 25];
                     }
                     return [4 /*yield*/, fsp.readFile(projectFile, "utf8")];
-                case 20:
-                    projectJson = _d.sent();
-                    drafts.push({ modifiedAt: stats.mtimeMs, projectJson: projectJson });
-                    _d.label = 21;
-                case 21:
-                    _i++;
-                    return [3 /*break*/, 18];
                 case 22:
+                    projectJson = _d.sent();
+                    normalizedProjectJson = normalizeProjectAssetPaths(projectJson, entry.name);
+                    if (!(normalizedProjectJson !== projectJson)) return [3 /*break*/, 24];
+                    return [4 /*yield*/, fsp.writeFile(projectFile, normalizedProjectJson, "utf8")];
+                case 23:
+                    _d.sent();
+                    _d.label = 24;
+                case 24:
+                    drafts.push({ modifiedAt: stats.mtimeMs, projectJson: normalizedProjectJson });
+                    _d.label = 25;
+                case 25:
+                    _i++;
+                    return [3 /*break*/, 20];
+                case 26:
                     drafts.sort(function (a, b) { return b.modifiedAt - a.modifiedAt; });
                     json(res, 200, { projects: drafts.map(function (entry) { return entry.projectJson; }) });
                     return [2 /*return*/];
-                case 23:
-                    if (!(method === "POST" && pathname === "".concat(API_BASE, "/save_imported_image"))) return [3 /*break*/, 31];
+                case 27:
+                    if (!(method === "POST" && pathname === "".concat(API_BASE, "/save_imported_image"))) return [3 /*break*/, 35];
                     return [4 /*yield*/, readJsonBody(req)];
-                case 24:
+                case 28:
                     payload = _d.sent();
                     projectTitle = (typeof payload.project_title === "string" ? payload.project_title.trim() : "") ||
                         payload.project_id;
                     return [4 /*yield*/, resolveProjectDir(root, payload.project_id, projectTitle)];
-                case 25:
+                case 29:
                     projectDir = _d.sent();
                     projectFolder = path.basename(projectDir);
                     assetsDir = path.join(projectDir, PROJECT_ASSETS_DIR);
                     return [4 /*yield*/, fsp.mkdir(assetsDir, { recursive: true })];
-                case 26:
+                case 30:
                     _d.sent();
                     originalPath = path.parse(payload.original_file_name);
                     stem = sanitizePathComponent(originalPath.name, "image");
@@ -599,46 +818,46 @@ var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
                     index = 0;
                     fileName = "".concat(stem, "-").concat(timestamp, ".").concat(ext);
                     assetPath = path.join(assetsDir, fileName);
-                    _d.label = 27;
-                case 27: return [4 /*yield*/, fsp.stat(assetPath).then(function () { return true; }).catch(function () { return false; })];
-                case 28:
-                    if (!_d.sent()) return [3 /*break*/, 29];
+                    _d.label = 31;
+                case 31: return [4 /*yield*/, fsp.stat(assetPath).then(function () { return true; }).catch(function () { return false; })];
+                case 32:
+                    if (!_d.sent()) return [3 /*break*/, 33];
                     index += 1;
                     fileName = "".concat(stem, "-").concat(timestamp, "-").concat(index, ".").concat(ext);
                     assetPath = path.join(assetsDir, fileName);
-                    return [3 /*break*/, 27];
-                case 29: return [4 /*yield*/, fsp.writeFile(assetPath, Buffer.from(payload.bytes))];
-                case 30:
+                    return [3 /*break*/, 31];
+                case 33: return [4 /*yield*/, fsp.writeFile(assetPath, Buffer.from(payload.bytes))];
+                case 34:
                     _d.sent();
                     json(res, 200, { path: "/projects/".concat(projectFolder, "/").concat(PROJECT_ASSETS_DIR, "/").concat(fileName) });
                     return [2 /*return*/];
-                case 31:
-                    if (!(method === "POST" && pathname === "".concat(API_BASE, "/delete_project_draft"))) return [3 /*break*/, 37];
+                case 35:
+                    if (!(method === "POST" && pathname === "".concat(API_BASE, "/delete_project_draft"))) return [3 /*break*/, 41];
                     return [4 /*yield*/, readJsonBody(req)];
-                case 32:
+                case 36:
                     payload = _d.sent();
                     return [4 /*yield*/, findProjectDirById(root, payload.project_id)];
-                case 33:
+                case 37:
                     projectDir = _d.sent();
-                    if (!projectDir) return [3 /*break*/, 35];
+                    if (!projectDir) return [3 /*break*/, 39];
                     return [4 /*yield*/, fsp.rm(projectDir, { recursive: true, force: true })];
-                case 34:
+                case 38:
                     _d.sent();
-                    _d.label = 35;
-                case 35: return [4 /*yield*/, syncLatestProjectMeta(root)];
-                case 36:
+                    _d.label = 39;
+                case 39: return [4 /*yield*/, syncLatestProjectMeta(root)];
+                case 40:
                     _d.sent();
                     json(res, 200, { ok: true });
                     return [2 /*return*/];
-                case 37:
+                case 41:
                     text(res, 404, "Not Found");
-                    return [3 /*break*/, 39];
-                case 38:
-                    error_2 = _d.sent();
-                    message = error_2 instanceof Error ? error_2.message : String(error_2);
+                    return [3 /*break*/, 43];
+                case 42:
+                    error_1 = _d.sent();
+                    message = error_1 instanceof Error ? error_1.message : String(error_1);
                     json(res, 500, { error: message });
-                    return [3 /*break*/, 39];
-                case 39: return [2 /*return*/];
+                    return [3 /*break*/, 43];
+                case 43: return [2 /*return*/];
             }
         });
     }); };

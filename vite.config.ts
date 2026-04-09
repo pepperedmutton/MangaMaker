@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { defineConfig, type PreviewServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
@@ -11,7 +12,12 @@ const PROJECT_JSON_FILE = "project.json";
 const PROJECT_ASSETS_DIR = "assets";
 const API_BASE = "/__mangamaker__/persistence";
 const AUTH_PASSWORD = "19260817";
-const AUTH_REALM = "MangaMaker";
+const AUTH_COOKIE_NAME = "mangamaker_auth";
+const AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+const AUTH_LOGIN_PATH = "/__mangamaker__/auth/login";
+const AUTH_COOKIE_TOKEN = createHash("sha256")
+  .update(`mangamaker:${AUTH_PASSWORD}`)
+  .digest("hex");
 const SHARE_ALLOWED_HOSTS = [
   "gradio.live",
   ".gradio.live",
@@ -248,27 +254,249 @@ const requestExpectsJson = (req: IncomingMessage, pathname: string) => {
   return pathname.startsWith(API_BASE) || accept.includes("application/json") || contentType.includes("application/json");
 };
 
-const hasValidBasicPassword = (req: IncomingMessage) => {
-  const authHeader = String(req.headers.authorization ?? "");
-  if (!authHeader.startsWith("Basic ")) {
+const parseCookies = (req: IncomingMessage) => {
+  const raw = String(req.headers.cookie ?? "");
+  if (!raw) {
+    return new Map<string, string>();
+  }
+  const cookies = new Map<string, string>();
+  const entries = raw.split(";");
+  for (const entry of entries) {
+    const separator = entry.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const name = entry.slice(0, separator).trim();
+    const value = entry.slice(separator + 1).trim();
+    if (!name) {
+      continue;
+    }
+    try {
+      cookies.set(name, decodeURIComponent(value));
+    } catch {
+      cookies.set(name, value);
+    }
+  }
+  return cookies;
+};
+
+const isSecureRequest = (req: IncomingMessage) => {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "")
+    .split(",")[0]
+    ?.trim()
+    .toLowerCase();
+  if (forwardedProto === "https") {
+    return true;
+  }
+  const encrypted = (req.socket as { encrypted?: boolean }).encrypted;
+  return encrypted === true;
+};
+
+const buildAuthCookie = (req: IncomingMessage) => {
+  const attributes = [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(AUTH_COOKIE_TOKEN)}`,
+    "Path=/",
+    `Max-Age=${AUTH_COOKIE_MAX_AGE_SECONDS}`,
+    "HttpOnly",
+    "SameSite=Lax",
+  ];
+  if (isSecureRequest(req)) {
+    attributes.push("Secure");
+  }
+  return attributes.join("; ");
+};
+
+const hasValidAuthCookie = (req: IncomingMessage) => {
+  const cookies = parseCookies(req);
+  const token = cookies.get(AUTH_COOKIE_NAME);
+  if (!token) {
     return false;
   }
-  const encoded = authHeader.slice("Basic ".length).trim();
-  if (!encoded) {
+  const expected = Buffer.from(AUTH_COOKIE_TOKEN, "utf8");
+  const received = Buffer.from(token, "utf8");
+  if (received.length !== expected.length) {
     return false;
   }
-  let decoded = "";
+  return timingSafeEqual(received, expected);
+};
+
+const escapeHtml = (value: string) =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+
+const normalizeNextPath = (value: string | null | undefined) => {
+  const normalized = String(value ?? "").trim();
+  if (!normalized.startsWith("/") || normalized.startsWith("//")) {
+    return "/";
+  }
+  if (normalized.startsWith(AUTH_LOGIN_PATH)) {
+    return "/";
+  }
+  return normalized;
+};
+
+const renderPasswordLoginPage = (nextPath: string, errorMessage?: string | null) => {
+  const errorBlock = errorMessage
+    ? `<p class="auth-error">${escapeHtml(errorMessage)}</p>`
+    : "";
+  const escapedNext = escapeHtml(nextPath);
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MangaMaker 登录</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: "Source Han Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: radial-gradient(circle at 20% 20%, #efe9dc 0%, #e1d3bd 48%, #cfb18c 100%);
+        color: #2d241b;
+      }
+      .auth-card {
+        width: min(420px, calc(100vw - 32px));
+        padding: 28px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 18px 42px rgba(45, 36, 27, 0.22);
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 26px;
+      }
+      p {
+        margin: 0 0 18px;
+        color: #5c4a3a;
+      }
+      label {
+        display: block;
+        margin: 0 0 10px;
+        font-weight: 600;
+      }
+      input[type="password"] {
+        width: 100%;
+        border: 1px solid #b89a7b;
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 16px;
+        outline: none;
+      }
+      input[type="password"]:focus {
+        border-color: #8f5b2f;
+        box-shadow: 0 0 0 2px rgba(143, 91, 47, 0.15);
+      }
+      button {
+        margin-top: 14px;
+        width: 100%;
+        border: 0;
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 16px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(135deg, #8f5b2f, #6f4a2c);
+        cursor: pointer;
+      }
+      .auth-error {
+        margin: 0 0 12px;
+        color: #b42318;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="auth-card">
+      <h1>MangaMaker</h1>
+      <p>请输入访问密码</p>
+      ${errorBlock}
+      <form method="post" action="${AUTH_LOGIN_PATH}">
+        <input type="hidden" name="next" value="${escapedNext}" />
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
+        <button type="submit">登录</button>
+      </form>
+    </main>
+  </body>
+</html>`;
+};
+
+const readLoginPayload = async (req: IncomingMessage) => {
+  const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
+  const raw = await readRawBody(req);
+  if (!raw) {
+    return { password: "", next: "/" };
+  }
+  if (contentType.includes("application/json")) {
+    const parsed = JSON.parse(raw) as { password?: unknown; next?: unknown };
+    return {
+      password: typeof parsed.password === "string" ? parsed.password : "",
+      next: normalizeNextPath(typeof parsed.next === "string" ? parsed.next : "/"),
+    };
+  }
+  const params = new URLSearchParams(raw);
+  return {
+    password: String(params.get("password") ?? ""),
+    next: normalizeNextPath(params.get("next")),
+  };
+};
+
+const appendCookieHeader = (res: ServerResponse, cookie: string) => {
+  const current = res.getHeader("Set-Cookie");
+  if (!current) {
+    res.setHeader("Set-Cookie", cookie);
+    return;
+  }
+  if (Array.isArray(current)) {
+    res.setHeader("Set-Cookie", [...current.map(String), cookie]);
+    return;
+  }
+  res.setHeader("Set-Cookie", [String(current), cookie]);
+};
+
+const clearAuthCookie = (req: IncomingMessage) => {
+  const attributes = [
+    `${AUTH_COOKIE_NAME}=`,
+    "Path=/",
+    "Max-Age=0",
+    "HttpOnly",
+    "SameSite=Lax",
+  ];
+  if (isSecureRequest(req)) {
+    attributes.push("Secure");
+  }
+  return attributes.join("; ");
+};
+
+const redirect = (res: ServerResponse, location: string) => {
+  res.statusCode = 302;
+  res.setHeader("Location", location);
+  res.end();
+};
+
+const isSafeStringEqual = (left: string, right: string) => {
+  const leftBuffer = Buffer.from(left, "utf8");
+  const rightBuffer = Buffer.from(right, "utf8");
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
   try {
-    decoded = Buffer.from(encoded, "base64").toString("utf8");
+    return timingSafeEqual(leftBuffer, rightBuffer);
   } catch {
     return false;
   }
-  const separator = decoded.indexOf(":");
-  if (separator < 0) {
-    return false;
-  }
-  const password = decoded.slice(separator + 1);
-  return password === AUTH_PASSWORD;
 };
 
 const attachWebAuthMiddleware = (
@@ -285,18 +513,53 @@ const attachWebAuthMiddleware = (
       return;
     }
 
-    if (hasValidBasicPassword(req)) {
+    if (pathname === AUTH_LOGIN_PATH && method === "GET") {
+      if (hasValidAuthCookie(req)) {
+        redirect(res, normalizeNextPath(url.searchParams.get("next")));
+        return;
+      }
+      text(res, 200, renderPasswordLoginPage(normalizeNextPath(url.searchParams.get("next"))));
+      return;
+    }
+
+    if (pathname === AUTH_LOGIN_PATH && method === "POST") {
+      const payload = await readLoginPayload(req);
+      const nextPath = normalizeNextPath(payload.next);
+      if (isSafeStringEqual(payload.password, AUTH_PASSWORD)) {
+        appendCookieHeader(res, buildAuthCookie(req));
+        if (requestExpectsJson(req, pathname)) {
+          json(res, 200, { ok: true, next: nextPath });
+          return;
+        }
+        redirect(res, nextPath);
+        return;
+      }
+      appendCookieHeader(res, clearAuthCookie(req));
+      if (requestExpectsJson(req, pathname)) {
+        json(res, 401, { error: "Invalid password" });
+        return;
+      }
+      text(res, 401, renderPasswordLoginPage(nextPath, "密码错误，请重试。"));
+      return;
+    }
+
+    if (hasValidAuthCookie(req)) {
       next();
       return;
     }
 
-    res.setHeader("WWW-Authenticate", `Basic realm="${AUTH_REALM}", charset="UTF-8"`);
+    const nextPath = normalizeNextPath(`${pathname}${url.search}`);
+    const loginUrl = `${AUTH_LOGIN_PATH}?next=${encodeURIComponent(nextPath)}`;
+
     if (requestExpectsJson(req, pathname) || method !== "GET") {
-      json(res, 401, { error: "Authentication required" });
+      json(res, 401, {
+        error: "Authentication required",
+        login: loginUrl,
+      });
       return;
     }
 
-    text(res, 401, "Authentication required.");
+    redirect(res, loginUrl);
   };
 
   middlewares.use(handler);
