@@ -405,8 +405,8 @@ var parseCookies = function (req) {
     }
     var cookies = new Map();
     var entries = raw.split(";");
-    for (var _i = 0, entries_2 = entries; _i < entries_2.length; _i++) {
-        var entry = entries_2[_i];
+    for (var _i = 0, entries_3 = entries; _i < entries_3.length; _i++) {
+        var entry = entries_3[_i];
         var separator = entry.indexOf("=");
         if (separator <= 0) {
             continue;
@@ -426,15 +426,14 @@ var parseCookies = function (req) {
     return cookies;
 };
 var isSecureRequest = function (req) {
-    var _a;
-    var forwardedProto = String((_a = req.headers["x-forwarded-proto"]) !== null && _a !== void 0 ? _a : "")
-        .split(",")[0]
-        .trim()
-        .toLowerCase();
+    var _a, _b;
+    var forwardedProto = (_b = String((_a = req.headers["x-forwarded-proto"]) !== null && _a !== void 0 ? _a : "")
+        .split(",")[0]) === null || _b === void 0 ? void 0 : _b.trim().toLowerCase();
     if (forwardedProto === "https") {
         return true;
     }
-    return req.socket.encrypted === true;
+    var encrypted = req.socket.encrypted;
+    return encrypted === true;
 };
 var buildAuthCookie = function (req) {
     var attributes = [
@@ -449,21 +448,9 @@ var buildAuthCookie = function (req) {
     }
     return attributes.join("; ");
 };
-var clearAuthCookie = function (req) {
-    var attributes = [
-        "".concat(AUTH_COOKIE_NAME, "="),
-        "Path=/",
-        "Max-Age=0",
-        "HttpOnly",
-        "SameSite=Lax",
-    ];
-    if (isSecureRequest(req)) {
-        attributes.push("Secure");
-    }
-    return attributes.join("; ");
-};
 var hasValidAuthCookie = function (req) {
-    var token = parseCookies(req).get(AUTH_COOKIE_NAME);
+    var cookies = parseCookies(req);
+    var token = cookies.get(AUTH_COOKIE_NAME);
     if (!token) {
         return false;
     }
@@ -476,11 +463,11 @@ var hasValidAuthCookie = function (req) {
 };
 var escapeHtml = function (value) {
     return value
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll("\"", "&quot;")
-        .replaceAll("'", "&#39;");
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 };
 var normalizeNextPath = function (value) {
     var normalized = String(value !== null && value !== void 0 ? value : "").trim();
@@ -500,27 +487,28 @@ var renderPasswordLoginPage = function (nextPath, errorMessage) {
     return "<!doctype html>\n<html lang=\"zh-CN\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>MangaMaker \u767B\u5F55</title>\n    <style>\n      :root {\n        color-scheme: light;\n      }\n      * {\n        box-sizing: border-box;\n      }\n      body {\n        margin: 0;\n        min-height: 100vh;\n        display: grid;\n        place-items: center;\n        font-family: \"Source Han Sans\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n        background: radial-gradient(circle at 20% 20%, #efe9dc 0%, #e1d3bd 48%, #cfb18c 100%);\n        color: #2d241b;\n      }\n      .auth-card {\n        width: min(420px, calc(100vw - 32px));\n        padding: 28px;\n        border-radius: 14px;\n        background: rgba(255, 255, 255, 0.92);\n        box-shadow: 0 18px 42px rgba(45, 36, 27, 0.22);\n      }\n      h1 {\n        margin: 0 0 6px;\n        font-size: 26px;\n      }\n      p {\n        margin: 0 0 18px;\n        color: #5c4a3a;\n      }\n      label {\n        display: block;\n        margin: 0 0 10px;\n        font-weight: 600;\n      }\n      input[type=\"password\"] {\n        width: 100%;\n        border: 1px solid #b89a7b;\n        border-radius: 10px;\n        padding: 12px 14px;\n        font-size: 16px;\n        outline: none;\n      }\n      input[type=\"password\"]:focus {\n        border-color: #8f5b2f;\n        box-shadow: 0 0 0 2px rgba(143, 91, 47, 0.15);\n      }\n      button {\n        margin-top: 14px;\n        width: 100%;\n        border: 0;\n        border-radius: 10px;\n        padding: 12px 14px;\n        font-size: 16px;\n        font-weight: 700;\n        color: #fff;\n        background: linear-gradient(135deg, #8f5b2f, #6f4a2c);\n        cursor: pointer;\n      }\n      .auth-error {\n        margin: 0 0 12px;\n        color: #b42318;\n        font-weight: 600;\n      }\n    </style>\n  </head>\n  <body>\n    <main class=\"auth-card\">\n      <h1>MangaMaker</h1>\n      <p>\u8BF7\u8F93\u5165\u8BBF\u95EE\u5BC6\u7801</p>\n      ".concat(errorBlock, "\n      <form method=\"post\" action=\"").concat(AUTH_LOGIN_PATH, "\">\n        <input type=\"hidden\" name=\"next\" value=\"").concat(escapedNext, "\" />\n        <label for=\"password\">\u5BC6\u7801</label>\n        <input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" autofocus required />\n        <button type=\"submit\">\u767B\u5F55</button>\n      </form>\n    </main>\n  </body>\n</html>");
 };
 var readLoginPayload = function (req) { return __awaiter(void 0, void 0, void 0, function () {
-    var _a, contentType, raw, parsed, params;
-    return __generator(this, function (_b) {
-        switch (_b.label) {
+    var contentType, raw, parsed, params;
+    var _a, _b;
+    return __generator(this, function (_c) {
+        switch (_c.label) {
             case 0:
                 contentType = String((_a = req.headers["content-type"]) !== null && _a !== void 0 ? _a : "").toLowerCase();
                 return [4 /*yield*/, readRawBody(req)];
             case 1:
-                raw = _b.sent();
+                raw = _c.sent();
                 if (!raw) {
                     return [2 /*return*/, { password: "", next: "/" }];
                 }
-                if (!contentType.includes("application/json")) return [3 /*break*/, 2];
-                parsed = JSON.parse(raw);
-                return [2 /*return*/, {
-                        password: typeof parsed.password === "string" ? parsed.password : "",
-                        next: normalizeNextPath(typeof parsed.next === "string" ? parsed.next : "/"),
-                    }];
-            case 2:
+                if (contentType.includes("application/json")) {
+                    parsed = JSON.parse(raw);
+                    return [2 /*return*/, {
+                            password: typeof parsed.password === "string" ? parsed.password : "",
+                            next: normalizeNextPath(typeof parsed.next === "string" ? parsed.next : "/"),
+                        }];
+                }
                 params = new URLSearchParams(raw);
                 return [2 /*return*/, {
-                        password: String(params.get("password") !== null ? params.get("password") : ""),
+                        password: String((_b = params.get("password")) !== null && _b !== void 0 ? _b : ""),
                         next: normalizeNextPath(params.get("next")),
                     }];
         }
@@ -537,6 +525,19 @@ var appendCookieHeader = function (res, cookie) {
         return;
     }
     res.setHeader("Set-Cookie", [String(current), cookie]);
+};
+var clearAuthCookie = function (req) {
+    var attributes = [
+        "".concat(AUTH_COOKIE_NAME, "="),
+        "Path=/",
+        "Max-Age=0",
+        "HttpOnly",
+        "SameSite=Lax",
+    ];
+    if (isSecureRequest(req)) {
+        attributes.push("Secure");
+    }
+    return attributes.join("; ");
 };
 var redirect = function (res, location) {
     res.statusCode = 302;
@@ -558,7 +559,7 @@ var isSafeStringEqual = function (left, right) {
 };
 var attachWebAuthMiddleware = function (middlewares) {
     var handler = function (req, res, next) { return __awaiter(void 0, void 0, void 0, function () {
-        var method, host, url, pathname, payload, nextPath, nextPath, loginUrl;
+        var method, host, url, pathname, payload, nextPath_1, nextPath, loginUrl;
         var _a, _b, _c;
         return __generator(this, function (_d) {
             switch (_d.label) {
@@ -571,26 +572,26 @@ var attachWebAuthMiddleware = function (middlewares) {
                         next();
                         return [2 /*return*/];
                     }
-                    if (!(pathname === AUTH_LOGIN_PATH && method === "GET")) return [3 /*break*/, 1];
-                    if (hasValidAuthCookie(req)) {
-                        redirect(res, normalizeNextPath(url.searchParams.get("next")));
+                    if (pathname === AUTH_LOGIN_PATH && method === "GET") {
+                        if (hasValidAuthCookie(req)) {
+                            redirect(res, normalizeNextPath(url.searchParams.get("next")));
+                            return [2 /*return*/];
+                        }
+                        text(res, 200, renderPasswordLoginPage(normalizeNextPath(url.searchParams.get("next"))));
                         return [2 /*return*/];
                     }
-                    text(res, 200, renderPasswordLoginPage(normalizeNextPath(url.searchParams.get("next"))));
-                    return [2 /*return*/];
-                case 1:
-                    if (!(pathname === AUTH_LOGIN_PATH && method === "POST")) return [3 /*break*/, 3];
+                    if (!(pathname === AUTH_LOGIN_PATH && method === "POST")) return [3 /*break*/, 2];
                     return [4 /*yield*/, readLoginPayload(req)];
-                case 2:
+                case 1:
                     payload = _d.sent();
-                    nextPath = normalizeNextPath(payload.next);
+                    nextPath_1 = normalizeNextPath(payload.next);
                     if (isSafeStringEqual(payload.password, AUTH_PASSWORD)) {
                         appendCookieHeader(res, buildAuthCookie(req));
                         if (requestExpectsJson(req, pathname)) {
-                            json(res, 200, { ok: true, next: nextPath });
+                            json(res, 200, { ok: true, next: nextPath_1 });
                             return [2 /*return*/];
                         }
-                        redirect(res, nextPath);
+                        redirect(res, nextPath_1);
                         return [2 /*return*/];
                     }
                     appendCookieHeader(res, clearAuthCookie(req));
@@ -598,9 +599,9 @@ var attachWebAuthMiddleware = function (middlewares) {
                         json(res, 401, { error: "Invalid password" });
                         return [2 /*return*/];
                     }
-                    text(res, 401, renderPasswordLoginPage(nextPath, "密码错误，请重试。"));
+                    text(res, 401, renderPasswordLoginPage(nextPath_1, "密码错误，请重试。"));
                     return [2 /*return*/];
-                case 3:
+                case 2:
                     if (hasValidAuthCookie(req)) {
                         next();
                         return [2 /*return*/];
@@ -641,7 +642,7 @@ var inferContentType = function (filePath) {
 };
 var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
     var handler = function (req, res, next) { return __awaiter(void 0, void 0, void 0, function () {
-        var method, host, url, pathname, root_1, relative, candidate, rootWithSep, stats, stream, root, payload, titleFromJson, parsed, projectTitle, projectDir, projectFolder, assetsDir, normalizedProjectJson, metaFile, metaExists, latestProject, folder, projectFile, projectExists, projectJson, normalizedProjectJson, entries, drafts, _i, entries_3, entry, projectFile, stats, projectJson, normalizedProjectJson, payload, projectTitle, projectDir, projectFolder, assetsDir, originalPath, stem, ext, timestamp, index, fileName, assetPath, payload, projectDir, error_1, message;
+        var method, host, url, pathname, root_1, relative, candidate, rootWithSep, stats, stream, root, payload, titleFromJson, parsed, projectTitle, projectDir, projectFolder, assetsDir, normalizedProjectJson, metaFile, metaExists, latestProject, folder, projectFile, projectExists, projectJson, normalizedProjectJson, entries, drafts, _i, entries_4, entry, projectFile, stats, projectJson, normalizedProjectJson, payload, projectTitle, projectDir, projectFolder, assetsDir, originalPath, stem, ext, timestamp, index, fileName, assetPath, payload, projectDir, error_1, message;
         var _a, _b, _c;
         return __generator(this, function (_d) {
             switch (_d.label) {
@@ -762,11 +763,11 @@ var attachWebPersistenceMiddleware = function (middlewares, closeHandlers) {
                 case 19:
                     entries = _d.sent();
                     drafts = [];
-                    _i = 0, entries_3 = entries;
+                    _i = 0, entries_4 = entries;
                     _d.label = 20;
                 case 20:
-                    if (!(_i < entries_3.length)) return [3 /*break*/, 26];
-                    entry = entries_3[_i];
+                    if (!(_i < entries_4.length)) return [3 /*break*/, 26];
+                    entry = entries_4[_i];
                     if (!entry.isDirectory()) {
                         return [3 /*break*/, 25];
                     }

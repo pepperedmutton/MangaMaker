@@ -214,8 +214,10 @@ const normalizeVerticalEllipsis = (value: string) => {
   return replaceDotRuns(
     replaceDotRuns(
       value
-        .replaceAll(HORIZONTAL_ELLIPSIS, VERTICAL_ELLIPSIS)
-        .replaceAll(MIDLINE_HORIZONTAL_ELLIPSIS, VERTICAL_ELLIPSIS),
+        .split(HORIZONTAL_ELLIPSIS)
+        .join(VERTICAL_ELLIPSIS)
+        .split(MIDLINE_HORIZONTAL_ELLIPSIS)
+        .join(VERTICAL_ELLIPSIS),
       /\.{3,}/g,
       ".",
     ),
@@ -226,9 +228,12 @@ const normalizeVerticalEllipsis = (value: string) => {
 
 const normalizeVerticalDash = (value: string) =>
   value
-    .replaceAll("\u2015", VERTICAL_EM_DASH)
-    .replaceAll("\u2014", VERTICAL_EM_DASH)
-    .replaceAll("\u2013", VERTICAL_EN_DASH);
+    .split("\u2015")
+    .join(VERTICAL_EM_DASH)
+    .split("\u2014")
+    .join(VERTICAL_EM_DASH)
+    .split("\u2013")
+    .join(VERTICAL_EN_DASH);
 
 const normalizeMangaQuotes = (value: string) => {
   if (value.length === 0) {
@@ -278,24 +283,39 @@ const normalizeMangaQuotes = (value: string) => {
 
 const normalizeVerticalBrackets = (value: string) =>
   value
-    .replaceAll("\u300c", VERTICAL_LEFT_CORNER_BRACKET)
-    .replaceAll("\u300d", VERTICAL_RIGHT_CORNER_BRACKET)
-    .replaceAll("\u300e", VERTICAL_LEFT_WHITE_CORNER_BRACKET)
-    .replaceAll("\u300f", VERTICAL_RIGHT_WHITE_CORNER_BRACKET)
-    .replaceAll("(", VERTICAL_LEFT_PAREN)
-    .replaceAll(")", VERTICAL_RIGHT_PAREN)
-    .replaceAll("\uFF08", VERTICAL_LEFT_PAREN)
-    .replaceAll("\uFF09", VERTICAL_RIGHT_PAREN);
+    .split("\u300c")
+    .join(VERTICAL_LEFT_CORNER_BRACKET)
+    .split("\u300d")
+    .join(VERTICAL_RIGHT_CORNER_BRACKET)
+    .split("\u300e")
+    .join(VERTICAL_LEFT_WHITE_CORNER_BRACKET)
+    .split("\u300f")
+    .join(VERTICAL_RIGHT_WHITE_CORNER_BRACKET)
+    .split("(")
+    .join(VERTICAL_LEFT_PAREN)
+    .split(")")
+    .join(VERTICAL_RIGHT_PAREN)
+    .split("\uFF08")
+    .join(VERTICAL_LEFT_PAREN)
+    .split("\uFF09")
+    .join(VERTICAL_RIGHT_PAREN);
 
 const normalizeVerticalPunctuation = (value: string) =>
   value
-    .replaceAll(",", VERTICAL_COMMA)
-    .replaceAll("\uFF0C", VERTICAL_COMMA)
-    .replaceAll("\u3001", VERTICAL_IDEOGRAPHIC_COMMA)
-    .replaceAll("!", VERTICAL_EXCLAMATION)
-    .replaceAll("\uFF01", VERTICAL_EXCLAMATION)
-    .replaceAll("?", VERTICAL_QUESTION)
-    .replaceAll("\uFF1F", VERTICAL_QUESTION);
+    .split(",")
+    .join(VERTICAL_COMMA)
+    .split("\uFF0C")
+    .join(VERTICAL_COMMA)
+    .split("\u3001")
+    .join(VERTICAL_IDEOGRAPHIC_COMMA)
+    .split("!")
+    .join(VERTICAL_EXCLAMATION)
+    .split("\uFF01")
+    .join(VERTICAL_EXCLAMATION)
+    .split("?")
+    .join(VERTICAL_QUESTION)
+    .split("\uFF1F")
+    .join(VERTICAL_QUESTION);
 
 const segmentWordTokens = (line: string) => {
   if (line.length === 0) {
