@@ -17,6 +17,13 @@ import {
 } from "../ui/bubbleShapes";
 
 const PDF_EXPORT_JPEG_QUALITY = 0.84;
+const JPG_ZIP_EXPORT_JPEG_QUALITY = 0.92;
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const ZIP_CENTRAL_DIRECTORY_HEADER_SIGNATURE = 0x02014b50;
+const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+const ZIP_VERSION = 20;
+const ZIP_UTF8_FLAG = 0x0800;
+const ZIP_STORE_METHOD = 0;
 const FULL_WIDTH_SPACE = "\u3000";
 const DEFAULT_TEXT_COLOR = "#121212";
 const VERTICAL_QUESTION = "\uFE16";
@@ -52,6 +59,150 @@ const loadImage = (src: string) =>
     image.onerror = () => reject(new Error(`Unable to load image: ${src}`));
     image.src = src;
   });
+
+type ZipEntry = {
+  fileName: string;
+  bytes: Uint8Array;
+};
+
+const crc32Table = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value & 1) !== 0 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+const computeCrc32 = (bytes: Uint8Array) => {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    const next = (crc ^ byte) & 0xff;
+    crc = (crc >>> 8) ^ crc32Table[next];
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+const encodeZipFileName = (fileName: string) => new TextEncoder().encode(fileName);
+
+const clampDosDatePart = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, Math.floor(value)));
+
+const toDosDateTime = (timestamp: Date) => {
+  const year = clampDosDatePart(timestamp.getFullYear(), 1980, 2107);
+  const month = clampDosDatePart(timestamp.getMonth() + 1, 1, 12);
+  const day = clampDosDatePart(timestamp.getDate(), 1, 31);
+  const hour = clampDosDatePart(timestamp.getHours(), 0, 23);
+  const minute = clampDosDatePart(timestamp.getMinutes(), 0, 59);
+  const second = clampDosDatePart(timestamp.getSeconds(), 0, 59);
+  return {
+    date: ((year - 1980) << 9) | (month << 5) | day,
+    time: (hour << 11) | (minute << 5) | Math.floor(second / 2),
+  };
+};
+
+const concatUint8Arrays = (parts: Uint8Array[]) => {
+  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const part of parts) {
+    merged.set(part, offset);
+    offset += part.length;
+  }
+  return merged;
+};
+
+const buildStoredZipArchive = (entries: ZipEntry[]) => {
+  if (entries.length > 0xffff) {
+    throw new Error("Too many files for ZIP export.");
+  }
+
+  const now = new Date();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let localOffset = 0;
+
+  for (const entry of entries) {
+    const nameBytes = encodeZipFileName(entry.fileName);
+    const { date, time } = toDosDateTime(now);
+    const crc32 = computeCrc32(entry.bytes);
+    const size = entry.bytes.length >>> 0;
+
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    localView.setUint32(0, ZIP_LOCAL_FILE_HEADER_SIGNATURE, true);
+    localView.setUint16(4, ZIP_VERSION, true);
+    localView.setUint16(6, ZIP_UTF8_FLAG, true);
+    localView.setUint16(8, ZIP_STORE_METHOD, true);
+    localView.setUint16(10, time, true);
+    localView.setUint16(12, date, true);
+    localView.setUint32(14, crc32, true);
+    localView.setUint32(18, size, true);
+    localView.setUint32(22, size, true);
+    localView.setUint16(26, nameBytes.length, true);
+    localView.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+
+    localParts.push(localHeader, entry.bytes);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    centralView.setUint32(0, ZIP_CENTRAL_DIRECTORY_HEADER_SIGNATURE, true);
+    centralView.setUint16(4, ZIP_VERSION, true);
+    centralView.setUint16(6, ZIP_VERSION, true);
+    centralView.setUint16(8, ZIP_UTF8_FLAG, true);
+    centralView.setUint16(10, ZIP_STORE_METHOD, true);
+    centralView.setUint16(12, time, true);
+    centralView.setUint16(14, date, true);
+    centralView.setUint32(16, crc32, true);
+    centralView.setUint32(20, size, true);
+    centralView.setUint32(24, size, true);
+    centralView.setUint16(28, nameBytes.length, true);
+    centralView.setUint16(30, 0, true);
+    centralView.setUint16(32, 0, true);
+    centralView.setUint16(34, 0, true);
+    centralView.setUint16(36, 0, true);
+    centralView.setUint32(38, 0, true);
+    centralView.setUint32(42, localOffset >>> 0, true);
+    centralHeader.set(nameBytes, 46);
+
+    centralParts.push(centralHeader);
+    localOffset += localHeader.length + entry.bytes.length;
+  }
+
+  const localBytes = concatUint8Arrays(localParts);
+  const centralBytes = concatUint8Arrays(centralParts);
+
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE, true);
+  endView.setUint16(4, 0, true);
+  endView.setUint16(6, 0, true);
+  endView.setUint16(8, entries.length, true);
+  endView.setUint16(10, entries.length, true);
+  endView.setUint32(12, centralBytes.length >>> 0, true);
+  endView.setUint32(16, localBytes.length >>> 0, true);
+  endView.setUint16(20, 0, true);
+
+  return concatUint8Arrays([localBytes, centralBytes, end]);
+};
+
+const blobToDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read blob as data URL."));
+    reader.readAsDataURL(blob);
+  });
+
+const dataUrlToBytes = async (dataUrl: string) => {
+  const response = await fetch(dataUrl);
+  const buffer = await response.arrayBuffer();
+  return new Uint8Array(buffer);
+};
 
 const buildPanelPath = (context: CanvasRenderingContext2D, panel: Panel) => {
   context.beginPath();
@@ -508,4 +659,20 @@ export const renderProjectToPdfDataUrl = async (pages: Page[]) => {
   }
 
   return pdf.saveAsBase64({ dataUri: true });
+};
+
+export const renderProjectToJpgZipDataUrl = async (pages: Page[]) => {
+  const zipEntries = await Promise.all(
+    pages.map(async (page, index) => {
+      const jpegDataUrl = await renderPageToJpegDataUrl(page, JPG_ZIP_EXPORT_JPEG_QUALITY);
+      return {
+        fileName: `${index + 1}.jpg`,
+        bytes: await dataUrlToBytes(jpegDataUrl),
+      };
+    }),
+  );
+
+  const zipBytes = buildStoredZipArchive(zipEntries);
+  const zipBlob = new Blob([zipBytes], { type: "application/zip" });
+  return blobToDataUrl(zipBlob);
 };

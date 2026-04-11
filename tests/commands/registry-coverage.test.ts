@@ -28,11 +28,13 @@ const {
   mockSaveLocalDraft,
   mockLoadLocalDraft,
   mockRenderPageToPngDataUrl,
+  mockRenderProjectToJpgZipDataUrl,
   mockRenderProjectToPdfDataUrl,
 } = vi.hoisted(() => ({
   mockSaveLocalDraft: vi.fn(() => "2026-03-15T08:30:00.000Z"),
   mockLoadLocalDraft: vi.fn(),
   mockRenderPageToPngDataUrl: vi.fn(async () => "data:image/png;base64,ZmFrZQ=="),
+  mockRenderProjectToJpgZipDataUrl: vi.fn(async () => "data:application/zip;base64,ZmFrZQ=="),
   mockRenderProjectToPdfDataUrl: vi.fn(async () => "data:application/pdf;base64,ZmFrZQ=="),
 }));
 
@@ -45,6 +47,7 @@ vi.mock("../../src/storage/localDraft", () => ({
 
 vi.mock("../../src/export/render", () => ({
   renderPageToPngDataUrl: mockRenderPageToPngDataUrl,
+  renderProjectToJpgZipDataUrl: mockRenderProjectToJpgZipDataUrl,
   renderProjectToPdfDataUrl: mockRenderProjectToPdfDataUrl,
 }));
 
@@ -90,6 +93,8 @@ describe("commandRegistry coverage", () => {
         "setPanelPoints",
         "addPanelPoint",
         "removePanelPoint",
+        "groupSelection",
+        "ungroupSelection",
         "createText",
         "updateText",
         "createBubble",
@@ -97,6 +102,9 @@ describe("commandRegistry coverage", () => {
         "deleteObject",
         "exportPagePng",
         "exportProjectPdf",
+        "exportProjectJpgZip",
+        "selectObjects",
+        "setBubbleInsertState",
       ].sort(),
     );
   });
@@ -398,8 +406,6 @@ describe("commandRegistry coverage", () => {
       y: 320,
       width: 300,
       height: 160,
-      text: "Updated dialogue",
-      fontSize: 30,
       bubbleType: "explosion",
     });
     expect((updatedBubble as { tailTip: { x: number; y: number } }).tailTip.x).toBeGreaterThan(1200);
@@ -456,7 +462,7 @@ describe("commandRegistry coverage", () => {
     expect(harness.readSession().selection).toBeNull();
   });
 
-  it("exports PNG and PDF artifacts with safe names and session metadata", async () => {
+  it("exports PNG, PDF, and JPG ZIP artifacts with safe names and session metadata", async () => {
     const harness = createHarness();
 
     await runCommand(harness, "createProject", { title: "My Great Project!" });
@@ -477,6 +483,16 @@ describe("commandRegistry coverage", () => {
     expect(pdfArtifact).toMatchObject({
       kind: "pdf",
       fileName: "my-great-project.pdf",
+      pageCount: 1,
+    });
+
+    const jpgZipArtifact = await runCommand(harness, "exportProjectJpgZip", {});
+    expect(mockRenderProjectToJpgZipDataUrl).toHaveBeenCalledWith(
+      harness.readSession().project.pages,
+    );
+    expect(jpgZipArtifact).toMatchObject({
+      kind: "jpgZip",
+      fileName: "my-great-project-jpg-pages.zip",
       pageCount: 1,
     });
   });

@@ -47,7 +47,11 @@ import {
   type ObjectRef,
   type Project,
 } from "../domain/schema";
-import { renderPageToPngDataUrl, renderProjectToPdfDataUrl } from "../export/render";
+import {
+  renderPageToPngDataUrl,
+  renderProjectToJpgZipDataUrl,
+  renderProjectToPdfDataUrl,
+} from "../export/render";
 import {
   DEFAULT_LOCALE,
   getDefaultPageName,
@@ -3480,6 +3484,28 @@ const commands = {
       const artifact = {
         kind: "pdf" as const,
         fileName: `${sanitizeFileName(project.title || "mangamaker-project")}.pdf`,
+        dataUrl,
+        pageCount: project.pages.length,
+      };
+      context.setSession({
+        lastExport: artifact,
+        statusMessage: createContextStatus(context, "success", "command.exportReady", {
+          fileName: artifact.fileName,
+        }),
+      });
+      return artifact;
+    },
+  },
+  exportProjectJpgZip: {
+    id: "exportProjectJpgZip",
+    label: "Export Project JPG ZIP",
+    inputSchema: z.object({}),
+    execute: async (context) => {
+      const project = context.getProject();
+      const dataUrl = await renderProjectToJpgZipDataUrl(project.pages);
+      const artifact = {
+        kind: "jpgZip" as const,
+        fileName: `${sanitizeFileName(project.title || "mangamaker-project")}-jpg-pages.zip`,
         dataUrl,
         pageCount: project.pages.length,
       };

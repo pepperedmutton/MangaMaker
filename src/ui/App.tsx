@@ -400,6 +400,14 @@ export const App = () => {
     downloadDataUrl(artifact.fileName, artifact.dataUrl);
   };
 
+  const handleExportProjectJpgZip = async () => {
+    const artifact = (await executeCommand("exportProjectJpgZip", {})) as {
+      fileName: string;
+      dataUrl: string;
+    };
+    downloadDataUrl(artifact.fileName, artifact.dataUrl);
+  };
+
   const handleSaveProject = async () => {
     await executeCommand("saveProject", {});
     await refreshProjectCatalog();
@@ -938,6 +946,7 @@ export const App = () => {
         page={selectedPage}
         activeTool={activeTool}
         onExportProjectPdf={() => void handleExportProjectPdf()}
+        onExportProjectJpgZip={() => void handleExportProjectJpgZip()}
         onImportImage={handleImportImage}
         onCreatePanel={() =>
           selectedPage ? void executeCommand("setTool", { tool: "panel" }) : undefined

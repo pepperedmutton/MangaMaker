@@ -26,7 +26,7 @@ export type PanelImageEditingState = {
 } | null;
 
 export type ExportArtifact = {
-  kind: "png" | "pdf";
+  kind: "png" | "pdf" | "jpgZip";
   fileName: string;
   dataUrl: string;
   pageId?: string;

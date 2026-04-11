@@ -54,6 +54,7 @@ type InspectorProps = {
   page: Page | null;
   activeTool: ToolMode;
   onExportProjectPdf: () => void;
+  onExportProjectJpgZip: () => void;
   onImportImage: () => void;
   onCreatePanel?: () => void;
   onInsertBubble?: (bubbleType: Exclude<Bubble["bubbleType"], "custom">) => void;
@@ -1103,6 +1104,7 @@ export const Inspector = ({
   page,
   activeTool,
   onExportProjectPdf,
+  onExportProjectJpgZip,
   onImportImage,
   onCreatePanel,
   onInsertBubble,
@@ -1169,9 +1171,14 @@ export const Inspector = ({
           </section>
           <section>
             <p className="eyebrow">{t("inspector.projectExport")}</p>
-            <button className="primary-button" onClick={onExportProjectPdf}>
-              {t("inspector.exportProjectPdf")}
-            </button>
+            <div className="insp-image-actions">
+              <button className="primary-button" onClick={onExportProjectPdf}>
+                {t("inspector.exportProjectPdf")}
+              </button>
+              <button className="primary-button" onClick={onExportProjectJpgZip}>
+                {t("inspector.exportProjectJpgZip")}
+              </button>
+            </div>
           </section>
         </>
       ) : "style" in selectedObject ? (
