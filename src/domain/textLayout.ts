@@ -105,7 +105,7 @@ const resolveKinsokuRules = (content: string, mode: KinsokuMode = "auto"): Kinso
   return CJK_KINSOKU_RULES;
 };
 
-const FULL_WIDTH_SPACE = "\u3000";
+export const FULL_WIDTH_SPACE = "\u3000";
 const VERTICAL_ELLIPSIS = "\uFE19";
 const VERTICAL_EM_DASH = "\uFE31";
 const VERTICAL_EN_DASH = "\uFE32";
@@ -123,6 +123,59 @@ const HORIZONTAL_ELLIPSIS = "\u2026";
 const MIDLINE_HORIZONTAL_ELLIPSIS = "\u22EF";
 const MANGA_QUOTE_OPEN = "\u300C";
 const MANGA_QUOTE_CLOSE = "\u300D";
+const VERTICAL_CENTERED_PUNCTUATION = new Set([
+  VERTICAL_QUESTION,
+  VERTICAL_EXCLAMATION,
+  VERTICAL_ELLIPSIS,
+  VERTICAL_EM_DASH,
+  VERTICAL_EN_DASH,
+  VERTICAL_COMMA,
+  VERTICAL_IDEOGRAPHIC_COMMA,
+]);
+const VERTICAL_PUNCTUATION_FINE_TUNE_X: Record<string, number> = {
+  [VERTICAL_QUESTION]: 0,
+  [VERTICAL_EXCLAMATION]: 0,
+  [VERTICAL_ELLIPSIS]: 0,
+  [VERTICAL_EM_DASH]: 0,
+  [VERTICAL_EN_DASH]: 0,
+  [VERTICAL_COMMA]: 0,
+  [VERTICAL_IDEOGRAPHIC_COMMA]: 0,
+};
+
+export type TextDisplayLayoutInput = {
+  content: string;
+  direction: TextDirection;
+  width: number;
+  height: number;
+  fontSize: number;
+  fontFamily: string;
+  fontWeight: number;
+  textAlign: "left" | "center" | "right";
+  verticalAlign: "top" | "middle" | "bottom";
+  letterSpacing?: number;
+  lineSpacing?: number;
+  measureText?: TextMeasureFn;
+};
+
+export type TextDisplayLayout = {
+  lineHeight: number;
+  letterSpacing: number;
+  lineSpacing: number;
+  renderLineHeight: number;
+  displayLines: string[];
+  displayContent: string;
+  vertical: {
+    cellGrid: string[][];
+    rowCount: number;
+    columnCount: number;
+    rowAdvance: number;
+    columnAdvance: number;
+    blockWidth: number;
+    blockHeight: number;
+    offsetX: number;
+    offsetY: number;
+  };
+};
 
 export const resolveVerticalColumnAlignFromTextAlign = (
   textAlign: "left" | "center" | "right",
@@ -810,6 +863,48 @@ export const createCanvasTextMeasurer = (
   };
 };
 
+export const createVerticalPunctuationOffsetMeasurer = (
+  fontSize: number,
+  fontFamily: string,
+  fontWeight: number,
+) => {
+  if (typeof document === "undefined") {
+    return (_unit: string) => 0;
+  }
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return (_unit: string) => 0;
+  }
+  const font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  const cache = new Map<string, number>();
+  return (unit: string) => {
+    if (!VERTICAL_CENTERED_PUNCTUATION.has(unit)) {
+      return 0;
+    }
+    const cached = cache.get(unit);
+    if (cached !== undefined) {
+      return cached;
+    }
+    context.font = font;
+    const metrics = context.measureText(unit);
+    const left =
+      Number.isFinite(metrics.actualBoundingBoxLeft) ? metrics.actualBoundingBoxLeft : 0;
+    const right =
+      Number.isFinite(metrics.actualBoundingBoxRight)
+        ? metrics.actualBoundingBoxRight
+        : metrics.width;
+    const leftEdgeX = -left;
+    const rightEdgeX = right;
+    const inkCenterX = (leftEdgeX + rightEdgeX) * 0.5;
+    const advanceCenterX = metrics.width * 0.5;
+    const offsetX =
+      advanceCenterX - inkCenterX + (VERTICAL_PUNCTUATION_FINE_TUNE_X[unit] ?? 0);
+    cache.set(unit, offsetX);
+    return offsetX;
+  };
+};
+
 export const getTextLineHeightByDirection = (direction: TextDirection) =>
   direction === "vertical" ? 1.1 : 1.35;
 
@@ -847,3 +942,70 @@ export const layoutTextForDisplayLines = (content: string, options: TextLayoutOp
 
 export const layoutTextForDisplayContent = (content: string, options: TextLayoutOptions) =>
   layoutTextForDisplayLines(content, options).join("\n");
+
+export const resolveTextDisplayLayout = (input: TextDisplayLayoutInput): TextDisplayLayout => {
+  const lineHeight = getTextLineHeightByDirection(input.direction);
+  const letterSpacing = input.letterSpacing ?? 0;
+  const lineSpacing = input.lineSpacing ?? 0;
+  const renderLineHeight = Math.max(0.1, lineHeight + lineSpacing / Math.max(input.fontSize, 1));
+  const textMeasurer =
+    input.measureText ?? createCanvasTextMeasurer(input.fontSize, input.fontFamily, input.fontWeight);
+
+  const displayLines = layoutTextForDisplayLines(input.content, {
+    direction: input.direction,
+    maxWidth: input.width,
+    maxHeight: input.height,
+    fontSize: input.fontSize,
+    lineHeight,
+    letterSpacing,
+    lineSpacing,
+    verticalColumnAlign: resolveVerticalColumnAlignFromTextAlign(input.textAlign),
+    measureText: textMeasurer,
+  });
+
+  const verticalCellGrid = displayLines.map((line) => splitTextToGraphemes(line));
+  const verticalRowCount = Math.max(1, displayLines.length);
+  const verticalColumnCount = Math.max(1, ...verticalCellGrid.map((row) => row.length));
+  const verticalRowAdvance = Math.max(1, input.fontSize * lineHeight + letterSpacing);
+  const verticalSampleCellWidth = Math.max(
+    input.fontSize * 0.75,
+    textMeasurer("\u56fd"),
+    textMeasurer("M"),
+    textMeasurer("\u53e3"),
+  );
+  const verticalColumnAdvance = Math.max(1, verticalSampleCellWidth * 1.04 + lineSpacing);
+  const verticalBlockWidth = verticalColumnCount * verticalColumnAdvance;
+  const verticalBlockHeight = verticalRowCount * verticalRowAdvance;
+  const verticalOffsetX =
+    input.textAlign === "center"
+      ? (input.width - verticalBlockWidth) * 0.5
+      : input.textAlign === "right"
+        ? input.width - verticalBlockWidth
+        : 0;
+  const verticalOffsetY =
+    input.verticalAlign === "middle"
+      ? (input.height - verticalBlockHeight) * 0.5
+      : input.verticalAlign === "bottom"
+        ? input.height - verticalBlockHeight
+        : 0;
+
+  return {
+    lineHeight,
+    letterSpacing,
+    lineSpacing,
+    renderLineHeight,
+    displayLines,
+    displayContent: displayLines.join("\n"),
+    vertical: {
+      cellGrid: verticalCellGrid,
+      rowCount: verticalRowCount,
+      columnCount: verticalColumnCount,
+      rowAdvance: verticalRowAdvance,
+      columnAdvance: verticalColumnAdvance,
+      blockWidth: verticalBlockWidth,
+      blockHeight: verticalBlockHeight,
+      offsetX: verticalOffsetX,
+      offsetY: verticalOffsetY,
+    },
+  };
+};

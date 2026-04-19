@@ -3,12 +3,11 @@ import {
   getBubbleBasePoints,
   getRenderableLayers,
 } from "../domain/helpers";
-import type { Page, Panel } from "../domain/schema";
+import type { Page, Panel, TextItem } from "../domain/schema";
 import {
-  getTextLineHeightByDirection,
-  layoutTextForDisplayContent,
-  resolveVerticalColumnAlignFromTextAlign,
-  splitTextToGraphemes,
+  createVerticalPunctuationOffsetMeasurer,
+  FULL_WIDTH_SPACE,
+  resolveTextDisplayLayout,
 } from "../domain/textLayout";
 import {
   getBubbleBodyPath,
@@ -24,33 +23,6 @@ const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
 const ZIP_VERSION = 20;
 const ZIP_UTF8_FLAG = 0x0800;
 const ZIP_STORE_METHOD = 0;
-const FULL_WIDTH_SPACE = "\u3000";
-const DEFAULT_TEXT_COLOR = "#121212";
-const VERTICAL_QUESTION = "\uFE16";
-const VERTICAL_EXCLAMATION = "\uFE15";
-const VERTICAL_ELLIPSIS = "\uFE19";
-const VERTICAL_EM_DASH = "\uFE31";
-const VERTICAL_EN_DASH = "\uFE32";
-const VERTICAL_COMMA = "\uFE10";
-const VERTICAL_IDEOGRAPHIC_COMMA = "\uFE11";
-const VERTICAL_CENTERED_PUNCTUATION = new Set([
-  VERTICAL_QUESTION,
-  VERTICAL_EXCLAMATION,
-  VERTICAL_ELLIPSIS,
-  VERTICAL_EM_DASH,
-  VERTICAL_EN_DASH,
-  VERTICAL_COMMA,
-  VERTICAL_IDEOGRAPHIC_COMMA,
-]);
-const VERTICAL_PUNCTUATION_FINE_TUNE_X: Record<string, number> = {
-  [VERTICAL_QUESTION]: 0,
-  [VERTICAL_EXCLAMATION]: 0,
-  [VERTICAL_ELLIPSIS]: 0,
-  [VERTICAL_EM_DASH]: 0,
-  [VERTICAL_EN_DASH]: 0,
-  [VERTICAL_COMMA]: 0,
-  [VERTICAL_IDEOGRAPHIC_COMMA]: 0,
-};
 
 const loadImage = (src: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
@@ -204,6 +176,17 @@ const dataUrlToBytes = async (dataUrl: string) => {
   return new Uint8Array(buffer);
 };
 
+type KonvaModule = typeof import("konva");
+
+let cachedKonvaModule: Promise<KonvaModule> | null = null;
+
+const loadKonvaModule = async () => {
+  if (!cachedKonvaModule) {
+    cachedKonvaModule = import("konva");
+  }
+  return cachedKonvaModule;
+};
+
 const buildPanelPath = (context: CanvasRenderingContext2D, panel: Panel) => {
   context.beginPath();
   context.moveTo(panel.x + panel.points[0].x, panel.y + panel.points[0].y);
@@ -237,243 +220,118 @@ const drawPanelImage = async (context: CanvasRenderingContext2D, panel: Panel) =
   );
   context.restore();
 };
+const buildKonvaTextNode = (Konva: KonvaModule["default"], text: TextItem) => {
+  const layout = resolveTextDisplayLayout({
+    content: text.content,
+    direction: text.direction,
+    width: text.width,
+    height: text.height,
+    fontSize: text.fontSize,
+    fontFamily: text.fontFamily,
+    fontWeight: text.fontWeight,
+    textAlign: text.textAlign,
+    verticalAlign: text.verticalAlign,
+    letterSpacing: text.letterSpacing,
+    lineSpacing: text.lineSpacing,
+  });
 
-type TextAlign = "left" | "center" | "right";
-type VerticalAlign = "top" | "middle" | "bottom";
-
-const resolveAlignedTextX = (
-  boxX: number,
-  boxWidth: number,
-  lineWidth: number,
-  align: TextAlign,
-) => {
-  if (align === "center") {
-    return boxX + (boxWidth - lineWidth) * 0.5;
-  }
-  if (align === "right") {
-    return boxX + boxWidth - lineWidth;
-  }
-  return boxX;
-};
-
-const resolveAlignedTextYOffset = (
-  boxHeight: number,
-  blockHeight: number,
-  verticalAlign: VerticalAlign,
-) => {
-  const available = boxHeight - blockHeight;
-  if (verticalAlign === "middle") {
-    return available * 0.5;
-  }
-  if (verticalAlign === "bottom") {
-    return available;
-  }
-  return 0;
-};
-
-const createVerticalPunctuationOffsetMeasurer = (
-  context: CanvasRenderingContext2D,
-  fontSize: number,
-  fontFamily: string,
-  fontWeight: number,
-) => {
-  const font = `${fontWeight} ${fontSize}px ${fontFamily}`;
-  const cache = new Map<string, number>();
-  return (unit: string) => {
-    if (!VERTICAL_CENTERED_PUNCTUATION.has(unit)) {
-      return 0;
-    }
-    const cached = cache.get(unit);
-    if (cached !== undefined) {
-      return cached;
-    }
-    context.font = font;
-    const metrics = context.measureText(unit);
-    const left =
-      Number.isFinite(metrics.actualBoundingBoxLeft) ? metrics.actualBoundingBoxLeft : 0;
-    const right =
-      Number.isFinite(metrics.actualBoundingBoxRight)
-        ? metrics.actualBoundingBoxRight
-        : metrics.width;
-    const leftEdgeX = -left;
-    const rightEdgeX = right;
-    const inkCenterX = (leftEdgeX + rightEdgeX) * 0.5;
-    const advanceCenterX = metrics.width * 0.5;
-    const offsetX =
-      advanceCenterX - inkCenterX + (VERTICAL_PUNCTUATION_FINE_TUNE_X[unit] ?? 0);
-    cache.set(unit, offsetX);
-    return offsetX;
-  };
-};
-
-const splitGraphemes = (value: string) => splitTextToGraphemes(value);
-
-const measureLineWidthWithLetterSpacing = (
-  context: CanvasRenderingContext2D,
-  line: string,
-  letterSpacing: number,
-) => {
-  if (line.length === 0) {
-    return 0;
-  }
-  if (Math.abs(letterSpacing) < 0.0001) {
-    return context.measureText(line).width;
-  }
-  const units = splitGraphemes(line);
-  if (units.length === 0) {
-    return 0;
-  }
-  const glyphWidth = units.reduce((width, unit) => width + context.measureText(unit).width, 0);
-  return glyphWidth + (units.length - 1) * letterSpacing;
-};
-
-const drawLineWithLetterSpacing = (
-  context: CanvasRenderingContext2D,
-  line: string,
-  x: number,
-  baselineY: number,
-  letterSpacing: number,
-) => {
-  if (line.length === 0) {
-    return;
-  }
-  if (Math.abs(letterSpacing) < 0.0001) {
-    context.fillText(line, x, baselineY);
-    return;
-  }
-  const units = splitGraphemes(line);
-  let cursorX = x;
-  for (const unit of units) {
-    context.fillText(unit, cursorX, baselineY);
-    cursorX += context.measureText(unit).width + letterSpacing;
-  }
-};
-
-const resolveCanvasTextColor = (
-  context: CanvasRenderingContext2D,
-  color: string,
-  fallback = DEFAULT_TEXT_COLOR,
-) => {
-  const normalized = typeof color === "string" ? color.trim() : "";
-  context.fillStyle = fallback;
-  if (normalized.length > 0) {
-    context.fillStyle = normalized;
-  }
-  return String(context.fillStyle);
-};
-
-const drawTextInBox = (
-  context: CanvasRenderingContext2D,
-  options: {
-    content: string;
-    direction: "horizontal" | "vertical";
-    boxX: number;
-    boxY: number;
-    boxWidth: number;
-    boxHeight: number;
-    fontSize: number;
-    fontFamily: string;
-    fontWeight: number;
-    lineHeightRatio: number;
-    letterSpacing: number;
-    lineSpacing: number;
-    textAlign: TextAlign;
-    verticalAlign: VerticalAlign;
-    color: string;
-  },
-) => {
-  const letterSpacing = Number.isFinite(options.letterSpacing) ? options.letterSpacing : 0;
-  const lineSpacing = Number.isFinite(options.lineSpacing) ? options.lineSpacing : 0;
-  const resolvedColor = resolveCanvasTextColor(context, options.color);
-  const lines = options.content.replace(/\r\n/g, "\n").split("\n");
-  const lineAdvance = Math.max(1, options.fontSize * options.lineHeightRatio + lineSpacing);
-  if (options.direction === "vertical") {
-    const rowCount = Math.max(1, lines.length);
-    const columnCount = Math.max(1, ...lines.map((line) => splitGraphemes(line).length));
-    // Keep vertical row stepping consistent with CanvasView.
-    const rowAdvance = Math.max(1, options.fontSize * options.lineHeightRatio + letterSpacing);
-    const sampleCellWidth = Math.max(
-      options.fontSize * 0.75,
-      context.measureText("\u56fd").width,
-      context.measureText("M").width,
-      context.measureText("\u53e3").width,
-    );
-    const columnAdvance = Math.max(1, sampleCellWidth * 1.04 + lineSpacing);
-    const blockWidth = columnCount * columnAdvance;
-    const blockHeight = rowCount * rowAdvance;
-    const originX = resolveAlignedTextX(
-      options.boxX,
-      options.boxWidth,
-      blockWidth,
-      options.textAlign,
-    );
-    const originY =
-      options.boxY +
-      resolveAlignedTextYOffset(options.boxHeight, blockHeight, options.verticalAlign);
-
-    context.save();
-    context.fillStyle = resolvedColor;
-    context.beginPath();
-    context.rect(options.boxX, options.boxY, options.boxWidth, options.boxHeight);
-    context.clip();
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    const punctuationOffsetMeasurer = createVerticalPunctuationOffsetMeasurer(
-      context,
-      options.fontSize,
-      options.fontFamily,
-      options.fontWeight,
-    );
-
-    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-      const row = splitGraphemes(lines[rowIndex] ?? "");
-      for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
-        const unit = row[columnIndex] ?? FULL_WIDTH_SPACE;
-        if (unit.length === 0 || unit === FULL_WIDTH_SPACE) {
-          continue;
-        }
-        context.fillText(
-          unit,
-          originX +
-            columnIndex * columnAdvance +
-            columnAdvance * 0.5 +
-            punctuationOffsetMeasurer(unit),
-          originY + rowIndex * rowAdvance + rowAdvance * 0.5,
-        );
-      }
-    }
-
-    context.restore();
-    return;
+  if (text.direction !== "vertical") {
+    return new Konva.Text({
+      x: text.x,
+      y: text.y,
+      text: layout.displayContent,
+      fontSize: text.fontSize,
+      fontFamily: text.fontFamily,
+      fontStyle: String(text.fontWeight),
+      letterSpacing: layout.letterSpacing,
+      fill: text.color,
+      width: text.width,
+      height: text.height,
+      align: text.textAlign,
+      verticalAlign: text.verticalAlign,
+      wrap: "none",
+      lineHeight: layout.renderLineHeight,
+      listening: false,
+    });
   }
 
-  const blockHeight = lines.length * lineAdvance;
-  const yOffset = resolveAlignedTextYOffset(
-    options.boxHeight,
-    blockHeight,
-    options.verticalAlign,
+  const punctuationOffsetMeasurer = createVerticalPunctuationOffsetMeasurer(
+    text.fontSize,
+    text.fontFamily,
+    text.fontWeight,
   );
-  let baselineY = options.boxY + yOffset + options.fontSize;
+  const group = new Konva.Group({
+    x: text.x,
+    y: text.y,
+    clipFunc: (ctx) => {
+      ctx.beginPath();
+      ctx.rect(0, 0, text.width, text.height);
+      ctx.closePath();
+    },
+    listening: false,
+  });
 
-  context.save();
-  context.fillStyle = resolvedColor;
-  context.beginPath();
-  context.rect(options.boxX, options.boxY, options.boxWidth, options.boxHeight);
-  context.clip();
-
-  for (const line of lines) {
-    const lineWidth = measureLineWidthWithLetterSpacing(context, line, letterSpacing);
-    const lineX = resolveAlignedTextX(
-      options.boxX,
-      options.boxWidth,
-      lineWidth,
-      options.textAlign,
-    );
-    drawLineWithLetterSpacing(context, line, lineX, baselineY, letterSpacing);
-    baselineY += lineAdvance;
+  for (let rowIndex = 0; rowIndex < layout.vertical.rowCount; rowIndex += 1) {
+    const row = layout.vertical.cellGrid[rowIndex] ?? [];
+    for (let columnIndex = 0; columnIndex < layout.vertical.columnCount; columnIndex += 1) {
+      const unit = row[columnIndex] ?? FULL_WIDTH_SPACE;
+      if (unit.length === 0 || unit === FULL_WIDTH_SPACE) {
+        continue;
+      }
+      group.add(
+        new Konva.Text({
+          text: unit,
+          fontSize: text.fontSize,
+          fontFamily: text.fontFamily,
+          fontStyle: String(text.fontWeight),
+          fill: text.color,
+          x:
+            layout.vertical.offsetX +
+            columnIndex * layout.vertical.columnAdvance +
+            punctuationOffsetMeasurer(unit),
+          y: layout.vertical.offsetY + rowIndex * layout.vertical.rowAdvance,
+          width: layout.vertical.columnAdvance,
+          height: layout.vertical.rowAdvance,
+          align: "center",
+          verticalAlign: "middle",
+          wrap: "none",
+          lineHeight: 1,
+          listening: false,
+        }),
+      );
+    }
   }
 
-  context.restore();
+  return group;
+};
+
+const renderTextLayersToCanvas = async (
+  textLayers: TextItem[],
+  pageWidth: number,
+  pageHeight: number,
+) => {
+  if (textLayers.length === 0 || typeof document === "undefined") {
+    return null;
+  }
+
+  const Konva = (await loadKonvaModule()).default;
+  const container = document.createElement("div");
+  const stage = new Konva.Stage({
+    container,
+    width: pageWidth,
+    height: pageHeight,
+  });
+  const layer = new Konva.Layer({ listening: false });
+  stage.add(layer);
+
+  for (const text of textLayers) {
+    layer.add(buildKonvaTextNode(Konva, text));
+  }
+
+  layer.draw();
+  const canvas = layer.toCanvas({ pixelRatio: 1 });
+  stage.destroy();
+  return canvas;
 };
 
 const getThoughtTailCirclesForDisplay = (bubble: Page["bubbles"][number]) => {
@@ -570,6 +428,7 @@ export const renderPageToCanvas = async (page: Page) => {
     ...renderableLayers.filter((entry) => entry.objectType !== "text"),
     ...renderableLayers.filter((entry) => entry.objectType === "text"),
   ];
+  const orderedTextLayers: TextItem[] = [];
 
   for (const entry of orderedLayers) {
     if (entry.objectType === "panel") {
@@ -586,44 +445,17 @@ export const renderPageToCanvas = async (page: Page) => {
     }
 
     if (entry.objectType === "text") {
-      const text = entry.object;
-      const letterSpacing = text.letterSpacing ?? 0;
-      const lineSpacing = text.lineSpacing ?? 0;
-      const lineHeightRatio = getTextLineHeightByDirection(text.direction);
-      context.font = `${text.fontWeight} ${text.fontSize}px ${text.fontFamily}`;
-      const displayContent = layoutTextForDisplayContent(text.content, {
-        direction: text.direction,
-        maxWidth: text.width,
-        maxHeight: text.height,
-        fontSize: text.fontSize,
-        lineHeight: lineHeightRatio,
-        letterSpacing,
-        lineSpacing,
-        verticalColumnAlign: resolveVerticalColumnAlignFromTextAlign(text.textAlign),
-        measureText: (value) => context.measureText(value).width,
-      });
-      drawTextInBox(context, {
-        content: displayContent,
-        direction: text.direction,
-        boxX: text.x,
-        boxY: text.y,
-        boxWidth: text.width,
-        boxHeight: text.height,
-        fontSize: text.fontSize,
-        fontFamily: text.fontFamily,
-        fontWeight: text.fontWeight,
-        lineHeightRatio,
-        letterSpacing,
-        lineSpacing,
-        textAlign: text.textAlign,
-        verticalAlign: text.verticalAlign,
-        color: text.color,
-      });
+      orderedTextLayers.push(entry.object);
       continue;
     }
 
     const bubble = entry.object;
     drawBubble(context, bubble);
+  }
+
+  const textCanvas = await renderTextLayersToCanvas(orderedTextLayers, page.width, page.height);
+  if (textCanvas) {
+    context.drawImage(textCanvas, 0, 0);
   }
 
   return canvas;

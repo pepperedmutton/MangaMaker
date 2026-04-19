@@ -185,6 +185,117 @@ const normalizeProjectAssetPaths = (projectJson: string, projectFolder: string) 
   return changed ? JSON.stringify(parsed) : projectJson;
 };
 
+type ProjectAssetReference = {
+  sourceFolder: string;
+  assetRelativePath: string;
+};
+
+const PROJECT_ASSET_PATH_PATTERN = /^\/projects\/([^/]+)\/assets\/(.+)$/;
+
+const extractProjectAssetReferences = (projectJson: string) => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(projectJson);
+  } catch {
+    return [] as ProjectAssetReference[];
+  }
+
+  const seen = new Set<string>();
+  const references: ProjectAssetReference[] = [];
+
+  const visit = (value: unknown): void => {
+    if (typeof value === "string") {
+      const match = value.match(PROJECT_ASSET_PATH_PATTERN);
+      if (!match) {
+        return;
+      }
+      const sourceFolder = sanitizePathComponent(match[1] ?? "", "");
+      if (!sourceFolder) {
+        return;
+      }
+      let assetRelativePath = (match[2] ?? "").trim();
+      if (!assetRelativePath) {
+        return;
+      }
+      try {
+        assetRelativePath = decodeURIComponent(assetRelativePath);
+      } catch {
+        // Keep raw path when decoding fails.
+      }
+      assetRelativePath = assetRelativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+      if (!assetRelativePath) {
+        return;
+      }
+      const key = `${sourceFolder}/${assetRelativePath}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      references.push({
+        sourceFolder,
+        assetRelativePath,
+      });
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        visit(entry);
+      }
+      return;
+    }
+
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    for (const entry of Object.values(value as Record<string, unknown>)) {
+      visit(entry);
+    }
+  };
+
+  visit(parsed);
+  return references;
+};
+
+const resolvePathInsideRoot = (root: string, relative: string) => {
+  const candidate = path.resolve(root, relative);
+  const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (!candidate.startsWith(rootWithSep)) {
+    return null;
+  }
+  return candidate;
+};
+
+const copyReferencedProjectAssets = async (
+  root: string,
+  targetProjectFolder: string,
+  targetAssetsDir: string,
+  references: ProjectAssetReference[],
+) => {
+  for (const reference of references) {
+    if (reference.sourceFolder === targetProjectFolder) {
+      continue;
+    }
+    const sourceAssetsDir = path.join(root, reference.sourceFolder, PROJECT_ASSETS_DIR);
+    const sourcePath = resolvePathInsideRoot(sourceAssetsDir, reference.assetRelativePath);
+    const targetPath = resolvePathInsideRoot(targetAssetsDir, reference.assetRelativePath);
+    if (!sourcePath || !targetPath) {
+      continue;
+    }
+    const sourceStats = await fsp.stat(sourcePath).catch(() => null);
+    if (!sourceStats?.isFile()) {
+      continue;
+    }
+    const targetStats = await fsp.stat(targetPath).catch(() => null);
+    if (targetStats?.isFile()) {
+      continue;
+    }
+    await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+    await fsp.copyFile(sourcePath, targetPath);
+  }
+};
+
 const findLatestProjectFolder = async (root: string) => {
   const entries = await fsp.readdir(root, { withFileTypes: true });
   let latestFolder: string | null = null;
@@ -644,6 +755,8 @@ const attachWebPersistenceMiddleware = (
         const projectFolder = path.basename(projectDir);
         const assetsDir = path.join(projectDir, PROJECT_ASSETS_DIR);
         await fsp.mkdir(assetsDir, { recursive: true });
+        const assetReferences = extractProjectAssetReferences(payload.project_json);
+        await copyReferencedProjectAssets(root, projectFolder, assetsDir, assetReferences);
         const normalizedProjectJson = normalizeProjectAssetPaths(payload.project_json, projectFolder);
         await fsp.writeFile(path.join(projectDir, PROJECT_JSON_FILE), normalizedProjectJson, "utf8");
         await fsp.writeFile(path.join(root, PROJECT_META_FILE), projectFolder, "utf8");

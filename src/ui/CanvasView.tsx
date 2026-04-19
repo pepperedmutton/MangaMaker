@@ -34,11 +34,9 @@ import {
 } from "../domain/helpers";
 import type { Bubble, Page, Panel, Point, Rect as PanelRect, TextItem } from "../domain/schema";
 import {
-  createCanvasTextMeasurer,
-  getTextLineHeightByDirection,
-  layoutTextForDisplayLines,
-  resolveVerticalColumnAlignFromTextAlign,
-  splitTextToGraphemes,
+  createVerticalPunctuationOffsetMeasurer,
+  FULL_WIDTH_SPACE,
+  resolveTextDisplayLayout,
 } from "../domain/textLayout";
 import { useI18n } from "../i18n/useI18n";
 import { persistImportedImageForProject } from "../storage/projectFiles";
@@ -145,32 +143,6 @@ const EDGE_HANDLE_THICKNESS = 10;
 const EDGE_AXIS_LOCK_ENTER_RATIO = 0.45;
 const EDGE_AXIS_LOCK_EXIT_RATIO = 0.75;
 const CUSTOM_BUBBLE_CLOSE_DISTANCE_PX = 9;
-const FULL_WIDTH_SPACE = "\u3000";
-const VERTICAL_QUESTION = "\uFE16";
-const VERTICAL_EXCLAMATION = "\uFE15";
-const VERTICAL_ELLIPSIS = "\uFE19";
-const VERTICAL_EM_DASH = "\uFE31";
-const VERTICAL_EN_DASH = "\uFE32";
-const VERTICAL_COMMA = "\uFE10";
-const VERTICAL_IDEOGRAPHIC_COMMA = "\uFE11";
-const VERTICAL_CENTERED_PUNCTUATION = new Set([
-  VERTICAL_QUESTION,
-  VERTICAL_EXCLAMATION,
-  VERTICAL_ELLIPSIS,
-  VERTICAL_EM_DASH,
-  VERTICAL_EN_DASH,
-  VERTICAL_COMMA,
-  VERTICAL_IDEOGRAPHIC_COMMA,
-]);
-const VERTICAL_PUNCTUATION_FINE_TUNE_X: Record<string, number> = {
-  [VERTICAL_QUESTION]: 0,
-  [VERTICAL_EXCLAMATION]: 0,
-  [VERTICAL_ELLIPSIS]: 0,
-  [VERTICAL_EM_DASH]: 0,
-  [VERTICAL_EN_DASH]: 0,
-  [VERTICAL_COMMA]: 0,
-  [VERTICAL_IDEOGRAPHIC_COMMA]: 0,
-};
 
 type CanvasLayoutSnapshot = {
   scale: number;
@@ -254,48 +226,6 @@ const useImageElement = (src: string | null | undefined) => {
   }, [src]);
 
   return image;
-};
-
-const createVerticalPunctuationOffsetMeasurer = (
-  fontSize: number,
-  fontFamily: string,
-  fontWeight: number,
-) => {
-  if (typeof document === "undefined") {
-    return (_unit: string) => 0;
-  }
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d");
-  if (!context) {
-    return (_unit: string) => 0;
-  }
-  const font = `${fontWeight} ${fontSize}px ${fontFamily}`;
-  const cache = new Map<string, number>();
-  return (unit: string) => {
-    if (!VERTICAL_CENTERED_PUNCTUATION.has(unit)) {
-      return 0;
-    }
-    const cached = cache.get(unit);
-    if (cached !== undefined) {
-      return cached;
-    }
-    context.font = font;
-    const metrics = context.measureText(unit);
-    const left =
-      Number.isFinite(metrics.actualBoundingBoxLeft) ? metrics.actualBoundingBoxLeft : 0;
-    const right =
-      Number.isFinite(metrics.actualBoundingBoxRight)
-        ? metrics.actualBoundingBoxRight
-        : metrics.width;
-    const leftEdgeX = -left;
-    const rightEdgeX = right;
-    const inkCenterX = (leftEdgeX + rightEdgeX) * 0.5;
-    const advanceCenterX = metrics.width * 0.5;
-    const offsetX =
-      advanceCenterX - inkCenterX + (VERTICAL_PUNCTUATION_FINE_TUNE_X[unit] ?? 0);
-    cache.set(unit, offsetX);
-    return offsetX;
-  };
 };
 
 const getPointFromEvent = (
@@ -1772,14 +1702,36 @@ const TextNode = ({
     height: number;
   } | null>(null);
   const displayRect = liveRect ?? item;
-  const lineHeight = getTextLineHeightByDirection(item.direction);
-  const letterSpacing = item.letterSpacing ?? 0;
-  const lineSpacing = item.lineSpacing ?? 0;
-  const renderLineHeight = Math.max(0.1, lineHeight + lineSpacing / Math.max(item.fontSize, 1));
-  const textMeasurer = useMemo(
-    () => createCanvasTextMeasurer(item.fontSize, item.fontFamily, item.fontWeight),
-    [item.fontSize, item.fontFamily, item.fontWeight],
+  const textLayout = useMemo(
+    () =>
+      resolveTextDisplayLayout({
+        content: item.content,
+        direction: item.direction,
+        width: displayRect.width,
+        height: displayRect.height,
+        fontSize: item.fontSize,
+        fontFamily: item.fontFamily,
+        fontWeight: item.fontWeight,
+        textAlign: item.textAlign,
+        verticalAlign: item.verticalAlign,
+        letterSpacing: item.letterSpacing,
+        lineSpacing: item.lineSpacing,
+      }),
+    [
+      item.content,
+      item.direction,
+      displayRect.width,
+      displayRect.height,
+      item.fontSize,
+      item.fontFamily,
+      item.fontWeight,
+      item.textAlign,
+      item.verticalAlign,
+      item.letterSpacing,
+      item.lineSpacing,
+    ],
   );
+  const letterSpacing = textLayout.letterSpacing;
   const verticalPunctuationOffsetMeasurer = useMemo(
     () =>
       createVerticalPunctuationOffsetMeasurer(
@@ -1789,61 +1741,15 @@ const TextNode = ({
       ),
     [item.fontSize, item.fontFamily, item.fontWeight],
   );
-  const displayLines = useMemo(
-    () =>
-      layoutTextForDisplayLines(item.content, {
-        direction: item.direction,
-        maxWidth: displayRect.width,
-        maxHeight: displayRect.height,
-        fontSize: item.fontSize,
-        lineHeight,
-        letterSpacing,
-        lineSpacing,
-        verticalColumnAlign: resolveVerticalColumnAlignFromTextAlign(item.textAlign),
-        measureText: textMeasurer,
-      }),
-    [
-      item.content,
-      item.direction,
-      displayRect.width,
-      displayRect.height,
-      item.fontSize,
-      item.textAlign,
-      letterSpacing,
-      lineSpacing,
-      lineHeight,
-      textMeasurer,
-    ],
-  );
-  const displayContent = useMemo(() => displayLines.join("\n"), [displayLines]);
-  const verticalCellGrid = useMemo(
-    () => displayLines.map((line) => splitTextToGraphemes(line)),
-    [displayLines],
-  );
-  const verticalRowCount = Math.max(1, displayLines.length);
-  const verticalColumnCount = Math.max(1, ...verticalCellGrid.map((row) => row.length));
-  const verticalRowAdvance = Math.max(1, item.fontSize * lineHeight + letterSpacing) * scale;
-  const verticalSampleCellWidth = Math.max(
-    item.fontSize * 0.75,
-    textMeasurer("\u56fd"),
-    textMeasurer("M"),
-    textMeasurer("\u53e3"),
-  );
-  const verticalColumnAdvance = Math.max(1, verticalSampleCellWidth * 1.04 + lineSpacing) * scale;
-  const verticalBlockWidth = verticalColumnCount * verticalColumnAdvance;
-  const verticalBlockHeight = verticalRowCount * verticalRowAdvance;
-  const verticalOffsetX =
-    item.textAlign === "center"
-      ? (displayRect.width * scale - verticalBlockWidth) * 0.5
-      : item.textAlign === "right"
-        ? displayRect.width * scale - verticalBlockWidth
-        : 0;
-  const verticalOffsetY =
-    item.verticalAlign === "middle"
-      ? (displayRect.height * scale - verticalBlockHeight) * 0.5
-      : item.verticalAlign === "bottom"
-        ? displayRect.height * scale - verticalBlockHeight
-        : 0;
+  const displayLines = textLayout.displayLines;
+  const displayContent = textLayout.displayContent;
+  const verticalCellGrid = textLayout.vertical.cellGrid;
+  const verticalRowCount = textLayout.vertical.rowCount;
+  const verticalColumnCount = textLayout.vertical.columnCount;
+  const verticalRowAdvance = textLayout.vertical.rowAdvance * scale;
+  const verticalColumnAdvance = textLayout.vertical.columnAdvance * scale;
+  const verticalOffsetX = textLayout.vertical.offsetX * scale;
+  const verticalOffsetY = textLayout.vertical.offsetY * scale;
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
     event.cancelBubble = true;
     if (event.evt.shiftKey) {
@@ -2057,7 +1963,7 @@ const TextNode = ({
             align={item.textAlign}
             verticalAlign={item.verticalAlign}
             wrap="none"
-            lineHeight={renderLineHeight}
+            lineHeight={textLayout.renderLineHeight}
           />
         )}
       </Group>
