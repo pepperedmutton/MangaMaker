@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, scryptSync, timingSafeEqual } from "node:crypto";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 const PROJECTS_DIR_NAME = "projects";
@@ -9,12 +9,20 @@ const PROJECT_META_FILE = ".latest_project";
 const PROJECT_JSON_FILE = "project.json";
 const PROJECT_ASSETS_DIR = "assets";
 const API_BASE = "/__mangamaker__/persistence";
-const AUTH_PASSWORD = "19260817";
 const AUTH_COOKIE_NAME = "mangamaker_auth";
 const AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const AUTH_LOGIN_PATH = "/__mangamaker__/auth/login";
+const AUTH_PASSWORD_SALT_HEX = "7bb08576611b01bf60a7b5cbf93faff7";
+const AUTH_PASSWORD_HASH_HEX = "35763c82cb5698b9f3650d71f55a8bfa29cffc119f1459c1de0b6da216eb8e29";
+const AUTH_PASSWORD_KEY_LENGTH = 32;
+const AUTH_PASSWORD_SCRYPT_OPTIONS = {
+    N: 16384,
+    r: 8,
+    p: 1,
+    maxmem: 64 * 1024 * 1024,
+};
 const AUTH_COOKIE_TOKEN = createHash("sha256")
-    .update(`mangamaker:${AUTH_PASSWORD}`)
+    .update(`mangamaker:${AUTH_PASSWORD_HASH_HEX}:${AUTH_PASSWORD_SALT_HEX}`)
     .digest("hex");
 const SHARE_ALLOWED_HOSTS = [
     "gradio.live",
@@ -30,12 +38,15 @@ const SHARE_ALLOWED_HOSTS = [
     "ngrok.io",
     ".ngrok.io",
 ];
-const RENDER_ALLOWED_HOSTS = ["onrender.com", ".onrender.com"];
 const renderExternalHostname = process.env.RENDER_EXTERNAL_HOSTNAME?.trim();
+const envAllowedHosts = String(process.env.MANGAMAKER_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 const ALLOWED_HOSTS = Array.from(new Set([
     ...SHARE_ALLOWED_HOSTS,
-    ...RENDER_ALLOWED_HOSTS,
     ...(renderExternalHostname ? [renderExternalHostname] : []),
+    ...envAllowedHosts,
 ]));
 const sanitizePathComponent = (value, fallback) => {
     const sanitized = value
@@ -532,18 +543,22 @@ const redirect = (res, location) => {
     res.setHeader("Location", location);
     res.end();
 };
-const isSafeStringEqual = (left, right) => {
-    const leftBuffer = Buffer.from(left, "utf8");
-    const rightBuffer = Buffer.from(right, "utf8");
-    if (leftBuffer.length !== rightBuffer.length) {
+const isValidAuthPassword = (password) => {
+    const expected = Buffer.from(AUTH_PASSWORD_HASH_HEX, "hex");
+    if (expected.length !== AUTH_PASSWORD_KEY_LENGTH) {
         return false;
     }
+    let received;
     try {
-        return timingSafeEqual(leftBuffer, rightBuffer);
+        received = scryptSync(password, Buffer.from(AUTH_PASSWORD_SALT_HEX, "hex"), AUTH_PASSWORD_KEY_LENGTH, AUTH_PASSWORD_SCRYPT_OPTIONS);
     }
     catch {
         return false;
     }
+    if (received.length !== expected.length) {
+        return false;
+    }
+    return timingSafeEqual(received, expected);
 };
 const attachWebAuthMiddleware = (middlewares) => {
     const handler = async (req, res, next) => {
@@ -566,7 +581,7 @@ const attachWebAuthMiddleware = (middlewares) => {
         if (pathname === AUTH_LOGIN_PATH && method === "POST") {
             const payload = await readLoginPayload(req);
             const nextPath = normalizeNextPath(payload.next);
-            if (isSafeStringEqual(payload.password, AUTH_PASSWORD)) {
+            if (isValidAuthPassword(payload.password)) {
                 appendCookieHeader(res, buildAuthCookie(req));
                 if (requestExpectsJson(req, pathname)) {
                     json(res, 200, { ok: true, next: nextPath });
