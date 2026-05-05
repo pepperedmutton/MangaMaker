@@ -14,6 +14,7 @@ const PROJECT_ASSETS_DIR = "assets";
 const API_BASE = "/__mangamaker__/persistence";
 const AGENT_API_BASE = "/__mangamaker__/agent";
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const AGENT_TEST_MODE = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
 const AUTH_COOKIE_NAME = "mangamaker_auth";
 const AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
@@ -423,7 +424,69 @@ type AgentChatPayload = {
   approvedCommandPlan?: AgentCommandPlan | null;
 };
 
-const getCurrentAgentConfig = () => {
+type OpenRouterModelMetadata = {
+  id: string;
+  name?: string;
+  context_length?: number;
+  architecture?: {
+    input_modalities?: string[];
+    output_modalities?: string[];
+  };
+  supported_parameters?: string[];
+};
+
+type AgentAvailableModel = {
+  id: string;
+  name: string;
+  contextLength: number | null;
+  inputModalities: string[];
+  outputModalities: string[];
+};
+
+const isAllowedAgentModelProvider = (modelId: string) =>
+  modelId.startsWith("deepseek/") || modelId.startsWith("moonshotai/") || modelId.startsWith("~moonshotai/");
+
+const filterAllowedAgentModels = (models: OpenRouterModelMetadata[]): AgentAvailableModel[] =>
+  models
+    .filter((model) => {
+      const inputModalities = model.architecture?.input_modalities ?? [];
+      const outputModalities = model.architecture?.output_modalities ?? [];
+      const supportedParameters = model.supported_parameters ?? [];
+      return (
+        isAllowedAgentModelProvider(model.id) &&
+        inputModalities.includes("image") &&
+        outputModalities.includes("text") &&
+        supportedParameters.includes("response_format")
+      );
+    })
+    .map((model) => ({
+      id: model.id,
+      name: model.name ?? model.id,
+      contextLength: typeof model.context_length === "number" ? model.context_length : null,
+      inputModalities: model.architecture?.input_modalities ?? [],
+      outputModalities: model.architecture?.output_modalities ?? [],
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+
+let agentModelsCache: { fetchedAt: number; models: AgentAvailableModel[] } | null = null;
+const AGENT_MODELS_CACHE_MS = 5 * 60 * 1000;
+
+const fetchAllowedAgentModels = async (): Promise<AgentAvailableModel[]> => {
+  const now = Date.now();
+  if (agentModelsCache && now - agentModelsCache.fetchedAt < AGENT_MODELS_CACHE_MS) {
+    return agentModelsCache.models;
+  }
+  const response = await fetch(OPENROUTER_MODELS_URL);
+  if (!response.ok) {
+    throw new Error(`Failed to read OpenRouter model metadata (${response.status}).`);
+  }
+  const payload = (await response.json()) as { data?: OpenRouterModelMetadata[] };
+  const models = filterAllowedAgentModels(payload.data ?? []);
+  agentModelsCache = { fetchedAt: now, models };
+  return models;
+};
+
+const getCurrentAgentConfig = async () => {
   const testMode = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
   const model = process.env.MANGAMAKER_AGENT_MODEL?.trim() || null;
   const apiKeyConfigured = Boolean(process.env.OPENROUTER_API_KEY?.trim());
@@ -459,6 +522,32 @@ const getCurrentAgentConfig = () => {
       reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the multimodal Agent.",
     };
   }
+  let availableModels: AgentAvailableModel[];
+  try {
+    availableModels = await fetchAllowedAgentModels();
+  } catch (error) {
+    return {
+      enabled: false,
+      provider: "unavailable" as const,
+      model,
+      apiKeyConfigured: true,
+      testMode: false,
+      visionEnabled: false,
+      reason: error instanceof Error ? error.message : "Failed to verify OpenRouter model capabilities.",
+    };
+  }
+  if (!availableModels.some((entry) => entry.id === model)) {
+    return {
+      enabled: false,
+      provider: "unavailable" as const,
+      model,
+      apiKeyConfigured: true,
+      testMode: false,
+      visionEnabled: false,
+      reason:
+        "Configured model is not available for MangaMaker Agent. Choose a DeepSeek or Kimi model with image input, text output, and JSON response_format support.",
+    };
+  }
   return {
     enabled: true,
     provider: "openrouter" as const,
@@ -470,15 +559,27 @@ const getCurrentAgentConfig = () => {
 };
 
 const AGENT_SYSTEM_PROMPT = [
-  "You are MangaMaker's built-in editing agent.",
+  "You are MangaMaker's built-in creator assistance agent.",
+  "Manga creation is the human creator's work; you assist with inspection, suggestions, and bounded editor operations.",
   "You must inspect context before proposing or executing edits.",
   "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
   "Never claim an edit is complete unless it has been executed by the app.",
+  "Do not present yourself as the author, director, artist, or end-to-end creator of the comic.",
   "Destructive or batch operations must be returned as a pending plan that requires confirmation.",
   "Command payloads must match the manifest schema.",
   "Keep natural-language responses concise.",
   "Return JSON only: {\"message\":\"...\",\"pendingCommandPlan\":null|{\"summary\":\"...\",\"commands\":[{\"commandId\":\"...\",\"payload\":{},\"reason\":\"...\"}],\"requiresConfirmation\":true|false}}.",
 ].join("\n");
+
+const TEST_AGENT_MODELS: AgentAvailableModel[] = [
+  {
+    id: "moonshotai/kimi-k2.6",
+    name: "MoonshotAI: Kimi K2.6",
+    contextLength: 262142,
+    inputModalities: ["text", "image"],
+    outputModalities: ["text"],
+  },
+];
 
 const stripLargeSnapshotData = (context: AgentContextPayload | undefined) => {
   if (!context) {
@@ -753,7 +854,7 @@ const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolea
 };
 
 const callOpenRouter = async (payload: AgentChatPayload, includeImage: boolean) => {
-  const config = getCurrentAgentConfig();
+  const config = await getCurrentAgentConfig();
   if (!config.enabled || config.provider !== "openrouter" || !config.model) {
     throw new Error(config.reason ?? "Agent is not configured.");
   }
@@ -829,7 +930,11 @@ const attachWebAgentMiddleware = (
 
     try {
       if (method === "GET" && pathname === `${AGENT_API_BASE}/config`) {
-        json(res, 200, getCurrentAgentConfig());
+        json(res, 200, await getCurrentAgentConfig());
+        return;
+      }
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/models`) {
+        json(res, 200, AGENT_TEST_MODE ? TEST_AGENT_MODELS : await fetchAllowedAgentModels());
         return;
       }
       if (method !== "POST" || pathname !== `${AGENT_API_BASE}/chat`) {
@@ -841,7 +946,7 @@ const attachWebAgentMiddleware = (
         json(res, 200, await normalizeAgentModelResponse(createTestAgentResponse(payload), loadAgentSchema));
         return;
       }
-      const config = getCurrentAgentConfig();
+      const config = await getCurrentAgentConfig();
       if (!config.enabled) {
         json(res, 503, { message: "Agent unavailable.", error: config.reason ?? "Agent is not configured.", pendingCommandPlan: null });
         return;

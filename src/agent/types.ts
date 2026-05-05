@@ -149,6 +149,14 @@ export type AgentConfig = {
   reason?: string;
 };
 
+export type AgentAvailableModel = {
+  id: string;
+  name: string;
+  contextLength: number | null;
+  inputModalities: string[];
+  outputModalities: string[];
+};
+
 export type AgentChatRequest = {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   agentContext: AgentContextSnapshot;

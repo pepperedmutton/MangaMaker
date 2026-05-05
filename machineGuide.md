@@ -287,6 +287,8 @@ Configuration rules:
 - `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode for tests and demos.
 - `OPENROUTER_API_KEY` is required for the OpenRouter web backend.
 - `MANGAMAKER_AGENT_MODEL` must be explicit outside test mode unless the project documents a vision-capable default.
+- The OpenRouter model allowlist is provider-restricted to DeepSeek and Kimi/Moonshot model ids, then capability-restricted to models whose metadata includes image input, text output, and `response_format` support.
+- Google, Anthropic, OpenAI, text-only, and non-JSON-capable models must not be offered as available built-in Agent models.
 - The UI must show whether vision input is enabled. If vision is unavailable or a screenshot send fails, the user-visible response must include a warning or error.
 
 Command-plan rules:

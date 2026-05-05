@@ -60,6 +60,17 @@ test("agent opens, reports test config, validates plans, and executes through co
     testMode: true,
     visionEnabled: true,
   });
+  const models = await page.evaluate(async () => {
+    const response = await fetch("/__mangamaker__/agent/models");
+    return response.json();
+  });
+  expect(models).toEqual([
+    expect.objectContaining({
+      id: "moonshotai/kimi-k2.6",
+      inputModalities: expect.arrayContaining(["image"]),
+      outputModalities: expect.arrayContaining(["text"]),
+    }),
+  ]);
 
   await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
   await expect(page.getByLabel("Agent sidebar")).toBeVisible();

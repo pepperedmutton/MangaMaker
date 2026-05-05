@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getAgentConfigFromEnv } from "../../src/agent/config";
+import { filterAllowedAgentModels } from "../../src/agent/modelCatalog";
 import {
   commandPlanRequiresConfirmation,
   getCommandDangerLevel,
@@ -27,24 +28,91 @@ describe("agent config", () => {
     });
   });
 
-  it("requires and reports an explicitly configured model", () => {
+  it("requires and reports an explicitly configured allowlisted model", () => {
+    const availableModels = [
+      {
+        id: "moonshotai/kimi-k2.6",
+        name: "MoonshotAI: Kimi K2.6",
+        contextLength: 262142,
+        inputModalities: ["text", "image"],
+        outputModalities: ["text"],
+      },
+    ];
     expect(
-      getAgentConfigFromEnv({
-        OPENROUTER_API_KEY: "not-a-real-key",
-        MANGAMAKER_AGENT_MODEL: "openai/gpt-4o",
-      }),
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+          MANGAMAKER_AGENT_MODEL: "moonshotai/kimi-k2.6",
+        },
+        availableModels,
+      ),
     ).toMatchObject({
       enabled: true,
       provider: "openrouter",
-      model: "openai/gpt-4o",
+      model: "moonshotai/kimi-k2.6",
       apiKeyConfigured: true,
       visionEnabled: true,
+    });
+
+    expect(
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+          MANGAMAKER_AGENT_MODEL: "openai/gpt-4o",
+        },
+        availableModels,
+      ),
+    ).toMatchObject({
+      enabled: false,
+      reason: expect.stringContaining("allowlist"),
+      visionEnabled: false,
     });
 
     expect(getAgentConfigFromEnv({ OPENROUTER_API_KEY: "not-a-real-key" })).toMatchObject({
       enabled: false,
       reason: expect.stringContaining("MANGAMAKER_AGENT_MODEL"),
     });
+  });
+
+  it("filters available models to DeepSeek or Kimi multimodal JSON-capable models", () => {
+    const models = filterAllowedAgentModels([
+      {
+        id: "moonshotai/kimi-k2.6",
+        name: "MoonshotAI: Kimi K2.6",
+        architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+        supported_parameters: ["response_format"],
+        context_length: 262142,
+      },
+      {
+        id: "deepseek/deepseek-vl",
+        name: "DeepSeek VL",
+        architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+        supported_parameters: ["response_format"],
+      },
+      {
+        id: "openai/gpt-5.5",
+        name: "OpenAI GPT",
+        architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+        supported_parameters: ["response_format"],
+      },
+      {
+        id: "moonshotai/kimi-text-only",
+        name: "Kimi text only",
+        architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+        supported_parameters: ["response_format"],
+      },
+      {
+        id: "moonshotai/kimi-no-json",
+        name: "Kimi no JSON",
+        architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+        supported_parameters: [],
+      },
+    ]);
+
+    expect(models.map((model) => model.id)).toEqual([
+      "deepseek/deepseek-vl",
+      "moonshotai/kimi-k2.6",
+    ]);
   });
 });
 

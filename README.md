@@ -290,10 +290,11 @@ Open the Agent from the editor ribbon with the `Agent` button. The sidebar alway
 - `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode and does not require a real provider key.
 - `OPENROUTER_API_KEY` is required for the web/Vite OpenRouter backend. Do not commit real keys.
 - `MANGAMAKER_AGENT_MODEL` is required outside test mode. The app does not silently default to a non-vision model for multimodal use.
+- The available OpenRouter model list is filtered to DeepSeek and Kimi models that report image input, text output, and `response_format` support in OpenRouter metadata. Google, Anthropic, OpenAI, and text-only models are not valid built-in Agent models.
 - The sidebar shows whether visual input is enabled. If a canvas screenshot cannot be sent or read, the response shows a warning instead of silently falling back to text-only mode.
 
 Agent suggestions may include command plans for local edits such as adding a panel, adjusting text, or preparing a save. Safe read-only or single normal edits may run automatically after validation, while destructive actions, cross-page changes, and plans with multiple mutating commands require explicit confirmation. Multi-command mutating plans are grouped into one undo transaction whenever the underlying commands record history.
 
 The Agent should assist with critique, planning, consistency checks, and mechanical editor operations. Story direction, page composition, final dialogue, and artistic judgment remain under the human creator's control.
 
-The web/Vite backend provides `GET /__mangamaker__/agent/config` and `POST /__mangamaker__/agent/chat`. Desktop/Tauri builds use Tauri commands instead of fetching those web endpoints, so production desktop does not keep a failing `fetch`. The current desktop native backend supports test-mode availability and otherwise reports the Agent backend as unavailable unless a native provider proxy is configured.
+The web/Vite backend provides `GET /__mangamaker__/agent/config`, `GET /__mangamaker__/agent/models`, and `POST /__mangamaker__/agent/chat`. Desktop/Tauri builds use Tauri commands instead of fetching those web endpoints, so production desktop does not keep a failing `fetch`. The current desktop native backend supports test-mode availability and otherwise reports the Agent backend as unavailable unless a native provider proxy is configured.

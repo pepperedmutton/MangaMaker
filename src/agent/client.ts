@@ -1,5 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { AgentChatRequest, AgentChatResponse, AgentConfig } from "./types";
+import type { AgentAvailableModel, AgentChatRequest, AgentChatResponse, AgentConfig } from "./types";
 import { validateAgentChatResponse } from "./agentResponseSchema";
 
 const AGENT_API_BASE = "/__mangamaker__/agent";
@@ -27,6 +27,14 @@ export const getAgentConfig = async (): Promise<AgentConfig> => {
   }
   const response = await fetch(`${AGENT_API_BASE}/config`);
   return readJsonResponse<AgentConfig>(response);
+};
+
+export const getAgentModels = async (): Promise<AgentAvailableModel[]> => {
+  if (isTauriRuntime()) {
+    return [];
+  }
+  const response = await fetch(`${AGENT_API_BASE}/models`);
+  return readJsonResponse<AgentAvailableModel[]>(response);
 };
 
 export const chatWithAgent = async (request: AgentChatRequest): Promise<AgentChatResponse> => {

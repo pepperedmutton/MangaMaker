@@ -62,7 +62,7 @@ const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPl
 
 export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
   const [messages, setMessages] = useState<AgentChatMessage[]>([
-    createMessage("assistant", "Ready. I can inspect the current project and act through commands."),
+    createMessage("assistant", "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans."),
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
