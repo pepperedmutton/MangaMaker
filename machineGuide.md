@@ -268,9 +268,19 @@ If implementation does not satisfy the four governing documents, the agent must 
 An agent must not claim the project is complete if the documented contract is not implemented.
 
 如果文档契约尚未实现，agent 不得声称项目已经完成。
-## 10. Built-in Creative Agent Product Contract / 内置创作 Agent 契约
+## 10. Built-in Creator Assistance Agent Product Contract / 内置创作辅助 Agent 契约
 
-The built-in creative Agent is a MangaMaker product feature, not the external coding-agent workflow. It must never receive or expose real API keys in the frontend. Provider configuration is read only by the web/Vite backend or the Tauri backend.
+The built-in creator assistance Agent is a MangaMaker product feature, not the external coding-agent workflow. Its role is to assist the human creator with suggestions, context inspection, consistency checks, and bounded command plans. Manga creation remains human-led; the Agent must not be framed as independently writing, directing, drawing, or completing the comic.
+
+It must never receive or expose real API keys in the frontend. Provider configuration is read only by the web/Vite backend or the Tauri backend.
+
+Role rules:
+
+- The Agent may advise on panels, dialogue placement, pacing, captions, bubbles, and layout consistency.
+- The Agent may prepare local command plans only when they are grounded in the current project context and command manifest.
+- The Agent must not claim that a comic page, story, or finished work is complete unless the creator has made or approved the relevant changes.
+- The Agent should use language such as "suggest", "prepare", "inspect", and "help adjust" rather than language that implies autonomous authorship.
+- Human creative intent takes precedence over model suggestions.
 
 Configuration rules:
 

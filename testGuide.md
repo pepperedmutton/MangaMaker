@@ -186,7 +186,7 @@ A valid completion report must say:
 2. 手动验证了哪些行为
 3. 哪些内容未能验证
 4. 还存在哪些风险
-### 2.6 Built-in Creative Agent Verification / 内置创作 Agent 验证
+### 2.6 Built-in Creator Assistance Agent Verification / 内置创作辅助 Agent 验证
 
 Agent changes must verify both backend contract and user-visible behavior:
 
@@ -197,5 +197,7 @@ Agent changes must verify both backend contract and user-visible behavior:
 5. Vision failure or text-only fallback must show a warning or error in the Agent UI.
 6. E2E coverage should open the Agent sidebar, receive a test-mode plan, show confirmation for risky plans, execute a confirmed command, and show a clear disabled state when configuration is unavailable.
 7. A multi-command mutating plan should be undoable with one undo action when the participating commands record history.
+8. User-facing Agent copy must describe the feature as assistance for the creator, not as autonomous manga creation.
+9. Tests and demos should prefer prompts that ask for suggestions, checks, or bounded local edits instead of asking the Agent to create a complete comic by itself.
 
 Use `MANGAMAKER_AGENT_TEST_MODE=1` for deterministic tests. Real `OPENROUTER_API_KEY` values must not be committed or written to test fixtures.

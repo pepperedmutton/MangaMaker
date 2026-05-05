@@ -279,9 +279,11 @@ pnpm test:e2e
 pnpm build
 ```
 
-## Built-in Creative Agent / 内置创作 Agent
+## Built-in Creator Assistance Agent / 内置创作辅助 Agent
 
-MangaMaker includes an in-product creative Agent in the editor sidebar. It is separate from external coding-agent workflows: it only works through the local command registry, validates command payloads with the existing Zod schemas, and executes approved plans through the editor undo/redo history.
+MangaMaker includes an in-product creator assistance Agent in the editor sidebar. Manga creation remains the creator's work: the Agent is there to inspect the current page, offer suggestions, explain options, and prepare small command-based edits when the creator asks for them. It must not present itself as the author of the comic or take over end-to-end manga creation.
+
+This product Agent is separate from external coding-agent workflows. It only works through the local command registry, validates command payloads with the existing Zod schemas, and executes approved plans through the editor undo/redo history.
 
 Open the Agent from the editor ribbon with the `Agent` button. The sidebar always shows its configuration state before chat is available:
 
@@ -290,6 +292,8 @@ Open the Agent from the editor ribbon with the `Agent` button. The sidebar alway
 - `MANGAMAKER_AGENT_MODEL` is required outside test mode. The app does not silently default to a non-vision model for multimodal use.
 - The sidebar shows whether visual input is enabled. If a canvas screenshot cannot be sent or read, the response shows a warning instead of silently falling back to text-only mode.
 
-Agent actions are previewed as command plans. Safe read-only or single normal edits may run automatically, while destructive actions, cross-page changes, and plans with multiple mutating commands require explicit confirmation. Multi-command mutating plans are grouped into one undo transaction whenever the underlying commands record history.
+Agent suggestions may include command plans for local edits such as adding a panel, adjusting text, or preparing a save. Safe read-only or single normal edits may run automatically after validation, while destructive actions, cross-page changes, and plans with multiple mutating commands require explicit confirmation. Multi-command mutating plans are grouped into one undo transaction whenever the underlying commands record history.
+
+The Agent should assist with critique, planning, consistency checks, and mechanical editor operations. Story direction, page composition, final dialogue, and artistic judgment remain under the human creator's control.
 
 The web/Vite backend provides `GET /__mangamaker__/agent/config` and `POST /__mangamaker__/agent/chat`. Desktop/Tauri builds use Tauri commands instead of fetching those web endpoints, so production desktop does not keep a failing `fetch`. The current desktop native backend supports test-mode availability and otherwise reports the Agent backend as unavailable unless a native provider proxy is configured.
