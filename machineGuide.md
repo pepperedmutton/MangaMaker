@@ -302,9 +302,10 @@ Command-plan rules:
 
 Context rules:
 
-- The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information.
-- The Agent must receive all project pages as readable context, not only the currently selected page. The creator's current page must be marked with `isCurrent=true`.
-- The Agent harness should present project reading as local tools such as project summary, page listing, page reading, selection inspection, image asset listing, current-page rendering, and command manifest reading.
+- The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information when those details are requested.
+- The initial model prompt must not include every page's full resources, every asset metadata record, or a screenshot by default. It should include a lightweight project summary, page index, current-page marker, selection summary, and tool catalog.
+- The Agent must be able to read all project pages on demand, not only the currently selected page. The creator's current page must be marked with `isCurrent=true` in the page index and detailed page reads.
+- The Agent harness should present project reading as local tools such as project summary, page listing, project search, page reading, selection inspection, filtered image asset listing, page rendering, and command manifest reading.
 - The Agent must be able to close the multimodal loop for a page: request a screenshot/render tool for a specific page, receive the composed visual result as a vision attachment, and receive the same page's structured resources so it can compare resource-level state with rendered outcome.
 - Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
 - Large base64 assets must not be sent without bounds.

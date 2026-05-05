@@ -150,11 +150,15 @@ describe("agent response validation", () => {
       validateAgentChatResponse({
         message: "Need render",
         requestedToolCalls: [
+          { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
+          { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
           { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
         ],
         pendingCommandPlan: null,
       }).requestedToolCalls,
     ).toEqual([
+      { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
+      { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
       { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
     ]);
 

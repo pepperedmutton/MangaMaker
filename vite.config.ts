@@ -490,19 +490,45 @@ type AgentCommandPlan = {
 
 type AgentContextPayload = {
   project?: {
+    id?: string;
     title?: string;
+    type?: string;
     pageCount?: number;
+    createdAt?: string;
+    updatedAt?: string;
   };
   selectedPageId?: string | null;
-  pages?: Array<{
+  currentPage?: {
     id: string;
     name?: string;
+    width?: number;
+    height?: number;
     isCurrent?: boolean;
     viewing?: boolean;
     objects?: Array<{
       id: string;
       objectType: "panel" | "text" | "bubble" | "element";
       content?: string;
+      hasImage?: boolean;
+    }>;
+  } | null;
+  pages?: Array<{
+    id: string;
+    name?: string;
+    width?: number;
+    height?: number;
+    background?: string;
+    panelCount?: number;
+    textCount?: number;
+    bubbleCount?: number;
+    layerCount?: number;
+    isCurrent?: boolean;
+    viewing?: boolean;
+    objects?: Array<{
+      id: string;
+      objectType: "panel" | "text" | "bubble" | "element";
+      content?: string;
+      hasImage?: boolean;
     }>;
   }>;
   selection?: {
@@ -516,6 +542,11 @@ type AgentContextPayload = {
     content?: string;
   }>;
   imageAssets?: Array<{ src: string }>;
+  commandManifest?: unknown[];
+  multiSelection?: unknown[];
+  activeTool?: string;
+  zoom?: number;
+  saveStatus?: unknown;
   canvasSnapshot?: {
     dataUrl?: string | null;
     width?: number;
@@ -680,9 +711,11 @@ const getCurrentAgentConfig = async () => {
 const AGENT_SYSTEM_PROMPT = [
   "You are MangaMaker's built-in creator assistance agent.",
   "Manga creation is the human creator's work; you assist with inspection, suggestions, and bounded editor operations.",
-  "You operate through a coding-agent-style harness: inspect the provided tool catalog and initial tool results before proposing edits.",
-  "All project pages are readable through the harness. The page the creator is currently viewing is marked isCurrent=true.",
+  "You operate through a coding-agent-style harness. The initial context is intentionally lightweight: project summary, page index, current-page marker, current selection summary, and tool catalog.",
+  "Do not assume all resources were included up front. Decide which project details you need, then request tools such as searchProject, readPage, listImageAssets, renderPage, or listCommandManifest.",
+  "All project pages are readable on demand through the harness. The page the creator is currently viewing is marked isCurrent=true.",
   "Do not pretend to have seen a page, asset, or render unless it is present in tool results or attached as vision input.",
+  "For broad questions, search first. For page-specific questions, read that page. For visual judgment, render that page. For edits, read listCommandManifest before returning a command plan.",
   "If you need to judge a page's composed visual result, request a tool call first: {\"message\":\"I need to inspect the rendered page.\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\"},\"reason\":\"Inspect the composed page render\"}],\"pendingCommandPlan\":null}.",
   "After renderPage returns, compare the screenshot with that page's structured resources and then answer or propose a command plan.",
   "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
@@ -727,18 +760,57 @@ const redactPromptValue = (value: unknown): unknown => {
   return value;
 };
 
-const stripLargeSnapshotData = (context: AgentContextPayload | undefined) => {
+const compactPageForPrompt = (page: NonNullable<AgentContextPayload["pages"]>[number]) => ({
+  id: page.id,
+  name: page.name,
+  width: page.width,
+  height: page.height,
+  background: page.background,
+  panelCount: page.panelCount,
+  textCount: page.textCount,
+  bubbleCount: page.bubbleCount,
+  layerCount: page.layerCount,
+  objectCount: page.objects?.length ?? 0,
+  hasImages: page.objects?.some((object) => object.objectType === "panel" && object.hasImage) ?? false,
+  isCurrent: Boolean(page.isCurrent || page.viewing),
+});
+
+const compactAgentContextForPrompt = (context: AgentContextPayload | undefined) => {
   if (!context) {
     return {};
   }
-  return redactPromptValue({
-    ...context,
-    canvasSnapshot: context.canvasSnapshot
+  const pages = context.pages ?? [];
+  const currentPage =
+    pages.find((page) => page.isCurrent || page.viewing) ??
+    (context.currentPage
       ? {
-          ...context.canvasSnapshot,
-          dataUrl: context.canvasSnapshot.dataUrl ? "[attached image]" : null,
+          ...context.currentPage,
+          isCurrent: context.currentPage.isCurrent ?? context.currentPage.viewing,
         }
-      : null,
+      : null);
+  return redactPromptValue({
+    project: context.project,
+    selectedPageId: context.selectedPageId ?? null,
+    currentPage: currentPage ? compactPageForPrompt(currentPage) : null,
+    pageIndex: pages.map(compactPageForPrompt),
+    selection: context.selection ?? null,
+    multiSelectionCount: Array.isArray(context.multiSelection) ? context.multiSelection.length : 0,
+    activeTool: context.activeTool ?? null,
+    zoom: context.zoom ?? null,
+    saveStatus: context.saveStatus ?? null,
+    resourceAccess: {
+      fullPagesAvailableVia: "readPage",
+      searchAvailableVia: "searchProject",
+      imageAssetsAvailableVia: "listImageAssets",
+      pageRendersAvailableVia: "renderPage",
+      commandManifestAvailableVia: "listCommandManifest",
+      currentCanvasSnapshotAttachedInitially: false,
+    },
+    counts: {
+      pages: pages.length,
+      imageAssets: context.imageAssets?.length ?? 0,
+      commands: context.commandManifest?.length ?? 0,
+    },
   });
 };
 
@@ -749,6 +821,18 @@ const getHarnessToolResults = (harness: AgentChatPayload["harness"]) => [
   ...(harness?.initialToolResults ?? []),
   ...(harness?.dynamicToolResults ?? []),
 ];
+
+const getHarnessImageDataUrls = (harness: AgentChatPayload["harness"]) =>
+  getHarnessToolResults(harness).flatMap((entry) => {
+    const value = entry.result as {
+      dataUrl?: unknown;
+      canvasSnapshot?: { dataUrl?: unknown };
+    } | null;
+    const urls = [value?.dataUrl, value?.canvasSnapshot?.dataUrl];
+    return urls.filter(
+      (url): url is string => typeof url === "string" && url.startsWith("data:image/"),
+    );
+  });
 
 const getRenderedPageToolResults = (payload: AgentChatPayload) =>
   getHarnessToolResults(payload.harness).filter(
@@ -788,7 +872,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   const pageId = getCurrentPageId(context);
   const latest = getLatestUserText(payload.messages);
   const normalized = latest.toLowerCase();
-  const hasVisionInput = Boolean((payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot)?.dataUrl);
+  const hasVisionInput = getHarnessImageDataUrls(payload.harness).length > 0;
   const renderedPageResults = getRenderedPageToolResults(payload);
 
   if ((normalized.includes("screenshot tool") || normalized.includes("render page") || latest.includes("截图工具")) && renderedPageResults.length === 0 && pageId) {
@@ -996,9 +1080,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   }
 
   return {
-    message: `I can read this project and prepare command-based edits. Current canvas snapshot: ${
-      context.canvasSnapshot?.dataUrl ? `${context.canvasSnapshot.width}x${context.canvasSnapshot.height}` : context.canvasSnapshot?.reason ?? "unavailable"
-    }.`,
+    message: "I can search the project, read pages on demand, render pages when visual inspection is needed, and prepare command-based edits.",
     pendingCommandPlan: null,
     usedVision: hasVisionInput,
   };
@@ -1025,17 +1107,8 @@ const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolea
   const harnessText = payload.harness
     ? `\n\nAgent harness JSON:\n${JSON.stringify(redactPromptValue(payload.harness), null, 2)}`
     : "";
-  const contextText = `Agent context JSON:\n${JSON.stringify(stripLargeSnapshotData(payload.agentContext), null, 2)}${harnessText}`;
-  const snapshot = payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot;
-  const harnessImages = getHarnessToolResults(payload.harness).flatMap((entry) => {
-    const result = entry.result as { canvasSnapshot?: { dataUrl?: string | null } } | null;
-    const dataUrl = result?.canvasSnapshot?.dataUrl;
-    return typeof dataUrl === "string" && dataUrl.startsWith("data:image/") ? [dataUrl] : [];
-  });
-  const imageUrls = [
-    ...(snapshot?.dataUrl ? [snapshot.dataUrl] : []),
-    ...harnessImages,
-  ];
+  const contextText = `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext), null, 2)}${harnessText}`;
+  const imageUrls = getHarnessImageDataUrls(payload.harness);
   const contextContent =
     includeImage && imageUrls.length > 0
       ? [
@@ -1184,8 +1257,8 @@ const attachWebAgentMiddleware = (
         json(res, 503, { message: "Agent unavailable.", error: config.reason ?? "Agent is not configured.", pendingCommandPlan: null });
         return;
       }
-      const hasImage = Boolean((payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot)?.dataUrl);
-      json(res, 200, await normalizeAgentModelResponse(await callOpenRouter(payload, hasImage && config.visionEnabled), loadAgentSchema));
+      const hasHarnessImage = getHarnessImageDataUrls(payload.harness).length > 0;
+      json(res, 200, await normalizeAgentModelResponse(await callOpenRouter(payload, hasHarnessImage && config.visionEnabled), loadAgentSchema));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       json(res, 500, { message: "Agent request failed.", error: message, pendingCommandPlan: null });

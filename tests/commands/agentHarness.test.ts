@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentHarness } from "../../src/agent/harness";
+import { buildAgentHarness, executeAgentHarnessToolCall } from "../../src/agent/harness";
 import type { AgentCanvasSnapshot, AgentContextSnapshot, AgentPageContextSummary } from "../../src/agent/types";
 
 const snapshot: AgentCanvasSnapshot = {
@@ -98,18 +98,44 @@ context.currentPage = context.pages[1];
 context.objects = context.currentPage.objects;
 
 describe("agent harness", () => {
-  it("exposes all pages and marks the current viewing page", () => {
+  it("starts with a lightweight page index and marks the current viewing page", () => {
     const harness = buildAgentHarness(context);
     const listPages = harness.initialToolResults.find((entry) => entry.toolName === "listPages");
     const pageReads = harness.initialToolResults.filter((entry) => entry.toolName === "readPage");
 
     expect(harness.mode).toBe("tool-harness");
     expect(harness.currentPageId).toBe("page-2");
-    expect(pageReads.map((entry) => (entry.input as { pageId: string }).pageId)).toEqual(["page-1", "page-2"]);
+    expect(harness.initialToolResults.map((entry) => entry.toolName)).toEqual([
+      "readProjectSummary",
+      "listPages",
+      "inspectSelection",
+    ]);
+    expect(pageReads).toHaveLength(0);
     expect(listPages?.result).toEqual([
       expect.objectContaining({ id: "page-1", isCurrent: false, objectCount: 1 }),
       expect.objectContaining({ id: "page-2", isCurrent: true, objectCount: 1 }),
     ]);
+  });
+
+  it("lets the model search and read page resources on demand", async () => {
+    const search = await executeAgentHarnessToolCall(context, {
+      toolName: "searchProject",
+      input: { query: "Earlier" },
+    });
+    expect(search.result).toMatchObject({
+      query: "Earlier",
+      returned: 1,
+      matches: [expect.objectContaining({ pageId: "page-1", objectId: "text-1" })],
+    });
+
+    const readPage = await executeAgentHarnessToolCall(context, {
+      toolName: "readPage",
+      input: { pageId: "page-1" },
+    });
+    expect(readPage.result).toMatchObject({
+      id: "page-1",
+      objects: [expect.objectContaining({ id: "text-1", content: "Earlier page" })],
+    });
   });
 
   it("publishes command-plan-only mutation policy", () => {

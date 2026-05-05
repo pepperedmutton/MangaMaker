@@ -33,6 +33,7 @@ const rawResponseSchema = z.object({
 const allowedToolNames = new Set([
   "readProjectSummary",
   "listPages",
+  "searchProject",
   "readPage",
   "inspectSelection",
   "listImageAssets",
@@ -53,6 +54,23 @@ const validateRequestedToolCalls = (
     }
     if (call.toolName === "renderPage" || call.toolName === "readPage") {
       const parsed = z.object({ pageId: z.string().min(1) }).parse(call.input);
+      return { toolName: call.toolName, input: parsed, reason: call.reason };
+    }
+    if (call.toolName === "searchProject") {
+      const parsed = z.object({
+        query: z.string().optional(),
+        pageId: z.string().min(1).optional(),
+        objectTypes: z.array(z.enum(["panel", "text", "bubble", "element"])).optional(),
+        limit: z.number().min(1).max(100).optional(),
+      }).parse(call.input ?? {});
+      return { toolName: call.toolName, input: parsed, reason: call.reason };
+    }
+    if (call.toolName === "listImageAssets") {
+      const parsed = z.object({
+        pageId: z.string().min(1).optional(),
+        query: z.string().optional(),
+        limit: z.number().min(1).max(100).optional(),
+      }).parse(call.input ?? {});
       return { toolName: call.toolName, input: parsed, reason: call.reason };
     }
     const input = z.object({}).passthrough().parse(call.input ?? {});

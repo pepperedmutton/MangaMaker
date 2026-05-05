@@ -64,7 +64,7 @@ const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPl
   });
 };
 
-const MAX_AGENT_TOOL_ROUNDS = 2;
+const MAX_AGENT_TOOL_ROUNDS = 4;
 const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.";
 const createDefaultAgentMessages = () => [
   createMessage("assistant", DEFAULT_AGENT_GREETING),
