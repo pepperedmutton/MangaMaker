@@ -175,6 +175,7 @@ export type AgentChatRequest = {
 export type AgentChatResponse = {
   message: string;
   pendingCommandPlan?: AgentCommandPlan | null;
+  requestedToolCalls?: AgentToolCallRequest[];
   toolLogs?: AgentToolLogEntry[];
   error?: string;
   usedVision?: boolean;
@@ -198,12 +199,19 @@ export type AgentHarnessToolResult = {
   createdAt: string;
 };
 
+export type AgentToolCallRequest = {
+  toolName: string;
+  input: unknown;
+  reason?: string;
+};
+
 export type AgentHarnessSnapshot = {
   mode: "tool-harness";
   currentPageId: string | null;
   currentPageMarkedBy: "isCurrent";
   tools: AgentHarnessToolDefinition[];
   initialToolResults: AgentHarnessToolResult[];
+  dynamicToolResults?: AgentHarnessToolResult[];
   resourcePolicy: {
     allPagesReadable: boolean;
     assetsReadableOnDemand: boolean;

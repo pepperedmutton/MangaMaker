@@ -430,7 +430,10 @@ type AgentContextPayload = {
 type AgentChatPayload = {
   messages?: Array<{ role: "user" | "assistant"; content: string }>;
   agentContext?: AgentContextPayload;
-  harness?: unknown;
+  harness?: {
+    initialToolResults?: Array<{ toolName?: string; result?: unknown }>;
+    dynamicToolResults?: Array<{ toolName?: string; result?: unknown }>;
+  };
   canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
   approvedCommandPlan?: AgentCommandPlan | null;
 };
@@ -576,13 +579,15 @@ const AGENT_SYSTEM_PROMPT = [
   "You operate through a coding-agent-style harness: inspect the provided tool catalog and initial tool results before proposing edits.",
   "All project pages are readable through the harness. The page the creator is currently viewing is marked isCurrent=true.",
   "Do not pretend to have seen a page, asset, or render unless it is present in tool results or attached as vision input.",
+  "If you need to judge a page's composed visual result, request a tool call first: {\"message\":\"I need to inspect the rendered page.\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\"},\"reason\":\"Inspect the composed page render\"}],\"pendingCommandPlan\":null}.",
+  "After renderPage returns, compare the screenshot with that page's structured resources and then answer or propose a command plan.",
   "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
   "Never claim an edit is complete unless it has been executed by the app.",
   "Do not present yourself as the author, director, artist, or end-to-end creator of the comic.",
   "Destructive or batch operations must be returned as a pending plan that requires confirmation.",
   "Command payloads must match the manifest schema.",
   "Keep natural-language responses concise.",
-  "Return JSON only: {\"message\":\"...\",\"pendingCommandPlan\":null|{\"summary\":\"...\",\"commands\":[{\"commandId\":\"...\",\"payload\":{},\"reason\":\"...\"}],\"requiresConfirmation\":true|false}}.",
+  "Return JSON only: {\"message\":\"...\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\"},\"reason\":\"...\"}],\"pendingCommandPlan\":null|{\"summary\":\"...\",\"commands\":[{\"commandId\":\"...\",\"payload\":{},\"reason\":\"...\"}],\"requiresConfirmation\":true|false}}.",
 ].join("\n");
 
 const TEST_AGENT_MODELS: AgentAvailableModel[] = [
@@ -636,6 +641,16 @@ const stripLargeSnapshotData = (context: AgentContextPayload | undefined) => {
 const getLatestUserText = (messages: AgentChatPayload["messages"]) =>
   [...(messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
 
+const getHarnessToolResults = (harness: AgentChatPayload["harness"]) => [
+  ...(harness?.initialToolResults ?? []),
+  ...(harness?.dynamicToolResults ?? []),
+];
+
+const getRenderedPageToolResults = (payload: AgentChatPayload) =>
+  getHarnessToolResults(payload.harness).filter(
+    (entry) => entry.toolName === "renderPage",
+  );
+
 const getCurrentPageId = (context: AgentContextPayload) =>
   context.pages?.find((page) => page.isCurrent || page.viewing)?.id ??
   context.selectedPageId ??
@@ -670,6 +685,30 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   const latest = getLatestUserText(payload.messages);
   const normalized = latest.toLowerCase();
   const hasVisionInput = Boolean((payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot)?.dataUrl);
+  const renderedPageResults = getRenderedPageToolResults(payload);
+
+  if ((normalized.includes("screenshot tool") || normalized.includes("render page") || latest.includes("截图工具")) && renderedPageResults.length === 0 && pageId) {
+    return {
+      message: "I need to inspect the composed page render before answering.",
+      requestedToolCalls: [
+        {
+          toolName: "renderPage",
+          input: { pageId },
+          reason: "Inspect this page's final visual render and compare it with the page resources.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (renderedPageResults.length > 0 && (normalized.includes("screenshot tool") || normalized.includes("render page") || latest.includes("截图工具"))) {
+    return {
+      message: `I inspected ${renderedPageResults.length} rendered page screenshot(s) and the matching page resources.`,
+      pendingCommandPlan: null,
+      usedVision: true,
+    };
+  }
 
   if (normalized.includes("vision warning")) {
     return {
@@ -884,11 +923,20 @@ const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolea
     : "";
   const contextText = `Agent context JSON:\n${JSON.stringify(stripLargeSnapshotData(payload.agentContext), null, 2)}${harnessText}`;
   const snapshot = payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot;
+  const harnessImages = getHarnessToolResults(payload.harness).flatMap((entry) => {
+    const result = entry.result as { canvasSnapshot?: { dataUrl?: string | null } } | null;
+    const dataUrl = result?.canvasSnapshot?.dataUrl;
+    return typeof dataUrl === "string" && dataUrl.startsWith("data:image/") ? [dataUrl] : [];
+  });
+  const imageUrls = [
+    ...(snapshot?.dataUrl ? [snapshot.dataUrl] : []),
+    ...harnessImages,
+  ];
   const contextContent =
-    includeImage && snapshot?.dataUrl
+    includeImage && imageUrls.length > 0
       ? [
           { type: "text", text: contextText },
-          { type: "image_url", image_url: { url: snapshot.dataUrl } },
+          ...imageUrls.map((url) => ({ type: "image_url", image_url: { url } })),
         ]
       : contextText;
   return [

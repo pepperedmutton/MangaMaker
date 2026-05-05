@@ -2,13 +2,14 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { chatWithAgent, getAgentConfig, publishAgentDebugSnapshot } from "../agent/client";
 import { getAgentContext } from "../agent/context";
 import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
-import { buildAgentHarness } from "../agent/harness";
+import { buildAgentHarness, executeAgentHarnessToolCall } from "../agent/harness";
 import { executeCommandPlan, previewCommandPlan } from "../agent/tools";
 import type {
   AgentChatMessage,
   AgentConfig,
   AgentCommandPlan,
   AgentContextSnapshot,
+  AgentHarnessToolResult,
   AgentToolLogEntry,
 } from "../agent/types";
 import { AgentCommandPlan as AgentCommandPlanView } from "./AgentCommandPlan";
@@ -61,6 +62,8 @@ const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPl
     })),
   });
 };
+
+const MAX_AGENT_TOOL_ROUNDS = 2;
 
 export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
   const [messages, setMessages] = useState<AgentChatMessage[]>([
@@ -234,14 +237,37 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
         ),
       );
       appendLog(createLog("agentChat", "pending", "Waiting for model response"));
-      const payload = await chatWithAgent({
+      let dynamicToolResults: AgentHarnessToolResult[] = [];
+      let payload = await chatWithAgent({
         messages: nextMessages.map(({ role, content }) => ({ role, content })),
         agentContext: context,
         harness,
         canvasSnapshot: context.canvasSnapshot,
       });
+      for (let round = 0; round < MAX_AGENT_TOOL_ROUNDS && payload.requestedToolCalls?.length; round += 1) {
+        const requestedCalls = payload.requestedToolCalls;
+        appendLog(createLog("agentToolCalls", "pending", requestedCalls.map((call) => call.toolName).join(", ")));
+        const toolResults: AgentHarnessToolResult[] = [];
+        for (const call of requestedCalls) {
+          appendLog(createLog(call.toolName, "pending", call.reason));
+          const toolResult = await executeAgentHarnessToolCall(context, call);
+          toolResults.push(toolResult);
+          appendLog(createLog(call.toolName, "success", JSON.stringify(call.input)));
+        }
+        dynamicToolResults = [...dynamicToolResults, ...toolResults];
+        appendLog(createLog("agentToolCalls", "success", `${toolResults.length} tool result(s)`));
+        payload = await chatWithAgent({
+          messages: nextMessages.map(({ role, content }) => ({ role, content })),
+          agentContext: context,
+          harness: buildAgentHarness(context, dynamicToolResults),
+          canvasSnapshot: context.canvasSnapshot,
+        });
+      }
       if (payload.error) {
         throw new Error(payload.error);
+      }
+      if (payload.requestedToolCalls?.length) {
+        throw new Error("Agent requested more tool calls than the current safety limit allows.");
       }
       appendLog(createLog("agentChat", "success", payload.usedVision === false ? "Responded without visual input" : "Model response received"));
       const warning = payload.warning ?? payload.visionUnavailableReason ?? null;

@@ -3,7 +3,9 @@ import type {
   AgentHarnessSnapshot,
   AgentHarnessToolDefinition,
   AgentHarnessToolResult,
+  AgentToolCallRequest,
 } from "./types";
+import { renderPageSnapshot } from "./context";
 
 const now = () => new Date().toISOString();
 
@@ -66,6 +68,19 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     requiresConfirmation: false,
   }),
   tool({
+    name: "renderPage",
+    description: "Render a specific page to a bounded visual screenshot so the multimodal model can inspect the final composed page result.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pageId"],
+      properties: { pageId: { type: "string" } },
+    },
+    outputDescription: "Screenshot metadata plus the page's structured resources. The screenshot is attached as a vision image when the provider supports vision.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
     name: "listCommandManifest",
     description: "Read the command registry manifest and command payload schemas. Project mutations must use these command ids and schemas.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
@@ -91,14 +106,19 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
 ];
 
-const result = (toolName: string, input: unknown, resultValue: unknown): AgentHarnessToolResult => ({
+export const createAgentHarnessToolResult = (toolName: string, input: unknown, resultValue: unknown): AgentHarnessToolResult => ({
   toolName,
   input,
   result: resultValue,
   createdAt: now(),
 });
 
-export const buildAgentHarness = (context: AgentContextSnapshot): AgentHarnessSnapshot => ({
+const result = createAgentHarnessToolResult;
+
+export const buildAgentHarness = (
+  context: AgentContextSnapshot,
+  dynamicToolResults: AgentHarnessToolResult[] = [],
+): AgentHarnessSnapshot => ({
   mode: "tool-harness",
   currentPageId: context.currentPage?.id ?? context.selectedPageId,
   currentPageMarkedBy: "isCurrent",
@@ -155,6 +175,7 @@ export const buildAgentHarness = (context: AgentContextSnapshot): AgentHarnessSn
     }),
     result("listCommandManifest", {}, context.commandManifest),
   ],
+  dynamicToolResults,
   resourcePolicy: {
     allPagesReadable: true,
     assetsReadableOnDemand: true,
@@ -162,3 +183,80 @@ export const buildAgentHarness = (context: AgentContextSnapshot): AgentHarnessSn
     projectMutationPath: "commandPlanOnly",
   },
 });
+
+const getPageById = (context: AgentContextSnapshot, pageId: string) =>
+  context.pages.find((page) => page.id === pageId) ?? null;
+
+export const executeAgentHarnessToolCall = async (
+  context: AgentContextSnapshot,
+  call: AgentToolCallRequest,
+): Promise<AgentHarnessToolResult> => {
+  if (call.toolName === "readProjectSummary") {
+    return result(call.toolName, call.input, {
+      project: context.project,
+      selectedPageId: context.selectedPageId,
+      currentPageId: context.currentPage?.id ?? null,
+      selection: context.selection,
+      multiSelection: context.multiSelection,
+      activeTool: context.activeTool,
+      zoom: context.zoom,
+      saveStatus: context.saveStatus,
+    });
+  }
+  if (call.toolName === "listPages") {
+    return result(
+      call.toolName,
+      call.input,
+      context.pages.map((page) => ({
+        id: page.id,
+        name: page.name,
+        width: page.width,
+        height: page.height,
+        objectCount: page.objects.length,
+        isCurrent: page.isCurrent,
+      })),
+    );
+  }
+  if (call.toolName === "readPage") {
+    const pageId = (call.input as { pageId?: string }).pageId ?? "";
+    return result(call.toolName, call.input, getPageById(context, pageId));
+  }
+  if (call.toolName === "inspectSelection") {
+    return result(call.toolName, call.input, {
+      selection: context.selection,
+      multiSelection: context.multiSelection,
+      selectedObject: context.selectedObject,
+      selectionSnapshot: context.selectionSnapshot
+        ? {
+            ...context.selectionSnapshot,
+            dataUrl: context.selectionSnapshot.dataUrl ? "[selection image attachment available]" : null,
+          }
+        : null,
+    });
+  }
+  if (call.toolName === "listImageAssets") {
+    return result(call.toolName, call.input, context.imageAssets);
+  }
+  if (call.toolName === "renderCurrentPage" || call.toolName === "renderPage") {
+    const pageId =
+      call.toolName === "renderPage"
+        ? (call.input as { pageId?: string }).pageId ?? ""
+        : context.currentPage?.id ?? context.selectedPageId ?? "";
+    const page = getPageById(context, pageId);
+    const canvasSnapshot = await renderPageSnapshot(pageId);
+    return result(call.toolName, call.input, {
+      pageId,
+      pageName: page?.name ?? null,
+      isCurrent: Boolean(page?.isCurrent),
+      resources: {
+        page,
+        imageAssets: context.imageAssets.filter((asset) => asset.pageId === pageId),
+      },
+      canvasSnapshot,
+    });
+  }
+  if (call.toolName === "listCommandManifest") {
+    return result(call.toolName, call.input, context.commandManifest);
+  }
+  throw new Error(`Unsupported Agent harness tool: ${call.toolName}`);
+};

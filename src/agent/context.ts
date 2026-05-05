@@ -243,6 +243,27 @@ export const captureCurrentCanvasSnapshot = async (
   }
 };
 
+export const renderPageSnapshot = async (pageId: string): Promise<AgentCanvasSnapshot> => {
+  const page = useEditorStore.getState().project.pages.find((entry) => entry.id === pageId) ?? null;
+  if (!page) {
+    return createEmptySnapshot("canvas", `Page not found: ${pageId}`);
+  }
+  try {
+    const renderedPage = await renderPageToCanvas(page);
+    return snapshotFromCanvas(
+      renderedPage,
+      { x: 0, y: 0, width: renderedPage.width, height: renderedPage.height },
+      "canvas",
+      "page-render",
+    );
+  } catch (error) {
+    return createEmptySnapshot(
+      "canvas",
+      error instanceof Error ? error.message : `Failed to render page: ${pageId}`,
+    );
+  }
+};
+
 export const listImageAssets = (project: Project = useEditorStore.getState().project): AgentImageAsset[] =>
   project.pages.flatMap((page) =>
     page.panels.flatMap((panel) =>

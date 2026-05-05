@@ -145,6 +145,28 @@ describe("agent response validation", () => {
     ).toThrow();
   });
 
+  it("allows known harness tool requests and rejects unknown tools", () => {
+    expect(
+      validateAgentChatResponse({
+        message: "Need render",
+        requestedToolCalls: [
+          { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
+        ],
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
+    ]);
+
+    expect(() =>
+      validateAgentChatResponse({
+        message: "Bad tool",
+        requestedToolCalls: [{ toolName: "readFile", input: { path: "secret" } }],
+        pendingCommandPlan: null,
+      }),
+    ).toThrow(/unknown tool/);
+  });
+
   it("does not trust model-provided dangerLevel", () => {
     const response = validateAgentChatResponse({
       message: "Delete",

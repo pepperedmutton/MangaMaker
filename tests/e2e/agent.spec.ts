@@ -162,6 +162,11 @@ test("agent opens, reports test config, validates plans, and executes through co
       includesReadContextSuccess: true,
     });
 
+  await askAgent(page, "Use screenshot tool to inspect the current page render.");
+  await expect(page.getByLabel("Agent messages")).toContainText("I inspected 1 rendered page screenshot");
+  await expect(page.getByLabel("Agent tool log")).toContainText("renderPage");
+  await expect(page.getByLabel("Agent tool log")).toContainText("success");
+
   await askAgent(page, "Create a panel");
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))

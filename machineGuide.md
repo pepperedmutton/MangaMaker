@@ -305,6 +305,7 @@ Context rules:
 - The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information.
 - The Agent must receive all project pages as readable context, not only the currently selected page. The creator's current page must be marked with `isCurrent=true`.
 - The Agent harness should present project reading as local tools such as project summary, page listing, page reading, selection inspection, image asset listing, current-page rendering, and command manifest reading.
+- The Agent must be able to close the multimodal loop for a page: request a screenshot/render tool for a specific page, receive the composed visual result as a vision attachment, and receive the same page's structured resources so it can compare resource-level state with rendered outcome.
 - Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
 - Large base64 assets must not be sent without bounds.
 - The Agent sidebar must publish a sanitized debug snapshot for local automation and web debugging. The snapshot may include current busy state, pending tool call, recent messages, tool logs, config status, and summarized context, but it must not expose API keys or raw base64 screenshots.

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { commandRegistry } from "../commands/registry";
 import { commandPlanRequiresConfirmation, getCommandDangerLevel } from "./commandManifest";
-import type { AgentChatResponse, AgentCommandPlan, AgentCommandPlanItem } from "./types";
+import type { AgentChatResponse, AgentCommandPlan, AgentCommandPlanItem, AgentToolCallRequest } from "./types";
 
 const rawPlanItemSchema = z.object({
   commandId: z.string().min(1),
@@ -19,11 +19,46 @@ const rawPlanSchema = z.object({
 const rawResponseSchema = z.object({
   message: z.string(),
   pendingCommandPlan: rawPlanSchema.nullable().optional(),
+  requestedToolCalls: z.array(z.object({
+    toolName: z.string().min(1),
+    input: z.custom<unknown>(() => true),
+    reason: z.string().optional(),
+  })).optional(),
   toolLogs: z.unknown().optional(),
   usedVision: z.boolean().optional(),
   warning: z.string().optional(),
   visionUnavailableReason: z.string().optional(),
 });
+
+const allowedToolNames = new Set([
+  "readProjectSummary",
+  "listPages",
+  "readPage",
+  "inspectSelection",
+  "listImageAssets",
+  "renderCurrentPage",
+  "renderPage",
+  "listCommandManifest",
+]);
+
+const validateRequestedToolCalls = (
+  value: Array<{ toolName: string; input?: unknown; reason?: string }> | undefined,
+): AgentToolCallRequest[] => {
+  if (!value) {
+    return [];
+  }
+  return value.map((call, index) => {
+    if (!allowedToolNames.has(call.toolName)) {
+      throw new Error(`Agent requested unknown tool at requestedToolCalls[${index}]: ${call.toolName}`);
+    }
+    if (call.toolName === "renderPage" || call.toolName === "readPage") {
+      const parsed = z.object({ pageId: z.string().min(1) }).parse(call.input);
+      return { toolName: call.toolName, input: parsed, reason: call.reason };
+    }
+    const input = z.object({}).passthrough().parse(call.input ?? {});
+    return { toolName: call.toolName, input, reason: call.reason };
+  });
+};
 
 export const parseAgentModelJson = (content: string): unknown => {
   try {
@@ -73,6 +108,7 @@ export const validateAgentChatResponse = (value: unknown): AgentChatResponse => 
   return {
     message: parsed.message,
     pendingCommandPlan: validateAgentCommandPlan(parsed.pendingCommandPlan ?? null),
+    requestedToolCalls: validateRequestedToolCalls(parsed.requestedToolCalls),
     usedVision: parsed.usedVision,
     warning: parsed.warning,
     visionUnavailableReason: parsed.visionUnavailableReason,
