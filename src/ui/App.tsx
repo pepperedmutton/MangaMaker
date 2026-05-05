@@ -85,6 +85,11 @@ const writeTextToClipboard = async (text: string) => {
   return fallbackCopyText(text);
 };
 
+const hasActivePlainTextSelection = () => {
+  const selection = window.getSelection();
+  return Boolean(selection && !selection.isCollapsed && selection.toString().trim());
+};
+
 const normalizeClipboardItemForPaste = async (
   projectId: string,
   projectTitle: string,
@@ -654,6 +659,9 @@ export const App = () => {
       }
 
       if (usesModifier && key === "c") {
+        if (hasActivePlainTextSelection()) {
+          return;
+        }
         event.preventDefault();
         void handleCopySelection();
         return;

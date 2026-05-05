@@ -222,6 +222,33 @@ test("agent opens, reports test config, validates plans, and executes through co
     .toBe(pageCountBeforeDeletePlan - 1);
 });
 
+test("agent message copy writes selected plain text only", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Agent Copy");
+
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
+  await expect(page.getByLabel("Agent messages")).toContainText("Ready");
+  await page.evaluate(() => {
+    const paragraph = document.querySelector(".agent-message p");
+    if (!paragraph?.firstChild) {
+      throw new Error("Agent message paragraph not found");
+    }
+    const range = document.createRange();
+    range.setStart(paragraph.firstChild, 0);
+    range.setEnd(paragraph.firstChild, 5);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+  await page.keyboard.press("Control+C");
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("Ready");
+  const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboardText).not.toContain("data:image");
+});
+
 test("agent warns when a response did not use visual input", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Vision Warning");
