@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { chatWithAgent, getAgentConfig } from "../agent/client";
+import { chatWithAgent, getAgentConfig, publishAgentDebugSnapshot } from "../agent/client";
 import { getAgentContext } from "../agent/context";
+import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
 import { executeCommandPlan, previewCommandPlan } from "../agent/tools";
 import type {
   AgentChatMessage,
@@ -74,6 +75,22 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
   const [lastWarning, setLastWarning] = useState<string | null>(null);
 
   useEffect(() => {
+    const snapshot = createAgentDebugSnapshot({
+      mounted: true,
+      busy,
+      messages,
+      toolLogs,
+      config,
+      configError,
+      lastWarning,
+      pendingPlan,
+      contextSnapshot,
+    });
+    setLatestAgentDebugSnapshot(snapshot);
+    void publishAgentDebugSnapshot(snapshot);
+  }, [busy, messages, toolLogs, config, configError, lastWarning, pendingPlan, contextSnapshot]);
+
+  useEffect(() => {
     let active = true;
     void Promise.allSettled([getAgentConfig(), getAgentContext()]).then(([configResult, contextResult]) => {
       if (!active) {
@@ -101,6 +118,19 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
     });
     return () => {
       active = false;
+      const snapshot = createAgentDebugSnapshot({
+        mounted: false,
+        busy: false,
+        messages,
+        toolLogs,
+        config,
+        configError,
+        lastWarning,
+        pendingPlan,
+        contextSnapshot,
+      });
+      setLatestAgentDebugSnapshot(snapshot);
+      void publishAgentDebugSnapshot(snapshot);
     };
   }, []);
 
@@ -127,7 +157,12 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
   }, [config]);
 
   const appendLog = (log: AgentToolLogEntry) => {
-    setToolLogs((current) => [log, ...current].slice(0, 40));
+    setToolLogs((current) => {
+      const withoutSupersededPending = current.filter(
+        (entry) => !(entry.label === log.label && entry.status === "pending"),
+      );
+      return [log, ...withoutSupersededPending].slice(0, 40);
+    });
   };
 
   const appendMessage = (message: AgentChatMessage) => {
@@ -186,6 +221,7 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
           `${context.project.pageCount} pages, ${context.objects.length} current-page objects`,
         ),
       );
+      appendLog(createLog("agentChat", "pending", "Waiting for model response"));
       const payload = await chatWithAgent({
         messages: nextMessages.map(({ role, content }) => ({ role, content })),
         agentContext: context,
@@ -194,6 +230,7 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
       if (payload.error) {
         throw new Error(payload.error);
       }
+      appendLog(createLog("agentChat", "success", payload.usedVision === false ? "Responded without visual input" : "Model response received"));
       const warning = payload.warning ?? payload.visionUnavailableReason ?? null;
       if (warning) {
         setLastWarning(warning);

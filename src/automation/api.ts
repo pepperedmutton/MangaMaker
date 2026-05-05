@@ -1,6 +1,7 @@
 import { commandRegistry } from "../commands/registry";
 import { buildCommandManifest } from "../agent/commandManifest";
-import type { AgentCommandManifestEntry } from "../agent/types";
+import { getLatestAgentDebugSnapshot } from "../agent/debug";
+import type { AgentCommandManifestEntry, AgentDebugSnapshot } from "../agent/types";
 import { projectSchema, type Project } from "../domain/schema";
 import { normalizeProjectForCurrentVersion } from "../storage/projectMigration";
 import { useEditorStore } from "../state/editorStore";
@@ -20,6 +21,9 @@ declare global {
       };
       session: {
         get: () => ReturnType<typeof useEditorStore.getState>;
+      };
+      agent: {
+        getDebugSnapshot: () => AgentDebugSnapshot | null;
       };
     };
   }
@@ -48,6 +52,9 @@ export const installAutomationApi = () => {
     },
     session: {
       get: () => useEditorStore.getState(),
+    },
+    agent: {
+      getDebugSnapshot: () => getLatestAgentDebugSnapshot(),
     },
   };
 };

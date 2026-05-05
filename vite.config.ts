@@ -470,6 +470,7 @@ const filterAllowedAgentModels = (models: OpenRouterModelMetadata[]): AgentAvail
 
 let agentModelsCache: { fetchedAt: number; models: AgentAvailableModel[] } | null = null;
 const AGENT_MODELS_CACHE_MS = 5 * 60 * 1000;
+let latestAgentDebugSnapshot: unknown = null;
 
 const fetchAllowedAgentModels = async (): Promise<AgentAvailableModel[]> => {
   const now = Date.now();
@@ -935,6 +936,15 @@ const attachWebAgentMiddleware = (
       }
       if (method === "GET" && pathname === `${AGENT_API_BASE}/models`) {
         json(res, 200, AGENT_TEST_MODE ? TEST_AGENT_MODELS : await fetchAllowedAgentModels());
+        return;
+      }
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/debug`) {
+        json(res, 200, latestAgentDebugSnapshot ?? { mounted: false, updatedAt: null });
+        return;
+      }
+      if (method === "POST" && pathname === `${AGENT_API_BASE}/debug`) {
+        latestAgentDebugSnapshot = await readJsonBody<unknown>(req);
+        json(res, 200, { ok: true });
         return;
       }
       if (method !== "POST" || pathname !== `${AGENT_API_BASE}/chat`) {

@@ -297,4 +297,6 @@ Agent suggestions may include command plans for local edits such as adding a pan
 
 The Agent should assist with critique, planning, consistency checks, and mechanical editor operations. Story direction, page composition, final dialogue, and artistic judgment remain under the human creator's control.
 
-The web/Vite backend provides `GET /__mangamaker__/agent/config`, `GET /__mangamaker__/agent/models`, and `POST /__mangamaker__/agent/chat`. Desktop/Tauri builds use Tauri commands instead of fetching those web endpoints, so production desktop does not keep a failing `fetch`. The current desktop native backend supports test-mode availability and otherwise reports the Agent backend as unavailable unless a native provider proxy is configured.
+The web/Vite backend provides `GET /__mangamaker__/agent/config`, `GET /__mangamaker__/agent/models`, and `POST /__mangamaker__/agent/chat`. While the sidebar is open, `GET /__mangamaker__/agent/debug` exposes a sanitized live snapshot for debugging stuck tool calls; the same snapshot is available in the browser through `window.mangaMaker.agent.getDebugSnapshot()`. The debug snapshot must not include API keys or base64 screenshot data.
+
+Desktop/Tauri builds use Tauri commands instead of fetching those web endpoints, so production desktop does not keep a failing `fetch`. The current desktop native backend supports test-mode availability and otherwise reports the Agent backend as unavailable unless a native provider proxy is configured.

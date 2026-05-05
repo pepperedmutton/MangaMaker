@@ -305,6 +305,7 @@ Context rules:
 - The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information.
 - Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
 - Large base64 assets must not be sent without bounds.
+- The Agent sidebar must publish a sanitized debug snapshot for local automation and web debugging. The snapshot may include current busy state, pending tool call, recent messages, tool logs, config status, and summarized context, but it must not expose API keys or raw base64 screenshots.
 
 Desktop rule:
 

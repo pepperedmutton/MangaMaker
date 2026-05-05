@@ -1,5 +1,11 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { AgentAvailableModel, AgentChatRequest, AgentChatResponse, AgentConfig } from "./types";
+import type {
+  AgentAvailableModel,
+  AgentChatRequest,
+  AgentChatResponse,
+  AgentConfig,
+  AgentDebugSnapshot,
+} from "./types";
 import { validateAgentChatResponse } from "./agentResponseSchema";
 
 const AGENT_API_BASE = "/__mangamaker__/agent";
@@ -48,4 +54,17 @@ export const chatWithAgent = async (request: AgentChatRequest): Promise<AgentCha
     body: JSON.stringify(request),
   });
   return validateAgentChatResponse(await readJsonResponse<unknown>(response));
+};
+
+export const publishAgentDebugSnapshot = async (snapshot: AgentDebugSnapshot): Promise<void> => {
+  if (isTauriRuntime()) {
+    return;
+  }
+  await fetch(`${AGENT_API_BASE}/debug`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(snapshot),
+  }).catch(() => {
+    // Debug mirroring must never affect the user's editing or chat flow.
+  });
 };

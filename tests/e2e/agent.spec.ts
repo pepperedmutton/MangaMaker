@@ -76,6 +76,24 @@ test("agent opens, reports test config, validates plans, and executes through co
   await expect(page.getByLabel("Agent sidebar")).toBeVisible();
   await expect(page.getByLabel("Agent configuration status")).toContainText("Test mode");
   await expect(page.getByLabel("Agent context summary")).toContainText("Agent Workflow");
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        const response = await fetch("/__mangamaker__/agent/debug");
+        const debug = await response.json();
+        return {
+          mounted: debug.mounted,
+          projectTitle: debug.context?.projectTitle,
+          hasDataUrl: Boolean(debug.context?.canvasSnapshot?.available),
+        };
+      }),
+    )
+    .toEqual({ mounted: true, projectTitle: "Agent Workflow", hasDataUrl: true });
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.mangaMaker?.agent.getDebugSnapshot()?.context.projectTitle ?? null),
+    )
+    .toBe("Agent Workflow");
 
   const createTextManifest = await page.evaluate(() =>
     window.mangaMaker?.commands.describe().find((command) => command.id === "createText"),
@@ -93,6 +111,27 @@ test("agent opens, reports test config, validates plans, and executes through co
   await askAgent(page, "What is the title and page count?");
   await expect(page.getByLabel("Agent messages")).toContainText("Agent Workflow");
   await expect(page.getByLabel("Agent messages")).toContainText("1 pages");
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        const response = await fetch("/__mangamaker__/agent/debug");
+        const debug = await response.json();
+        return {
+          busy: debug.busy,
+          activeToolCall: debug.activeToolCall?.label ?? null,
+          lastToolStatus: debug.toolLogs?.[0]?.status ?? null,
+          includesReadContextSuccess: Boolean(
+            debug.toolLogs?.some((entry: { label: string; status: string }) => entry.label === "readContext" && entry.status === "success"),
+          ),
+        };
+      }),
+    )
+    .toEqual({
+      busy: false,
+      activeToolCall: null,
+      lastToolStatus: "success",
+      includesReadContextSuccess: true,
+    });
 
   await askAgent(page, "Create a panel");
   await expect

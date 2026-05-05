@@ -173,3 +173,44 @@ export type AgentChatResponse = {
   warning?: string;
   visionUnavailableReason?: string;
 };
+
+export type AgentDebugSnapshot = {
+  mounted: boolean;
+  busy: boolean;
+  updatedAt: string;
+  activeToolCall: AgentToolLogEntry | null;
+  pendingDurationMs: number | null;
+  messageCount: number;
+  messages: AgentChatMessage[];
+  toolLogs: AgentToolLogEntry[];
+  config: AgentConfig | null;
+  configError: string | null;
+  lastWarning: string | null;
+  pendingPlan: {
+    summary: string;
+    requiresConfirmation: boolean;
+    commands: Array<{
+      commandId: string;
+      dangerLevel?: AgentDangerLevel;
+      reason?: string;
+    }>;
+  } | null;
+  context: {
+    loaded: boolean;
+    projectTitle?: string;
+    pageCount?: number;
+    selectedPageId?: string | null;
+    objectCount?: number;
+    imageAssetCount?: number;
+    selection?: string | null;
+    activeTool?: ToolMode;
+    canvasSnapshot?: {
+      available: boolean;
+      width: number;
+      height: number;
+      source?: AgentCanvasSnapshot["source"];
+      byteLength: number;
+      reason?: string;
+    };
+  };
+};
