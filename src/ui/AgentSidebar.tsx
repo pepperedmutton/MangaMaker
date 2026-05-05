@@ -106,7 +106,7 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([getAgentConfig(), getAgentContext()]).then(([configResult, contextResult]) => {
+    void Promise.allSettled([getAgentConfig(), getAgentContext()]).then(async ([configResult, contextResult]) => {
       if (!active) {
         return;
       }
@@ -129,8 +129,15 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
       if (contextResult.status === "fulfilled") {
         setContextSnapshot(contextResult.value);
         const projectId = contextResult.value.project.id;
-        const storedMessages = loadAgentChatHistory(projectId);
-        setMessages(storedMessages && storedMessages.length > 0 ? storedMessages : createDefaultAgentMessages());
+        const storedHistory = await loadAgentChatHistory(projectId);
+        if (!active) {
+          return;
+        }
+        setMessages(
+          storedHistory && storedHistory.messages.length > 0
+            ? storedHistory.messages
+            : createDefaultAgentMessages(),
+        );
         setChatHistoryProjectId(projectId);
         setChatHistoryLoaded(true);
       }
@@ -160,7 +167,7 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
     if (isOnlyDefaultAgentGreeting(messages)) {
       return;
     }
-    saveAgentChatHistory(chatHistoryProjectId, messages);
+    void saveAgentChatHistory(chatHistoryProjectId, messages);
   }, [chatHistoryLoaded, chatHistoryProjectId, messages]);
 
   const contextSummary = useMemo(() => {
@@ -201,7 +208,7 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
   const deleteCurrentChatHistory = () => {
     const projectId = contextSnapshot?.project.id ?? chatHistoryProjectId;
     if (projectId) {
-      deleteAgentChatHistory(projectId);
+      void deleteAgentChatHistory(projectId);
     }
     setMessages(createDefaultAgentMessages());
     setPendingPlan(null);

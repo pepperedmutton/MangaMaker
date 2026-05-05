@@ -316,6 +316,8 @@ Chat history rules:
 - Opening the Agent for a project should restore that project's prior conversation.
 - Chat history must remain until the creator explicitly deletes that project's Agent chat history.
 - Deleting Agent chat history must not delete project pages, resources, or editor undo history.
+- Chat history must use a stable project-local record, `agent-chat.json` inside the project folder, rather than relying only on browser `localStorage`.
+- Other local agents and debugging scripts should be able to read the same session from that file or from the Agent history endpoint without decoding browser profile databases.
 
 Desktop rule:
 

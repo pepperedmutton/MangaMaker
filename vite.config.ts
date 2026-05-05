@@ -11,6 +11,7 @@ const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projec
 const PROJECT_META_FILE = ".latest_project";
 const PROJECT_JSON_FILE = "project.json";
 const PROJECT_ASSETS_DIR = "assets";
+const AGENT_CHAT_HISTORY_FILE = "agent-chat.json";
 const API_BASE = "/__mangamaker__/persistence";
 const AGENT_API_BASE = "/__mangamaker__/agent";
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -376,6 +377,102 @@ const readJsonBody = async <T>(req: IncomingMessage): Promise<T> => {
   return JSON.parse(raw) as T;
 };
 
+const validateAgentChatHistory = (value: unknown): AgentChatHistory => {
+  if (!value || typeof value !== "object") {
+    throw new Error("Agent chat history must be an object.");
+  }
+  const history = value as {
+    projectId?: unknown;
+    updatedAt?: unknown;
+    messages?: unknown;
+  };
+  if (typeof history.projectId !== "string" || history.projectId.trim().length === 0) {
+    throw new Error("Agent chat history projectId must be a non-empty string.");
+  }
+  if (typeof history.updatedAt !== "string" || history.updatedAt.trim().length === 0) {
+    throw new Error("Agent chat history updatedAt must be a non-empty string.");
+  }
+  if (!Array.isArray(history.messages)) {
+    throw new Error("Agent chat history messages must be an array.");
+  }
+  const messages = history.messages.slice(-200).map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error("Agent chat history message must be an object.");
+    }
+    const message = entry as {
+      id?: unknown;
+      role?: unknown;
+      content?: unknown;
+      createdAt?: unknown;
+    };
+    if (typeof message.id !== "string" || message.id.trim().length === 0) {
+      throw new Error("Agent chat history message id must be a non-empty string.");
+    }
+    if (message.role !== "user" && message.role !== "assistant") {
+      throw new Error("Agent chat history message role must be user or assistant.");
+    }
+    if (typeof message.content !== "string") {
+      throw new Error("Agent chat history message content must be a string.");
+    }
+    if (typeof message.createdAt !== "string" || message.createdAt.trim().length === 0) {
+      throw new Error("Agent chat history message createdAt must be a non-empty string.");
+    }
+    return {
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    } satisfies AgentChatHistory["messages"][number];
+  });
+  return {
+    projectId: history.projectId,
+    updatedAt: history.updatedAt,
+    messages,
+  };
+};
+
+const publicProjectRelativePath = (absolutePath: string) =>
+  path.relative(process.cwd(), absolutePath).replace(/\\/g, "/");
+
+const resolveAgentChatHistoryFile = async (projectId: string, createProjectDir: boolean) => {
+  const root = await ensureProjectsRoot();
+  const existingDir = await findProjectDirById(root, projectId);
+  const projectDir = existingDir ?? path.join(root, sanitizePathComponent(projectId, "project"));
+  if (createProjectDir) {
+    await fsp.mkdir(projectDir, { recursive: true });
+  }
+  return path.join(projectDir, AGENT_CHAT_HISTORY_FILE);
+};
+
+const readAgentChatHistoryFile = async (projectId: string): Promise<AgentChatHistory | null> => {
+  const historyFile = await resolveAgentChatHistoryFile(projectId, false);
+  const raw = await fsp.readFile(historyFile, "utf8").catch(() => null);
+  if (!raw) {
+    return null;
+  }
+  const history = validateAgentChatHistory(JSON.parse(raw));
+  return {
+    ...history,
+    storagePath: publicProjectRelativePath(historyFile),
+  };
+};
+
+const writeAgentChatHistoryFile = async (history: AgentChatHistory): Promise<AgentChatHistory> => {
+  const normalized = validateAgentChatHistory(history);
+  const historyFile = await resolveAgentChatHistoryFile(normalized.projectId, true);
+  const payload = {
+    ...normalized,
+    storagePath: publicProjectRelativePath(historyFile),
+  };
+  await fsp.writeFile(historyFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return payload;
+};
+
+const deleteAgentChatHistoryFile = async (projectId: string) => {
+  const historyFile = await resolveAgentChatHistoryFile(projectId, false);
+  await fsp.rm(historyFile, { force: true });
+};
+
 type AgentDangerLevel = "safe" | "normal" | "destructive";
 
 type AgentCommandPlanItem = {
@@ -436,6 +533,13 @@ type AgentChatPayload = {
   };
   canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
   approvedCommandPlan?: AgentCommandPlan | null;
+};
+
+type AgentChatHistory = {
+  projectId: string;
+  updatedAt: string;
+  messages: Array<{ id: string; role: "user" | "assistant"; content: string; createdAt: string }>;
+  storagePath?: string;
 };
 
 type OpenRouterModelMetadata = {
@@ -1041,6 +1145,30 @@ const attachWebAgentMiddleware = (
         latestAgentDebugSnapshot = await readJsonBody<unknown>(req);
         json(res, 200, { ok: true });
         return;
+      }
+      if (pathname === `${AGENT_API_BASE}/history`) {
+        const projectId = url.searchParams.get("projectId")?.trim();
+        if (method === "GET") {
+          if (!projectId) {
+            json(res, 400, { error: "projectId query parameter is required." });
+            return;
+          }
+          json(res, 200, await readAgentChatHistoryFile(projectId));
+          return;
+        }
+        if (method === "POST") {
+          json(res, 200, await writeAgentChatHistoryFile(await readJsonBody<AgentChatHistory>(req)));
+          return;
+        }
+        if (method === "DELETE") {
+          if (!projectId) {
+            json(res, 400, { error: "projectId query parameter is required." });
+            return;
+          }
+          await deleteAgentChatHistoryFile(projectId);
+          json(res, 200, { ok: true });
+          return;
+        }
       }
       if (method !== "POST" || pathname !== `${AGENT_API_BASE}/chat`) {
         text(res, 404, "Not Found");

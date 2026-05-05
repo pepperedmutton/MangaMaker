@@ -10,6 +10,7 @@ const PROJECTS_DIR_NAME: &str = "projects";
 const PROJECT_META_FILE: &str = ".latest_project";
 const PROJECT_JSON_FILE: &str = "project.json";
 const PROJECT_ASSETS_DIR: &str = "assets";
+const AGENT_CHAT_HISTORY_FILE: &str = "agent-chat.json";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +43,24 @@ struct AgentChatResponse {
     used_vision: bool,
     warning: Option<String>,
     vision_unavailable_reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentChatMessage {
+    id: String,
+    role: String,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentChatHistory {
+    project_id: String,
+    updated_at: String,
+    messages: Vec<AgentChatMessage>,
+    storage_path: Option<String>,
 }
 
 fn read_env_trimmed(name: &str) -> Option<String> {
@@ -142,6 +161,49 @@ fn find_project_dir_by_id(root: &Path, project_id: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn public_project_relative_path(path: &Path) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(|entry| entry.to_path_buf()))
+        .unwrap_or_else(|| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn resolve_agent_chat_history_file(project_id: &str, create_project_dir: bool) -> Result<PathBuf, String> {
+    let root = ensure_projects_root()?;
+    let project_dir = find_project_dir_by_id(&root, project_id)
+        .unwrap_or_else(|| resolve_project_dir(&root, project_id));
+    if create_project_dir {
+        fs::create_dir_all(&project_dir).map_err(|error| error.to_string())?;
+    }
+    Ok(project_dir.join(AGENT_CHAT_HISTORY_FILE))
+}
+
+fn normalize_agent_chat_history(mut history: AgentChatHistory) -> Result<AgentChatHistory, String> {
+    if history.project_id.trim().is_empty() {
+        return Err("Agent chat history projectId must be a non-empty string.".to_string());
+    }
+    if history.updated_at.trim().is_empty() {
+        return Err("Agent chat history updatedAt must be a non-empty string.".to_string());
+    }
+    for message in &history.messages {
+        if message.id.trim().is_empty() {
+            return Err("Agent chat history message id must be a non-empty string.".to_string());
+        }
+        if message.role != "user" && message.role != "assistant" {
+            return Err("Agent chat history message role must be user or assistant.".to_string());
+        }
+        if message.created_at.trim().is_empty() {
+            return Err("Agent chat history message createdAt must be a non-empty string.".to_string());
+        }
+    }
+    if history.messages.len() > 200 {
+        history.messages = history.messages.split_off(history.messages.len() - 200);
+    }
+    Ok(history)
 }
 
 fn find_latest_project_folder(root: &Path) -> Option<String> {
@@ -317,6 +379,39 @@ fn delete_project_draft(project_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn read_agent_chat_history(project_id: String) -> Result<Option<AgentChatHistory>, String> {
+    let history_file = resolve_agent_chat_history_file(&project_id, false)?;
+    if !history_file.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&history_file).map_err(|error| error.to_string())?;
+    let mut history = normalize_agent_chat_history(
+        serde_json::from_str::<AgentChatHistory>(&raw).map_err(|error| error.to_string())?,
+    )?;
+    history.storage_path = Some(public_project_relative_path(&history_file));
+    Ok(Some(history))
+}
+
+#[tauri::command]
+fn write_agent_chat_history(history: AgentChatHistory) -> Result<AgentChatHistory, String> {
+    let mut normalized = normalize_agent_chat_history(history)?;
+    let history_file = resolve_agent_chat_history_file(&normalized.project_id, true)?;
+    normalized.storage_path = Some(public_project_relative_path(&history_file));
+    let payload = serde_json::to_string_pretty(&normalized).map_err(|error| error.to_string())?;
+    fs::write(&history_file, format!("{payload}\n")).map_err(|error| error.to_string())?;
+    Ok(normalized)
+}
+
+#[tauri::command]
+fn delete_agent_chat_history(project_id: String) -> Result<(), String> {
+    let history_file = resolve_agent_chat_history_file(&project_id, false)?;
+    if history_file.exists() {
+        fs::remove_file(history_file).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn get_agent_config() -> AgentConfig {
     current_agent_config()
 }
@@ -354,6 +449,9 @@ pub fn run() {
             list_project_drafts,
             save_imported_image,
             delete_project_draft,
+            read_agent_chat_history,
+            write_agent_chat_history,
+            delete_agent_chat_history,
             get_agent_config,
             chat_agent
         ])

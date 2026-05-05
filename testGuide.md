@@ -202,6 +202,6 @@ Agent changes must verify both backend contract and user-visible behavior:
 10. Model availability tests must reject Google, Anthropic, OpenAI, text-only, and non-JSON-capable models; only DeepSeek or Kimi/Moonshot models with image input, text output, and `response_format` support may be considered available.
 11. When debugging Agent stalls, verify `GET /__mangamaker__/agent/debug` and `window.mangaMaker.agent.getDebugSnapshot()` report the current busy state, pending tool call, recent tool logs, and sanitized context without exposing API keys or raw base64 screenshots.
 12. Harness/context tests must verify that every project page is represented in Agent context, the creator's current page is marked with `isCurrent=true`, page render tool calls can return a screenshot plus same-page resources, and large inline image data is redacted before prompt construction.
-13. Agent chat history tests must verify that messages persist per project when the Agent sidebar is reopened, and that `Delete chat` clears only that project's conversation.
+13. Agent chat history tests must verify that messages persist per project when the Agent sidebar is reopened, that the stable `agent-chat.json` record or `GET /__mangamaker__/agent/history?projectId=...` exposes the same session for local debugging agents, and that `Delete chat` clears only that project's conversation.
 
 Use `MANGAMAKER_AGENT_TEST_MODE=1` for deterministic tests. Real `OPENROUTER_API_KEY` values must not be committed or written to test fixtures.

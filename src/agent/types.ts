@@ -34,6 +34,13 @@ export type AgentChatMessage = {
   createdAt: string;
 };
 
+export type AgentChatHistory = {
+  projectId: string;
+  updatedAt: string;
+  messages: AgentChatMessage[];
+  storagePath?: string;
+};
+
 export type AgentToolLogEntry = {
   id: string;
   label: string;

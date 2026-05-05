@@ -141,6 +141,30 @@ test("agent opens, reports test config, validates plans, and executes through co
   await expect(page.getByLabel("Agent messages")).toContainText("Agent Workflow");
   await expect(page.getByLabel("Agent messages")).toContainText("2 pages");
   await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/history?projectId=${encodeURIComponent(projectId)}`);
+        if (!response.ok) {
+          throw new Error(`Failed to read Agent history: ${response.status}`);
+        }
+        const history = (await response.json()) as {
+          storagePath?: string;
+          messages?: Array<{ role: string; content: string }>;
+        } | null;
+        return {
+          storagePath: history?.storagePath ?? null,
+          hasPrompt: Boolean(
+            history?.messages?.some((message) => message.content.includes("What is the title")),
+          ),
+        };
+      }),
+    )
+    .toEqual({
+      storagePath: expect.stringContaining("agent-chat.json"),
+      hasPrompt: true,
+    });
+  await expect
     .poll(async () =>
       page.evaluate(async () => {
         const response = await fetch("/__mangamaker__/agent/debug");
@@ -168,6 +192,15 @@ test("agent opens, reports test config, validates plans, and executes through co
   await expect(page.getByLabel("Agent chat history status")).toContainText("Saved for this project until deleted.");
   await page.getByRole("button", { name: "Delete chat" }).click();
   await expect(page.getByLabel("Agent messages")).not.toContainText("What is the title and page count?");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/history?projectId=${encodeURIComponent(projectId)}`);
+        return response.json();
+      }),
+    )
+    .toBeNull();
   await page.getByRole("button", { name: "Inspector" }).click();
   await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
   await expect(page.getByLabel("Agent messages")).not.toContainText("What is the title and page count?");
