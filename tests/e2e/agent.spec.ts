@@ -162,6 +162,16 @@ test("agent opens, reports test config, validates plans, and executes through co
       includesReadContextSuccess: true,
     });
 
+  await page.getByRole("button", { name: "Inspector" }).click();
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
+  await expect(page.getByLabel("Agent messages")).toContainText("What is the title and page count?");
+  await expect(page.getByLabel("Agent chat history status")).toContainText("Saved for this project until deleted.");
+  await page.getByRole("button", { name: "Delete chat" }).click();
+  await expect(page.getByLabel("Agent messages")).not.toContainText("What is the title and page count?");
+  await page.getByRole("button", { name: "Inspector" }).click();
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
+  await expect(page.getByLabel("Agent messages")).not.toContainText("What is the title and page count?");
+
   await askAgent(page, "Use screenshot tool to inspect the current page render.");
   await expect(page.getByLabel("Agent messages")).toContainText("I inspected 1 rendered page screenshot");
   await expect(page.getByLabel("Agent tool log")).toContainText("renderPage");

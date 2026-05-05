@@ -1178,6 +1178,15 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.agent-history p {
+  margin: 0.35rem 0 0.5rem;
+  color: var(--muted);
+}
+
+.agent-history button {
+  width: 100%;
+}
+
 .agent-warning {
   color: #b42318;
 }

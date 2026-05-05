@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { chatWithAgent, getAgentConfig, publishAgentDebugSnapshot } from "../agent/client";
+import { deleteAgentChatHistory, loadAgentChatHistory, saveAgentChatHistory } from "../agent/chatHistory";
 import { getAgentContext } from "../agent/context";
 import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
 import { buildAgentHarness, executeAgentHarnessToolCall } from "../agent/harness";
@@ -64,11 +65,18 @@ const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPl
 };
 
 const MAX_AGENT_TOOL_ROUNDS = 2;
+const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.";
+const createDefaultAgentMessages = () => [
+  createMessage("assistant", DEFAULT_AGENT_GREETING),
+];
+
+const isOnlyDefaultAgentGreeting = (messages: AgentChatMessage[]) =>
+  messages.length === 1 &&
+  messages[0].role === "assistant" &&
+  messages[0].content === DEFAULT_AGENT_GREETING;
 
 export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
-  const [messages, setMessages] = useState<AgentChatMessage[]>([
-    createMessage("assistant", "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans."),
-  ]);
+  const [messages, setMessages] = useState<AgentChatMessage[]>(createDefaultAgentMessages);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<AgentCommandPlan | null>(null);
@@ -77,6 +85,8 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [lastWarning, setLastWarning] = useState<string | null>(null);
+  const [chatHistoryProjectId, setChatHistoryProjectId] = useState<string | null>(null);
+  const [chatHistoryLoaded, setChatHistoryLoaded] = useState(false);
 
   useEffect(() => {
     const snapshot = createAgentDebugSnapshot({
@@ -118,6 +128,11 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
       }
       if (contextResult.status === "fulfilled") {
         setContextSnapshot(contextResult.value);
+        const projectId = contextResult.value.project.id;
+        const storedMessages = loadAgentChatHistory(projectId);
+        setMessages(storedMessages && storedMessages.length > 0 ? storedMessages : createDefaultAgentMessages());
+        setChatHistoryProjectId(projectId);
+        setChatHistoryLoaded(true);
       }
     });
     return () => {
@@ -137,6 +152,16 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
       void publishAgentDebugSnapshot(snapshot);
     };
   }, []);
+
+  useEffect(() => {
+    if (!chatHistoryLoaded || !chatHistoryProjectId) {
+      return;
+    }
+    if (isOnlyDefaultAgentGreeting(messages)) {
+      return;
+    }
+    saveAgentChatHistory(chatHistoryProjectId, messages);
+  }, [chatHistoryLoaded, chatHistoryProjectId, messages]);
 
   const contextSummary = useMemo(() => {
     if (!contextSnapshot) {
@@ -171,6 +196,17 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
 
   const appendMessage = (message: AgentChatMessage) => {
     setMessages((current) => [...current, message]);
+  };
+
+  const deleteCurrentChatHistory = () => {
+    const projectId = contextSnapshot?.project.id ?? chatHistoryProjectId;
+    if (projectId) {
+      deleteAgentChatHistory(projectId);
+    }
+    setMessages(createDefaultAgentMessages());
+    setPendingPlan(null);
+    setLastWarning(null);
+    appendLog(createLog("chatHistory", "success", "Deleted current project chat history"));
   };
 
   const runPlan = async (plan: AgentCommandPlan, approved: boolean) => {
@@ -343,6 +379,14 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
             alt="Current canvas snapshot"
           />
         ) : null}
+      </section>
+
+      <section className="agent-history" aria-label="Agent chat history status">
+        <h3>Chat History</h3>
+        <p>Saved for this project until deleted.</p>
+        <button type="button" onClick={deleteCurrentChatHistory} disabled={busy || !chatHistoryLoaded}>
+          Delete chat
+        </button>
       </section>
 
       <AgentMessageList messages={messages} />

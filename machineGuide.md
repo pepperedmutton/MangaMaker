@@ -310,6 +310,13 @@ Context rules:
 - Large base64 assets must not be sent without bounds.
 - The Agent sidebar must publish a sanitized debug snapshot for local automation and web debugging. The snapshot may include current busy state, pending tool call, recent messages, tool logs, config status, and summarized context, but it must not expose API keys or raw base64 screenshots.
 
+Chat history rules:
+
+- Agent chat history must be scoped by project id and persisted by default.
+- Opening the Agent for a project should restore that project's prior conversation.
+- Chat history must remain until the creator explicitly deletes that project's Agent chat history.
+- Deleting Agent chat history must not delete project pages, resources, or editor undo history.
+
 Desktop rule:
 
 - Desktop production must use Tauri commands for Agent config/chat or clearly disable the Agent with an actionable unavailable reason. It must not keep a guaranteed-failing `fetch("/__mangamaker__/agent/chat")` path.
