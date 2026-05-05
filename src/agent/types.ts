@@ -114,6 +114,13 @@ export type AgentPageSummary = {
   layerCount: number;
 };
 
+export type AgentPageContextSummary = AgentPageSummary & {
+  isCurrent: boolean;
+  viewing: boolean;
+  selectedObject: AgentObjectSummary | null;
+  objects: AgentObjectSummary[];
+};
+
 export type AgentContextSnapshot = {
   project: {
     id: string;
@@ -124,8 +131,8 @@ export type AgentContextSnapshot = {
     pageCount: number;
   };
   selectedPageId: string | null;
-  currentPage: AgentPageSummary | null;
-  pages: AgentPageSummary[];
+  currentPage: AgentPageContextSummary | null;
+  pages: AgentPageContextSummary[];
   selection: EditorSelection;
   multiSelection: EditorMultiSelection;
   activeTool: ToolMode;
@@ -160,6 +167,7 @@ export type AgentAvailableModel = {
 export type AgentChatRequest = {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   agentContext: AgentContextSnapshot;
+  harness?: AgentHarnessSnapshot;
   canvasSnapshot?: AgentCanvasSnapshot | null;
   approvedCommandPlan?: AgentCommandPlan | null;
 };
@@ -172,6 +180,36 @@ export type AgentChatResponse = {
   usedVision?: boolean;
   warning?: string;
   visionUnavailableReason?: string;
+};
+
+export type AgentHarnessToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  outputDescription: string;
+  mutatesProject: boolean;
+  requiresConfirmation: boolean;
+};
+
+export type AgentHarnessToolResult = {
+  toolName: string;
+  input: unknown;
+  result: unknown;
+  createdAt: string;
+};
+
+export type AgentHarnessSnapshot = {
+  mode: "tool-harness";
+  currentPageId: string | null;
+  currentPageMarkedBy: "isCurrent";
+  tools: AgentHarnessToolDefinition[];
+  initialToolResults: AgentHarnessToolResult[];
+  resourcePolicy: {
+    allPagesReadable: boolean;
+    assetsReadableOnDemand: boolean;
+    inlineDataUrlsRedactedFromPrompt: boolean;
+    projectMutationPath: "commandPlanOnly";
+  };
 };
 
 export type AgentDebugSnapshot = {
@@ -201,6 +239,15 @@ export type AgentDebugSnapshot = {
     pageCount?: number;
     selectedPageId?: string | null;
     objectCount?: number;
+    totalObjectCount?: number;
+    currentPageObjectCount?: number;
+    currentPageId?: string | null;
+    pages?: Array<{
+      id: string;
+      name: string;
+      isCurrent: boolean;
+      objectCount: number;
+    }>;
     imageAssetCount?: number;
     selection?: string | null;
     activeTool?: ToolMode;

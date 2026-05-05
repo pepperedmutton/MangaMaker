@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { chatWithAgent, getAgentConfig, publishAgentDebugSnapshot } from "../agent/client";
 import { getAgentContext } from "../agent/context";
 import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
+import { buildAgentHarness } from "../agent/harness";
 import { executeCommandPlan, previewCommandPlan } from "../agent/tools";
 import type {
   AgentChatMessage,
@@ -213,18 +214,30 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
         throw new Error(config?.reason ?? "Agent backend is not configured.");
       }
       const context = await getAgentContext();
+      const harness = buildAgentHarness(context);
       setContextSnapshot(context);
       appendLog(
         createLog(
           "readContext",
           "success",
-          `${context.project.pageCount} pages, ${context.objects.length} current-page objects`,
+          `${context.project.pageCount} pages, ${context.pages.reduce(
+            (count, page) => count + page.objects.length,
+            0,
+          )} objects, viewing ${context.currentPage?.name ?? "no page"}`,
+        ),
+      );
+      appendLog(
+        createLog(
+          "agentHarness",
+          "success",
+          `${harness.tools.length} tools, ${harness.initialToolResults.length} initial reads`,
         ),
       );
       appendLog(createLog("agentChat", "pending", "Waiting for model response"));
       const payload = await chatWithAgent({
         messages: nextMessages.map(({ role, content }) => ({ role, content })),
         agentContext: context,
+        harness,
         canvasSnapshot: context.canvasSnapshot,
       });
       if (payload.error) {

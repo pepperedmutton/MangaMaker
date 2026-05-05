@@ -9,6 +9,7 @@ import type {
   AgentContextSnapshot,
   AgentImageAsset,
   AgentObjectSummary,
+  AgentPageContextSummary,
   AgentPageSummary,
 } from "./types";
 
@@ -392,6 +393,18 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
   return objects;
 };
 
+const findSelectedObject = (
+  objects: AgentObjectSummary[],
+  selection: EditorSelectionItem | null,
+) =>
+  selection
+    ? objects.find(
+        (object) =>
+          object.objectType === selection.objectType &&
+          object.id === selection.objectId,
+      ) ?? null
+    : null;
+
 export const getAgentContext = async (): Promise<AgentContextSnapshot> => {
   const state = useEditorStore.getState();
   const selectedPage =
@@ -403,15 +416,21 @@ export const getAgentContext = async (): Promise<AgentContextSnapshot> => {
     selectedPage && state.selection?.pageId === selectedPage.id
       ? await captureCurrentCanvasSnapshot("selection")
       : null;
-  const objects = selectedPage ? summarizeObjects(selectedPage) : [];
-  const selectedObject =
-    state.selection && selectedPage
-      ? objects.find(
-          (object) =>
-            object.objectType === state.selection?.objectType &&
-            object.id === state.selection.objectId,
-        ) ?? null
-      : null;
+  const pages: AgentPageContextSummary[] = state.project.pages.map((page) => {
+    const objects = summarizeObjects(page);
+    const isCurrent = page.id === selectedPage?.id;
+    return {
+      ...summarizePage(page),
+      isCurrent,
+      viewing: isCurrent,
+      selectedObject:
+        state.selection?.pageId === page.id ? findSelectedObject(objects, state.selection) : null,
+      objects,
+    };
+  });
+  const currentPage = pages.find((page) => page.isCurrent) ?? null;
+  const objects = currentPage?.objects ?? [];
+  const selectedObject = currentPage?.selectedObject ?? null;
   return {
     project: {
       id: state.project.id,
@@ -422,8 +441,8 @@ export const getAgentContext = async (): Promise<AgentContextSnapshot> => {
       pageCount: state.project.pages.length,
     },
     selectedPageId: selectedPage?.id ?? null,
-    currentPage: selectedPage ? summarizePage(selectedPage) : null,
-    pages: state.project.pages.map(summarizePage),
+    currentPage,
+    pages,
     selection: state.selection ? { ...state.selection } : null,
     multiSelection: state.multiSelection.map((entry) => ({ ...entry })),
     activeTool: state.activeTool,

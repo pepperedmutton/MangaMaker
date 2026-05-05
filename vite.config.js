@@ -433,7 +433,9 @@ const getCurrentAgentConfig = async () => {
 const AGENT_SYSTEM_PROMPT = [
     "You are MangaMaker's built-in creator assistance agent.",
     "Manga creation is the human creator's work; you assist with inspection, suggestions, and bounded editor operations.",
-    "You must inspect context before proposing or executing edits.",
+    "You operate through a coding-agent-style harness: inspect the provided tool catalog and initial tool results before proposing edits.",
+    "All project pages are readable through the harness. The page the creator is currently viewing is marked isCurrent=true.",
+    "Do not pretend to have seen a page, asset, or render unless it is present in tool results or attached as vision input.",
     "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
     "Never claim an edit is complete unless it has been executed by the app.",
     "Do not present yourself as the author, director, artist, or end-to-end creator of the comic.",
@@ -451,11 +453,31 @@ const TEST_AGENT_MODELS = [
         outputModalities: ["text"],
     },
 ];
+const redactPromptValue = (value) => {
+    if (typeof value === "string") {
+        if (value.startsWith("data:image/")) {
+            return "[redacted inline image data; use image/resource tools]";
+        }
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map(redactPromptValue);
+    }
+    if (value && typeof value === "object") {
+        return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+            key,
+            key === "dataUrl" && typeof entry === "string" && entry
+                ? "[attached image]"
+                : redactPromptValue(entry),
+        ]));
+    }
+    return value;
+};
 const stripLargeSnapshotData = (context) => {
     if (!context) {
         return {};
     }
-    return {
+    return redactPromptValue({
         ...context,
         canvasSnapshot: context.canvasSnapshot
             ? {
@@ -463,15 +485,21 @@ const stripLargeSnapshotData = (context) => {
                 dataUrl: context.canvasSnapshot.dataUrl ? "[attached image]" : null,
             }
             : null,
-    };
+    });
 };
 const getLatestUserText = (messages) => [...(messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
-const getCurrentPageId = (context) => context.selectedPageId ?? context.pages?.[0]?.id ?? null;
+const getCurrentPageId = (context) => context.pages?.find((page) => page.isCurrent || page.viewing)?.id ??
+    context.selectedPageId ??
+    context.pages?.[0]?.id ??
+    null;
 const getSelectedTextId = (context) => {
     if (context.selection?.objectType === "text") {
         return context.selection.objectId;
     }
-    return context.objects?.find((object) => object.objectType === "text")?.id ?? null;
+    const currentPage = context.pages?.find((page) => page.isCurrent || page.viewing);
+    return (currentPage?.objects?.find((object) => object.objectType === "text")?.id ??
+        context.objects?.find((object) => object.objectType === "text")?.id ??
+        null);
 };
 const createPlan = (summary, commands, requiresConfirmation) => ({
     summary,
@@ -653,7 +681,10 @@ const parseModelJson = (content) => {
     }
 };
 const buildOpenRouterMessages = (payload, includeImage) => {
-    const contextText = `Agent context JSON:\n${JSON.stringify(stripLargeSnapshotData(payload.agentContext), null, 2)}`;
+    const harnessText = payload.harness
+        ? `\n\nAgent harness JSON:\n${JSON.stringify(redactPromptValue(payload.harness), null, 2)}`
+        : "";
+    const contextText = `Agent context JSON:\n${JSON.stringify(stripLargeSnapshotData(payload.agentContext), null, 2)}${harnessText}`;
     const snapshot = payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot;
     const contextContent = includeImage && snapshot?.dataUrl
         ? [

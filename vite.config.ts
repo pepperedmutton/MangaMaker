@@ -397,7 +397,17 @@ type AgentContextPayload = {
     pageCount?: number;
   };
   selectedPageId?: string | null;
-  pages?: Array<{ id: string; name?: string }>;
+  pages?: Array<{
+    id: string;
+    name?: string;
+    isCurrent?: boolean;
+    viewing?: boolean;
+    objects?: Array<{
+      id: string;
+      objectType: "panel" | "text" | "bubble" | "element";
+      content?: string;
+    }>;
+  }>;
   selection?: {
     pageId: string;
     objectType: "panel" | "text" | "bubble";
@@ -420,6 +430,7 @@ type AgentContextPayload = {
 type AgentChatPayload = {
   messages?: Array<{ role: "user" | "assistant"; content: string }>;
   agentContext?: AgentContextPayload;
+  harness?: unknown;
   canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
   approvedCommandPlan?: AgentCommandPlan | null;
 };
@@ -562,7 +573,9 @@ const getCurrentAgentConfig = async () => {
 const AGENT_SYSTEM_PROMPT = [
   "You are MangaMaker's built-in creator assistance agent.",
   "Manga creation is the human creator's work; you assist with inspection, suggestions, and bounded editor operations.",
-  "You must inspect context before proposing or executing edits.",
+  "You operate through a coding-agent-style harness: inspect the provided tool catalog and initial tool results before proposing edits.",
+  "All project pages are readable through the harness. The page the creator is currently viewing is marked isCurrent=true.",
+  "Do not pretend to have seen a page, asset, or render unless it is present in tool results or attached as vision input.",
   "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
   "Never claim an edit is complete unless it has been executed by the app.",
   "Do not present yourself as the author, director, artist, or end-to-end creator of the comic.",
@@ -582,11 +595,34 @@ const TEST_AGENT_MODELS: AgentAvailableModel[] = [
   },
 ];
 
+const redactPromptValue = (value: unknown): unknown => {
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/")) {
+      return "[redacted inline image data; use image/resource tools]";
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(redactPromptValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        key === "dataUrl" && typeof entry === "string" && entry
+          ? "[attached image]"
+          : redactPromptValue(entry),
+      ]),
+    );
+  }
+  return value;
+};
+
 const stripLargeSnapshotData = (context: AgentContextPayload | undefined) => {
   if (!context) {
     return {};
   }
-  return {
+  return redactPromptValue({
     ...context,
     canvasSnapshot: context.canvasSnapshot
       ? {
@@ -594,20 +630,28 @@ const stripLargeSnapshotData = (context: AgentContextPayload | undefined) => {
           dataUrl: context.canvasSnapshot.dataUrl ? "[attached image]" : null,
         }
       : null,
-  };
+  });
 };
 
 const getLatestUserText = (messages: AgentChatPayload["messages"]) =>
   [...(messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
 
 const getCurrentPageId = (context: AgentContextPayload) =>
-  context.selectedPageId ?? context.pages?.[0]?.id ?? null;
+  context.pages?.find((page) => page.isCurrent || page.viewing)?.id ??
+  context.selectedPageId ??
+  context.pages?.[0]?.id ??
+  null;
 
 const getSelectedTextId = (context: AgentContextPayload) => {
   if (context.selection?.objectType === "text") {
     return context.selection.objectId;
   }
-  return context.objects?.find((object) => object.objectType === "text")?.id ?? null;
+  const currentPage = context.pages?.find((page) => page.isCurrent || page.viewing);
+  return (
+    currentPage?.objects?.find((object) => object.objectType === "text")?.id ??
+    context.objects?.find((object) => object.objectType === "text")?.id ??
+    null
+  );
 };
 
 const createPlan = (
@@ -835,7 +879,10 @@ const parseModelJson = (content: string) => {
 };
 
 const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolean) => {
-  const contextText = `Agent context JSON:\n${JSON.stringify(stripLargeSnapshotData(payload.agentContext), null, 2)}`;
+  const harnessText = payload.harness
+    ? `\n\nAgent harness JSON:\n${JSON.stringify(redactPromptValue(payload.harness), null, 2)}`
+    : "";
+  const contextText = `Agent context JSON:\n${JSON.stringify(stripLargeSnapshotData(payload.agentContext), null, 2)}${harnessText}`;
   const snapshot = payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot;
   const contextContent =
     includeImage && snapshot?.dataUrl

@@ -283,7 +283,7 @@ pnpm build
 
 MangaMaker includes an in-product creator assistance Agent in the editor sidebar. Manga creation remains the creator's work: the Agent is there to inspect the current page, offer suggestions, explain options, and prepare small command-based edits when the creator asks for them. It must not present itself as the author of the comic or take over end-to-end manga creation.
 
-This product Agent is separate from external coding-agent workflows. It only works through the local command registry, validates command payloads with the existing Zod schemas, and executes approved plans through the editor undo/redo history.
+This product Agent is separate from external coding-agent workflows, but its internal harness follows the same basic shape: the Agent receives a tool catalog and audited local tool results for reading the MangaMaker project. It can inspect all pages, identify the page the creator is currently viewing with `isCurrent=true`, read page objects and resource indexes, and use the command manifest as its API reference. It only mutates the project through the local command registry, validates command payloads with the existing Zod schemas, and executes approved plans through the editor undo/redo history.
 
 Open the Agent from the editor ribbon with the `Agent` button. The sidebar always shows its configuration state before chat is available:
 
@@ -295,7 +295,7 @@ Open the Agent from the editor ribbon with the `Agent` button. The sidebar alway
 
 Agent suggestions may include command plans for local edits such as adding a panel, adjusting text, or preparing a save. Safe read-only or single normal edits may run automatically after validation, while destructive actions, cross-page changes, and plans with multiple mutating commands require explicit confirmation. Multi-command mutating plans are grouped into one undo transaction whenever the underlying commands record history.
 
-The Agent should assist with critique, planning, consistency checks, and mechanical editor operations. Story direction, page composition, final dialogue, and artistic judgment remain under the human creator's control.
+The Agent should assist with critique, planning, consistency checks, and mechanical editor operations. Story direction, page composition, final dialogue, and artistic judgment remain under the human creator's control. Large image data is not dumped into the prompt; visual renders and assets are exposed as bounded attachments or resource references.
 
 The web/Vite backend provides `GET /__mangamaker__/agent/config`, `GET /__mangamaker__/agent/models`, and `POST /__mangamaker__/agent/chat`. While the sidebar is open, `GET /__mangamaker__/agent/debug` exposes a sanitized live snapshot for debugging stuck tool calls; the same snapshot is available in the browser through `window.mangaMaker.agent.getDebugSnapshot()`. The debug snapshot must not include API keys or base64 screenshot data.
 

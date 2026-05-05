@@ -49,6 +49,21 @@ const askAgent = async (page: Page, prompt: string) => {
 test("agent opens, reports test config, validates plans, and executes through commands", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Agent Workflow");
+  const contextFixture = await page.evaluate(async () => {
+    const project = window.mangaMaker!.project.get();
+    const firstPageId = project.pages[0].id;
+    const secondPage = (await window.mangaMaker!.commands.execute("addPage", {
+      name: "Reference page",
+    })) as { id: string };
+    await window.mangaMaker!.commands.execute("createText", {
+      pageId: secondPage.id,
+      x: 80,
+      y: 120,
+      content: "Reference note",
+    });
+    await window.mangaMaker!.commands.execute("selectPage", { pageId: firstPageId });
+    return { firstPageId, secondPageId: secondPage.id };
+  });
 
   const config = await page.evaluate(async () => {
     const response = await fetch("/__mangamaker__/agent/config");
@@ -78,17 +93,31 @@ test("agent opens, reports test config, validates plans, and executes through co
   await expect(page.getByLabel("Agent context summary")).toContainText("Agent Workflow");
   await expect
     .poll(async () =>
-      page.evaluate(async () => {
+      page.evaluate(async ({ secondPageId }) => {
         const response = await fetch("/__mangamaker__/agent/debug");
         const debug = await response.json();
         return {
           mounted: debug.mounted,
           projectTitle: debug.context?.projectTitle,
+          pageCount: debug.context?.pageCount,
+          totalObjectCount: debug.context?.totalObjectCount,
+          currentPageId: debug.context?.currentPageId,
+          referencePageObjectCount: debug.context?.pages?.find(
+            (entry: { id: string }) => entry.id === secondPageId,
+          )?.objectCount,
           hasDataUrl: Boolean(debug.context?.canvasSnapshot?.available),
         };
-      }),
+      }, { secondPageId: contextFixture.secondPageId }),
     )
-    .toEqual({ mounted: true, projectTitle: "Agent Workflow", hasDataUrl: true });
+    .toEqual({
+      mounted: true,
+      projectTitle: "Agent Workflow",
+      pageCount: 2,
+      totalObjectCount: 1,
+      currentPageId: contextFixture.firstPageId,
+      referencePageObjectCount: 1,
+      hasDataUrl: true,
+    });
   await expect
     .poll(() =>
       page.evaluate(() => window.mangaMaker?.agent.getDebugSnapshot()?.context.projectTitle ?? null),
@@ -110,7 +139,7 @@ test("agent opens, reports test config, validates plans, and executes through co
 
   await askAgent(page, "What is the title and page count?");
   await expect(page.getByLabel("Agent messages")).toContainText("Agent Workflow");
-  await expect(page.getByLabel("Agent messages")).toContainText("1 pages");
+  await expect(page.getByLabel("Agent messages")).toContainText("2 pages");
   await expect
     .poll(async () =>
       page.evaluate(async () => {

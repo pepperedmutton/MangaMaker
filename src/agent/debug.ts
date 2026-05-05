@@ -21,7 +21,16 @@ const summarizeContext = (context: AgentContextSnapshot | null): AgentDebugSnaps
     projectTitle: context.project.title,
     pageCount: context.project.pageCount,
     selectedPageId: context.selectedPageId,
+    currentPageId: context.currentPage?.id ?? null,
     objectCount: context.objects.length,
+    currentPageObjectCount: context.currentPage?.objects.length ?? 0,
+    totalObjectCount: context.pages.reduce((count, page) => count + page.objects.length, 0),
+    pages: context.pages.map((page) => ({
+      id: page.id,
+      name: page.name,
+      isCurrent: page.isCurrent,
+      objectCount: page.objects.length,
+    })),
     imageAssetCount: context.imageAssets.length,
     selection: context.selection
       ? `${context.selection.objectType}:${context.selection.objectId}`

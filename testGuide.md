@@ -201,5 +201,6 @@ Agent changes must verify both backend contract and user-visible behavior:
 9. Tests and demos should prefer prompts that ask for suggestions, checks, or bounded local edits instead of asking the Agent to create a complete comic by itself.
 10. Model availability tests must reject Google, Anthropic, OpenAI, text-only, and non-JSON-capable models; only DeepSeek or Kimi/Moonshot models with image input, text output, and `response_format` support may be considered available.
 11. When debugging Agent stalls, verify `GET /__mangamaker__/agent/debug` and `window.mangaMaker.agent.getDebugSnapshot()` report the current busy state, pending tool call, recent tool logs, and sanitized context without exposing API keys or raw base64 screenshots.
+12. Harness/context tests must verify that every project page is represented in Agent context, the creator's current page is marked with `isCurrent=true`, and large inline image data is redacted before prompt construction.
 
 Use `MANGAMAKER_AGENT_TEST_MODE=1` for deterministic tests. Real `OPENROUTER_API_KEY` values must not be committed or written to test fixtures.
