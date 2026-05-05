@@ -1,4 +1,6 @@
 import { commandRegistry } from "../commands/registry";
+import { buildCommandManifest } from "../agent/commandManifest";
+import type { AgentCommandManifestEntry } from "../agent/types";
 import { projectSchema, type Project } from "../domain/schema";
 import { normalizeProjectForCurrentVersion } from "../storage/projectMigration";
 import { useEditorStore } from "../state/editorStore";
@@ -8,7 +10,7 @@ declare global {
     mangaMaker?: {
       commands: {
         list: () => string[];
-        describe: () => Array<{ id: string; label: string; recordHistory: boolean }>;
+        describe: () => AgentCommandManifestEntry[];
         execute: (commandId: string, payload: unknown) => Promise<unknown>;
       };
       project: {
@@ -31,12 +33,7 @@ export const installAutomationApi = () => {
   window.mangaMaker = {
     commands: {
       list: () => Object.keys(commandRegistry),
-      describe: () =>
-        Object.values(commandRegistry).map((command) => ({
-          id: command.id,
-          label: command.label,
-          recordHistory: "recordHistory" in command ? Boolean(command.recordHistory) : false,
-        })),
+      describe: () => buildCommandManifest(),
       execute: (commandId, payload) => useEditorStore.getState().executeCommand(commandId, payload),
     },
     project: {

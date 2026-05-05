@@ -4,10 +4,82 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
+
 const PROJECTS_DIR_NAME: &str = "projects";
 const PROJECT_META_FILE: &str = ".latest_project";
 const PROJECT_JSON_FILE: &str = "project.json";
 const PROJECT_ASSETS_DIR: &str = "assets";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentConfig {
+    enabled: bool,
+    provider: String,
+    model: Option<String>,
+    api_key_configured: bool,
+    test_mode: bool,
+    vision_enabled: bool,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentChatPayload {
+    #[allow(dead_code)]
+    messages: Option<Vec<serde_json::Value>>,
+    #[allow(dead_code)]
+    agent_context: Option<serde_json::Value>,
+    #[allow(dead_code)]
+    canvas_snapshot: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentChatResponse {
+    message: String,
+    pending_command_plan: Option<serde_json::Value>,
+    used_vision: bool,
+    warning: Option<String>,
+    vision_unavailable_reason: Option<String>,
+}
+
+fn read_env_trimmed(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn current_agent_config() -> AgentConfig {
+    let test_mode = std::env::var("MANGAMAKER_AGENT_TEST_MODE").ok().as_deref() == Some("1");
+    let model = read_env_trimmed("MANGAMAKER_AGENT_MODEL");
+    let api_key_configured = read_env_trimmed("OPENROUTER_API_KEY").is_some();
+
+    if test_mode {
+        return AgentConfig {
+            enabled: true,
+            provider: "test".to_string(),
+            model: Some(model.unwrap_or_else(|| "mangamaker-test-agent".to_string())),
+            api_key_configured,
+            test_mode: true,
+            vision_enabled: true,
+            reason: None,
+        };
+    }
+
+    AgentConfig {
+        enabled: false,
+        provider: "unavailable".to_string(),
+        model,
+        api_key_configured,
+        test_mode: false,
+        vision_enabled: false,
+        reason: Some(
+            "The desktop production Agent backend is not configured in this build. Use the Vite web backend or enable a native Agent proxy before chatting.".to_string(),
+        ),
+    }
+}
 
 fn sanitize_path_component(value: &str, fallback: &str) -> String {
     let sanitized: String = value
@@ -244,6 +316,35 @@ fn delete_project_draft(project_id: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_agent_config() -> AgentConfig {
+    current_agent_config()
+}
+
+#[tauri::command]
+fn chat_agent(payload: AgentChatPayload) -> Result<AgentChatResponse, String> {
+    let config = current_agent_config();
+    if !config.enabled {
+        return Err(config.reason.unwrap_or_else(|| "Agent backend is not configured.".to_string()));
+    }
+
+    let has_image = payload
+        .canvas_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("dataUrl"))
+        .and_then(|value| value.as_str())
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+
+    Ok(AgentChatResponse {
+        message: "Desktop Agent test mode is available. Configure the web OpenRouter backend for model-backed responses.".to_string(),
+        pending_command_plan: None,
+        used_vision: has_image,
+        warning: Some("Desktop test mode did not call a remote model.".to_string()),
+        vision_unavailable_reason: None,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -252,7 +353,9 @@ pub fn run() {
             read_project_draft,
             list_project_drafts,
             save_imported_image,
-            delete_project_draft
+            delete_project_draft,
+            get_agent_config,
+            chat_agent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

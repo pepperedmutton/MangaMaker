@@ -95,35 +95,35 @@ Required examples:
 - `setProjectType`
 - `renameProject`
 - page add, duplicate, delete, reorder, and selection
-- Home navigation and manual save
+- Home navigation, stored project listing/deletion/duplication, dirty save-on-leave, and manual save
 - page background color change
 - panel create, move, resize, delete, polygon conversion, and vertex editing
 - panel image placement and selection-driven crop editing
 - panel description metadata editing
 - layer up/down movement for panels, text, and bubbles
 - text create, move, resize, delete, direction, font, and alignment changes
-- bubble create, move, resize, delete, type changes, typography changes, tail tip changes, tail-base changes, and type-specific parameter changes
+- bubble create, move, resize, delete, type changes, style changes, tail tip changes, tail-base changes, and type-specific parameter changes
 - clipboard copy/paste for page, panel, text, and bubble payloads
 - image paste targeting behavior for `manga`
 - image paste full-stage behavior for `cg`
-- export, undo/redo, locale switch, autosave, and manual save
+- export, undo/redo, locale switch, clipboard envelope creation, and close/hide save preservation
 
 - `createProject`，包括项目类型选择
 - `setProjectType`
 - `renameProject`
 - 页面新增、复制、删除、重排和切换
-- Home 返回与手动保存
+- Home 返回、已保存项目列表/删除/复制、离开项目前保存脏项目，以及手动保存
 - 页面背景色修改
 - 分镜创建、移动、缩放、删除、多边形转换和顶点编辑
 - 分镜图片放置与选中驱动的裁切编辑
 - 分镜描述元数据编辑
 - 分镜、文字和气泡的图层上移/下移
 - 文字的创建、移动、缩放、删除、方向、字体和对齐修改
-- 气泡的创建、移动、缩放、删除、类型切换、排版修改、尾尖修改、尾根修改和类型专属参数修改
+- 气泡的创建、移动、缩放、删除、类型切换、样式修改、尾尖修改、尾根修改和类型专属参数修改
 - 页面、分镜、文字和气泡的复制粘贴
 - `manga` 模式下的图片粘贴目标优先级
 - `cg` 模式下的全 stage 图片粘贴行为
-- 导出、撤销/重做、语言切换、自动保存和手动保存
+- 导出、撤销/重做、语言切换、剪贴板 envelope 创建，以及关闭/隐藏页面时保存
 
 ## 5. Machine Control Paths / 机器控制路径
 Preferred command path inside a running app:
@@ -170,11 +170,13 @@ agent 必须保持：
 - Panel geometry edits do not drag the bound image to a different stage position.
 - Dragging a panel does not auto-select it at drag end.
 - New text defaults to vertical.
-- New bubble text defaults to vertical.
+- Dialogue text inside or near bubbles is stored as text items, not bubble fields, and follows the normal new-text defaults.
 - Non-explosion bubbles preserve a continuous outline while tail tip and tail base are edited.
 - `manga` image paste targets selected panel, then hovered panel, then a newly created panel near the pointer.
 - `cg` image paste creates a new full-stage `1200 x 1600` panel by default.
-- Every project mutation triggers immediate persistence.
+- Project mutations mark unsaved changes instead of forcing per-edit disk writes.
+- Manual `saveProject`, command-backed Home/project switching, and page close/hide save dirty projects before leaving the editor.
+- Imported and pasted images materialize into the project assets when the import/paste operation happens.
 - Web runtime persists to repository-root `projects/<sanitized-project-title>/project.json` with assets under `projects/<sanitized-project-title>/assets/`.
 - Desktop runtime persists to local untracked `projects/<project-id>/project.json` with assets under `projects/<project-id>/assets/`.
 - Default web launching uses share mode unless `--no-share` is passed.
@@ -195,11 +197,13 @@ agent 必须保持：
 - 分镜几何编辑不能把绑定图片拖到新的 stage 位置。
 - 拖拽分镜结束后不能自动选中它。
 - 新建文字默认竖排。
-- 新建气泡内文字默认竖排。
+- 气泡内或气泡附近的对白文字保存为文字对象，而不是气泡字段，并遵守普通新建文字默认值。
 - 非爆炸气泡在编辑尾尖和尾根后必须保持连续外轮廓。
 - `manga` 图片粘贴规则是：选中分镜优先，其次悬停分镜，最后在指针附近新建分镜。
 - `cg` 图片粘贴默认创建新的 `1200 x 1600` 全 stage 分镜。
-- 每次修改项目后都必须立即持久化。
+- 修改项目后必须标记为存在未保存改动，而不是每次编辑都强制写盘。
+- 手动 `saveProject`、命令驱动的 Home/项目切换，以及页面关闭/隐藏，都必须在离开编辑器前保存脏项目。
+- 导入和粘贴的图片必须在导入/粘贴操作发生时写入项目资源目录。
 - 网页版写入仓库根目录 `projects/<sanitized-project-title>/project.json`，资源写入 `projects/<sanitized-project-title>/assets/`。
 - 桌面版写入本地未跟踪的 `projects/<project-id>/project.json`，资源写入 `projects/<project-id>/assets/`。
 - 默认网页版启动必须启用分享模式，除非传入 `--no-share`。
@@ -264,3 +268,32 @@ If implementation does not satisfy the four governing documents, the agent must 
 An agent must not claim the project is complete if the documented contract is not implemented.
 
 如果文档契约尚未实现，agent 不得声称项目已经完成。
+## 10. Built-in Creative Agent Product Contract / 内置创作 Agent 契约
+
+The built-in creative Agent is a MangaMaker product feature, not the external coding-agent workflow. It must never receive or expose real API keys in the frontend. Provider configuration is read only by the web/Vite backend or the Tauri backend.
+
+Configuration rules:
+
+- `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode for tests and demos.
+- `OPENROUTER_API_KEY` is required for the OpenRouter web backend.
+- `MANGAMAKER_AGENT_MODEL` must be explicit outside test mode unless the project documents a vision-capable default.
+- The UI must show whether vision input is enabled. If vision is unavailable or a screenshot send fails, the user-visible response must include a warning or error.
+
+Command-plan rules:
+
+- Model responses must be parsed and validated before display.
+- Every `commandId` must exist in the local command registry.
+- Every payload must pass the command's existing Zod `inputSchema`.
+- The model's `dangerLevel` is advisory at most and must be replaced by local command metadata.
+- Destructive plans, cross-page plans, and any plan with multiple mutating commands require confirmation.
+- Multi-command history-recording plans should use one undo transaction when possible.
+
+Context rules:
+
+- The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information.
+- Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
+- Large base64 assets must not be sent without bounds.
+
+Desktop rule:
+
+- Desktop production must use Tauri commands for Agent config/chat or clearly disable the Agent with an actionable unavailable reason. It must not keep a guaranteed-failing `fetch("/__mangamaker__/agent/chat")` path.

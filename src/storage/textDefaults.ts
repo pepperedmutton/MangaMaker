@@ -13,6 +13,8 @@ const textInsertDefaultsSchema = z.object({
   fontWeight: z.number().int().min(100).max(900),
   letterSpacing: z.number().min(-40).max(160),
   lineSpacing: z.number().min(-40).max(160),
+  strokeWidth: z.number().nonnegative(),
+  strokeColor: z.string().min(1),
 });
 
 const cloneDefaultTextInsertDefaults = (): TextInsertDefaults => ({

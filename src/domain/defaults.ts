@@ -1,4 +1,4 @@
-import type { Bubble, Page, PanelStyle, Point, Project, ProjectType, TextItem } from "./schema";
+import type { Bubble, ElementItem, Page, PanelStyle, Point, Project, ProjectType, TextItem } from "./schema";
 import { DEFAULT_TEXT_FONT_FAMILY } from "../platform/localFonts";
 
 export const GRID_SIZE = 20;
@@ -26,6 +26,8 @@ export const DEFAULT_TEXT_INSERT_DEFAULTS = {
   fontWeight: 400,
   letterSpacing: 0,
   lineSpacing: 0,
+  strokeWidth: 2,
+  strokeColor: "#ffffff",
 } as const;
 
 const now = () => new Date().toISOString();
@@ -75,6 +77,7 @@ export const createDefaultPage = (index: number, projectType: ProjectType = "man
   panels: [],
   texts: [],
   bubbles: [],
+  elements: [],
   groups: [],
   layers: [],
 });
@@ -92,10 +95,27 @@ export const createDefaultText = (
   fontWeight: DEFAULT_TEXT_INSERT_DEFAULTS.fontWeight,
   letterSpacing: DEFAULT_TEXT_INSERT_DEFAULTS.letterSpacing,
   lineSpacing: DEFAULT_TEXT_INSERT_DEFAULTS.lineSpacing,
+  strokeWidth: DEFAULT_TEXT_INSERT_DEFAULTS.strokeWidth,
+  strokeColor: DEFAULT_TEXT_INSERT_DEFAULTS.strokeColor,
   color: "#121212",
   direction: "vertical",
   textAlign: "center",
   verticalAlign: "top",
+  ...overrides,
+});
+
+export const createDefaultElement = (
+  overrides: Partial<Omit<ElementItem, "id">> = {},
+): Omit<ElementItem, "id"> => ({
+  x: 160,
+  y: 160,
+  width: 240,
+  height: 180,
+  rotation: 0,
+  src: "",
+  title: "Element",
+  category: "symbols",
+  opacity: 1,
   ...overrides,
 });
 
@@ -136,6 +156,7 @@ export const clonePage = (page: Page): Page => {
   const panelIdMap = new Map<string, string>();
   const textIdMap = new Map<string, string>();
   const bubbleIdMap = new Map<string, string>();
+  const elementIdMap = new Map<string, string>();
 
   const panels = page.panels.map((panel) => {
     const id = createId("panel");
@@ -179,6 +200,15 @@ export const clonePage = (page: Page): Page => {
     };
   });
 
+  const elements = (page.elements ?? []).map((element) => {
+    const id = createId("element");
+    elementIdMap.set(element.id, id);
+    return {
+      ...element,
+      id,
+    };
+  });
+
   const groups = page.groups
     .map((group) => ({
       ...group,
@@ -203,6 +233,15 @@ export const clonePage = (page: Page): Page => {
                 }
               : null;
           }
+          if (member.objectType === "element") {
+            const mappedId = elementIdMap.get(member.objectId);
+            return mappedId
+              ? {
+                  objectType: "element" as const,
+                  objectId: mappedId,
+                }
+              : null;
+          }
           const mappedId = bubbleIdMap.get(member.objectId);
           return mappedId
             ? {
@@ -211,7 +250,7 @@ export const clonePage = (page: Page): Page => {
               }
             : null;
         })
-        .filter((member): member is { objectType: "panel" | "text" | "bubble"; objectId: string } =>
+        .filter((member): member is { objectType: "panel" | "text" | "bubble" | "element"; objectId: string } =>
           member !== null,
         ),
     }))
@@ -224,6 +263,7 @@ export const clonePage = (page: Page): Page => {
     panels,
     texts,
     bubbles,
+    elements,
     groups,
     layers: page.layers.map((layer) => {
       if (layer.startsWith("panel:")) {
@@ -234,6 +274,9 @@ export const clonePage = (page: Page): Page => {
       }
       if (layer.startsWith("bubble:")) {
         return `bubble:${bubbleIdMap.get(layer.slice("bubble:".length)) ?? layer.slice("bubble:".length)}`;
+      }
+      if (layer.startsWith("element:")) {
+        return `element:${elementIdMap.get(layer.slice("element:".length)) ?? layer.slice("element:".length)}`;
       }
       return layer;
     }),

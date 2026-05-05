@@ -1,16 +1,20 @@
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createHash, scryptSync, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { defineConfig, type PreviewServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-const PROJECTS_DIR_NAME = "projects";
+const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projects";
 const PROJECT_META_FILE = ".latest_project";
 const PROJECT_JSON_FILE = "project.json";
 const PROJECT_ASSETS_DIR = "assets";
 const API_BASE = "/__mangamaker__/persistence";
+const AGENT_API_BASE = "/__mangamaker__/agent";
+const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+const AGENT_TEST_MODE = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
 const AUTH_COOKIE_NAME = "mangamaker_auth";
 const AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const AUTH_LOGIN_PATH = "/__mangamaker__/auth/login";
@@ -26,6 +30,7 @@ const AUTH_PASSWORD_SCRYPT_OPTIONS = {
 const AUTH_COOKIE_TOKEN = createHash("sha256")
   .update(`mangamaker:${AUTH_PASSWORD_HASH_HEX}:${AUTH_PASSWORD_SALT_HEX}`)
   .digest("hex");
+const AUTH_DISABLED = process.env.MANGAMAKER_DISABLE_AUTH === "1";
 const SHARE_ALLOWED_HOSTS = [
   "gradio.live",
   ".gradio.live",
@@ -370,10 +375,492 @@ const readJsonBody = async <T>(req: IncomingMessage): Promise<T> => {
   return JSON.parse(raw) as T;
 };
 
+type AgentDangerLevel = "safe" | "normal" | "destructive";
+
+type AgentCommandPlanItem = {
+  commandId: string;
+  payload: unknown;
+  reason?: string;
+  dangerLevel?: AgentDangerLevel;
+};
+
+type AgentCommandPlan = {
+  summary: string;
+  commands: AgentCommandPlanItem[];
+  requiresConfirmation: boolean;
+};
+
+type AgentContextPayload = {
+  project?: {
+    title?: string;
+    pageCount?: number;
+  };
+  selectedPageId?: string | null;
+  pages?: Array<{ id: string; name?: string }>;
+  selection?: {
+    pageId: string;
+    objectType: "panel" | "text" | "bubble";
+    objectId: string;
+  } | null;
+  objects?: Array<{
+    id: string;
+    objectType: "panel" | "text" | "bubble";
+    content?: string;
+  }>;
+  imageAssets?: Array<{ src: string }>;
+  canvasSnapshot?: {
+    dataUrl?: string | null;
+    width?: number;
+    height?: number;
+    reason?: string;
+  };
+};
+
+type AgentChatPayload = {
+  messages?: Array<{ role: "user" | "assistant"; content: string }>;
+  agentContext?: AgentContextPayload;
+  canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
+  approvedCommandPlan?: AgentCommandPlan | null;
+};
+
+const getCurrentAgentConfig = () => {
+  const testMode = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
+  const model = process.env.MANGAMAKER_AGENT_MODEL?.trim() || null;
+  const apiKeyConfigured = Boolean(process.env.OPENROUTER_API_KEY?.trim());
+  if (testMode) {
+    return {
+      enabled: true,
+      provider: "test" as const,
+      model: model ?? "mangamaker-test-agent",
+      apiKeyConfigured,
+      testMode: true,
+      visionEnabled: true,
+    };
+  }
+  if (!apiKeyConfigured) {
+    return {
+      enabled: false,
+      provider: "unavailable" as const,
+      model,
+      apiKeyConfigured: false,
+      testMode: false,
+      visionEnabled: false,
+      reason: "OPENROUTER_API_KEY is not configured.",
+    };
+  }
+  if (!model) {
+    return {
+      enabled: false,
+      provider: "unavailable" as const,
+      model: null,
+      apiKeyConfigured: true,
+      testMode: false,
+      visionEnabled: false,
+      reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the multimodal Agent.",
+    };
+  }
+  return {
+    enabled: true,
+    provider: "openrouter" as const,
+    model,
+    apiKeyConfigured: true,
+    testMode: false,
+    visionEnabled: true,
+  };
+};
+
+const AGENT_SYSTEM_PROMPT = [
+  "You are MangaMaker's built-in editing agent.",
+  "You must inspect context before proposing or executing edits.",
+  "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
+  "Never claim an edit is complete unless it has been executed by the app.",
+  "Destructive or batch operations must be returned as a pending plan that requires confirmation.",
+  "Command payloads must match the manifest schema.",
+  "Keep natural-language responses concise.",
+  "Return JSON only: {\"message\":\"...\",\"pendingCommandPlan\":null|{\"summary\":\"...\",\"commands\":[{\"commandId\":\"...\",\"payload\":{},\"reason\":\"...\"}],\"requiresConfirmation\":true|false}}.",
+].join("\n");
+
+const stripLargeSnapshotData = (context: AgentContextPayload | undefined) => {
+  if (!context) {
+    return {};
+  }
+  return {
+    ...context,
+    canvasSnapshot: context.canvasSnapshot
+      ? {
+          ...context.canvasSnapshot,
+          dataUrl: context.canvasSnapshot.dataUrl ? "[attached image]" : null,
+        }
+      : null,
+  };
+};
+
+const getLatestUserText = (messages: AgentChatPayload["messages"]) =>
+  [...(messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
+
+const getCurrentPageId = (context: AgentContextPayload) =>
+  context.selectedPageId ?? context.pages?.[0]?.id ?? null;
+
+const getSelectedTextId = (context: AgentContextPayload) => {
+  if (context.selection?.objectType === "text") {
+    return context.selection.objectId;
+  }
+  return context.objects?.find((object) => object.objectType === "text")?.id ?? null;
+};
+
+const createPlan = (
+  summary: string,
+  commands: AgentCommandPlanItem[],
+  requiresConfirmation: boolean,
+): AgentCommandPlan => ({
+  summary,
+  commands,
+  requiresConfirmation,
+});
+
+const createTestAgentResponse = (payload: AgentChatPayload) => {
+  const context = payload.agentContext ?? {};
+  const pageId = getCurrentPageId(context);
+  const latest = getLatestUserText(payload.messages);
+  const normalized = latest.toLowerCase();
+  const hasVisionInput = Boolean((payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot)?.dataUrl);
+
+  if (normalized.includes("vision warning")) {
+    return {
+      message: "I answered without visual input.",
+      pendingCommandPlan: null,
+      usedVision: false,
+      warning: "Test mode simulated a vision fallback; the canvas image was not used.",
+      visionUnavailableReason: "Simulated vision failure.",
+    };
+  }
+
+  if (
+    normalized.includes("title") ||
+    normalized.includes("page count") ||
+    latest.includes("标题") ||
+    latest.includes("页面数量")
+  ) {
+    return {
+      message: `Project "${context.project?.title ?? "Untitled"}" has ${context.project?.pageCount ?? 0} pages.`,
+      pendingCommandPlan: null,
+      toolLogs: [
+        {
+          id: `tool-${Date.now()}`,
+          label: "readProject",
+          status: "success",
+          detail: "Read project title and page count.",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (latest.includes("图片") || normalized.includes("image")) {
+    return {
+      message: `I found ${context.imageAssets?.length ?? 0} image assets.`,
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (latest.includes("删除") || latest.includes("清空") || normalized.includes("delete") || normalized.includes("clear")) {
+    const targetsPage = latest.includes("页面") || normalized.includes("page");
+    const command =
+      targetsPage && pageId
+        ? {
+            commandId: "removePage",
+            payload: { pageId },
+            reason: "Remove current page.",
+            dangerLevel: "safe" as const,
+          }
+        : context.selection && pageId
+        ? {
+            commandId: "deleteObject",
+            payload: {
+              pageId: context.selection.pageId,
+              objectType: context.selection.objectType,
+              objectId: context.selection.objectId,
+            },
+            reason: "Delete selected object.",
+            dangerLevel: "destructive" as const,
+          }
+        : null;
+    return {
+      message: command ? "This is destructive. Please confirm the command plan." : "No page or selected object is available to delete.",
+      pendingCommandPlan: command ? createPlan("Destructive delete plan", [command], true) : null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (latest.includes("保存") || normalized.includes("save")) {
+    return {
+      message: "I prepared a save command.",
+      pendingCommandPlan: createPlan(
+        "Save the current project",
+        [{ commandId: "saveProject", payload: {}, reason: "Save project.", dangerLevel: "normal" }],
+        false,
+      ),
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (latest.includes("描边") || normalized.includes("stroke")) {
+    const textId = getSelectedTextId(context);
+    const widthMatch = latest.match(/(?:宽度|width)\s*[:：]?\s*(\d+(?:\.\d+)?)/i) ?? latest.match(/\b(\d+(?:\.\d+)?)\b/);
+    const strokeWidth = widthMatch ? Number(widthMatch[1]) : 4;
+    const strokeColor = latest.includes("红") || normalized.includes("red") ? "#ff0000" : "#111111";
+    return {
+      message: textId && pageId ? "I prepared a text stroke update." : "No text object is available for stroke editing.",
+      pendingCommandPlan:
+        textId && pageId
+          ? createPlan(
+              "Update text stroke",
+              [
+                {
+                  commandId: "updateText",
+                  payload: { pageId, textId, strokeColor, strokeWidth },
+                  reason: "Apply requested text stroke.",
+                  dangerLevel: "normal",
+                },
+              ],
+              false,
+            )
+          : null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (normalized.includes("two panels") || latest.includes("两个分镜") || latest.includes("涓や釜鍒嗛暅")) {
+    return {
+      message: pageId ? "I prepared two panel creation commands." : "No page is available for panel creation.",
+      pendingCommandPlan:
+        pageId
+          ? createPlan(
+              "Create two panels",
+              [
+                {
+                  commandId: "createPanel",
+                  payload: { pageId, x: 80, y: 100, width: 280, height: 220 },
+                  reason: "Create first requested panel.",
+                  dangerLevel: "safe" as const,
+                },
+                {
+                  commandId: "createPanel",
+                  payload: { pageId, x: 400, y: 100, width: 280, height: 220 },
+                  reason: "Create second requested panel.",
+                  dangerLevel: "safe" as const,
+                },
+              ],
+              false,
+            )
+          : null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (latest.includes("文字") || latest.includes("文本") || normalized.includes("text")) {
+    const contentMatch = latest.match(/(?:文字|文本|text)\s*[:：]\s*(.+)$/i);
+    const content = contentMatch?.[1]?.trim() || "你好";
+    return {
+      message: pageId ? "I prepared a text creation command." : "No page is available for text creation.",
+      pendingCommandPlan:
+        pageId
+          ? createPlan(
+              "Create one text object",
+              [
+                {
+                  commandId: "createText",
+                  payload: { pageId, x: 200, y: 200, content },
+                  reason: "Create requested text.",
+                  dangerLevel: "normal",
+                },
+              ],
+              false,
+            )
+          : null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (latest.includes("分镜") || latest.includes("面板") || normalized.includes("panel")) {
+    return {
+      message: pageId ? "I prepared a panel creation command." : "No page is available for panel creation.",
+      pendingCommandPlan:
+        pageId
+          ? createPlan(
+              "Create one panel",
+              [
+                {
+                  commandId: "createPanel",
+                  payload: { pageId, x: 120, y: 120, width: 320, height: 260 },
+                  reason: "Create requested panel.",
+                  dangerLevel: "normal",
+                },
+              ],
+              false,
+            )
+          : null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  return {
+    message: `I can read this project and prepare command-based edits. Current canvas snapshot: ${
+      context.canvasSnapshot?.dataUrl ? `${context.canvasSnapshot.width}x${context.canvasSnapshot.height}` : context.canvasSnapshot?.reason ?? "unavailable"
+    }.`,
+    pendingCommandPlan: null,
+    usedVision: hasVisionInput,
+  };
+};
+
+const parseModelJson = (content: string) => {
+  try {
+    return JSON.parse(content);
+  } catch {
+    const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+    if (fenced) {
+      return JSON.parse(fenced);
+    }
+    const objectStart = content.indexOf("{");
+    const objectEnd = content.lastIndexOf("}");
+    if (objectStart >= 0 && objectEnd > objectStart) {
+      return JSON.parse(content.slice(objectStart, objectEnd + 1));
+    }
+    throw new Error("The model did not return valid JSON.");
+  }
+};
+
+const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolean) => {
+  const contextText = `Agent context JSON:\n${JSON.stringify(stripLargeSnapshotData(payload.agentContext), null, 2)}`;
+  const snapshot = payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot;
+  const contextContent =
+    includeImage && snapshot?.dataUrl
+      ? [
+          { type: "text", text: contextText },
+          { type: "image_url", image_url: { url: snapshot.dataUrl } },
+        ]
+      : contextText;
+  return [
+    { role: "system", content: AGENT_SYSTEM_PROMPT },
+    { role: "user", content: contextContent },
+    ...(payload.messages ?? []).map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
+};
+
+const callOpenRouter = async (payload: AgentChatPayload, includeImage: boolean) => {
+  const config = getCurrentAgentConfig();
+  if (!config.enabled || config.provider !== "openrouter" || !config.model) {
+    throw new Error(config.reason ?? "Agent is not configured.");
+  }
+  const response = await fetch(OPENROUTER_CHAT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY?.trim() ?? ""}`,
+      "HTTP-Referer": "http://localhost",
+      "X-Title": "MangaMaker Agent",
+    },
+    body: JSON.stringify({
+      model: config.model,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: buildOpenRouterMessages(payload, includeImage),
+    }),
+  });
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`OpenRouter request failed (${response.status}): ${raw.slice(0, 500)}`);
+  }
+  let parsed: { choices?: Array<{ message?: { content?: string } }> };
+  try {
+    parsed = JSON.parse(raw) as typeof parsed;
+  } catch {
+    throw new Error("OpenRouter returned invalid JSON.");
+  }
+  const content = parsed.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("OpenRouter response did not include assistant content.");
+  }
+  return {
+    ...(parseModelJson(content) as Record<string, unknown>),
+    usedVision: includeImage,
+  } as {
+    message?: unknown;
+    pendingCommandPlan?: unknown;
+    usedVision?: boolean;
+  };
+};
+
+type AgentSchemaLoader = () => Promise<{
+  validateAgentChatResponse: (value: unknown) => unknown;
+}>;
+
+const createDynamicAgentSchemaLoader = (): AgentSchemaLoader => async () => {
+  const moduleName = pathToFileURL(path.resolve(process.cwd(), "src/agent/agentResponseSchema.ts")).href;
+  return (await import(moduleName)) as {
+    validateAgentChatResponse: (value: unknown) => unknown;
+  };
+};
+
+const normalizeAgentModelResponse = async (value: unknown, loadAgentSchema: AgentSchemaLoader) => {
+  const module = await loadAgentSchema();
+  return module.validateAgentChatResponse(value);
+};
+
+const attachWebAgentMiddleware = (
+  middlewares: { use: (handler: (req: IncomingMessage, res: ServerResponse, next: () => void) => void) => void },
+  loadAgentSchema: AgentSchemaLoader = createDynamicAgentSchemaLoader(),
+) => {
+  const handler = async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    const method = req.method?.toUpperCase() ?? "GET";
+    const host = req.headers.host;
+    const url = new URL(req.url ?? "/", host ? `http://${host}` : "http://localhost");
+    const pathname = url.pathname;
+
+    if (!pathname.startsWith(AGENT_API_BASE)) {
+      next();
+      return;
+    }
+
+    try {
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/config`) {
+        json(res, 200, getCurrentAgentConfig());
+        return;
+      }
+      if (method !== "POST" || pathname !== `${AGENT_API_BASE}/chat`) {
+        text(res, 404, "Not Found");
+        return;
+      }
+      const payload = await readJsonBody<AgentChatPayload>(req);
+      if (AGENT_TEST_MODE) {
+        json(res, 200, await normalizeAgentModelResponse(createTestAgentResponse(payload), loadAgentSchema));
+        return;
+      }
+      const config = getCurrentAgentConfig();
+      if (!config.enabled) {
+        json(res, 503, { message: "Agent unavailable.", error: config.reason ?? "Agent is not configured.", pendingCommandPlan: null });
+        return;
+      }
+      const hasImage = Boolean((payload.canvasSnapshot ?? payload.agentContext?.canvasSnapshot)?.dataUrl);
+      json(res, 200, await normalizeAgentModelResponse(await callOpenRouter(payload, hasImage && config.visionEnabled), loadAgentSchema));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      json(res, 500, { message: "Agent request failed.", error: message, pendingCommandPlan: null });
+    }
+  };
+
+  middlewares.use(handler);
+};
+
 const requestExpectsJson = (req: IncomingMessage, pathname: string) => {
   const accept = String(req.headers.accept ?? "").toLowerCase();
   const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
-  return pathname.startsWith(API_BASE) || accept.includes("application/json") || contentType.includes("application/json");
+  return pathname.startsWith(API_BASE) || pathname.startsWith(AGENT_API_BASE) || accept.includes("application/json") || contentType.includes("application/json");
 };
 
 const parseCookies = (req: IncomingMessage) => {
@@ -640,6 +1127,11 @@ const attachWebAuthMiddleware = (
     const pathname = url.pathname;
 
     if (pathname === `${API_BASE}/health`) {
+      next();
+      return;
+    }
+
+    if (AUTH_DISABLED) {
       next();
       return;
     }
@@ -913,8 +1405,22 @@ const webAuthPlugin = () => ({
   },
 });
 
+const webAgentPlugin = () => ({
+  name: "mangamaker-agent-proxy",
+  configureServer(server: ViteDevServer) {
+    attachWebAgentMiddleware(server.middlewares, async () =>
+      server.ssrLoadModule("/src/agent/agentResponseSchema.ts") as Promise<{
+        validateAgentChatResponse: (value: unknown) => unknown;
+      }>,
+    );
+  },
+  configurePreviewServer(server: PreviewServer) {
+    attachWebAgentMiddleware(server.middlewares);
+  },
+});
+
 export default defineConfig({
-  plugins: [react(), webAuthPlugin(), webPersistencePlugin()],
+  plugins: [react(), webAuthPlugin(), webAgentPlugin(), webPersistencePlugin()],
   server: {
     allowedHosts: ALLOWED_HOSTS,
   },

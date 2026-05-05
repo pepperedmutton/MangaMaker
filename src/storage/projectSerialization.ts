@@ -9,6 +9,8 @@ const DEFAULT_TEXT = {
   fontWeight: 400,
   letterSpacing: 0,
   lineSpacing: 0,
+  strokeWidth: 2,
+  strokeColor: "#ffffff",
   direction: "vertical",
   textAlign: "left",
   verticalAlign: "top",
@@ -79,6 +81,8 @@ const compactText = (text: TextItem) => ({
     ? { letterSpacing: text.letterSpacing }
     : {}),
   ...(text.lineSpacing !== DEFAULT_TEXT.lineSpacing ? { lineSpacing: text.lineSpacing } : {}),
+  ...(text.strokeWidth !== DEFAULT_TEXT.strokeWidth ? { strokeWidth: text.strokeWidth } : {}),
+  ...(text.strokeColor !== DEFAULT_TEXT.strokeColor ? { strokeColor: text.strokeColor } : {}),
   ...(text.direction !== DEFAULT_TEXT.direction ? { direction: text.direction } : {}),
   ...(text.textAlign !== DEFAULT_TEXT.textAlign ? { textAlign: text.textAlign } : {}),
   ...(text.verticalAlign !== DEFAULT_TEXT.verticalAlign ? { verticalAlign: text.verticalAlign } : {}),

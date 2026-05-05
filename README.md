@@ -45,12 +45,12 @@ Required scope:
 - Image paste targets the selected panel first, then the hovered panel, and otherwise creates a new panel near the pointer.
 - In `cg` projects, pasted images create a new full-stage `1200 x 1600` panel by default.
 - Text supports horizontal and vertical layout, but new text defaults to vertical.
-- Bubble text also defaults to vertical.
-- The Inspector exposes text and bubble font, size, direction, alignment, and continuous numeric sliders.
+- Dialogue lettering is represented by text boxes; speech bubbles are shape containers that can be grouped or aligned with text.
+- The Inspector exposes text font, size, direction, alignment, and stroke controls, plus bubble shape/style controls and continuous numeric sliders.
 - Non-explosion bubbles support both a draggable tail tip and a draggable tail-to-body connection point, and the rendered outline must remain continuous without internal tail borders.
-- Progress persists after every mutating operation.
-- In web runtime, persistence lands immediately in repository-root `projects/` folders.
-- In desktop runtime, persistence lands immediately in a local untracked `projects/` folder.
+- Project edits are lazy-saved: mutating operations mark unsaved changes, and the project is written when the user clicks `Save`, leaves the project, or closes/hides the page with unsaved changes.
+- In web runtime, project saves land in repository-root `projects/` folders.
+- In desktop runtime, project saves land in a local untracked `projects/` folder.
 - The default web launcher creates a public share link unless `--no-share` is passed. Gradio remains the default provider, and `ngrok` is supported through `--share-provider ngrok`.
 - The UI and governing documents remain readable in Chinese and English.
 - All major GUI actions have command/API parity.
@@ -76,12 +76,12 @@ Required scope:
 - 粘贴图片时，优先粘贴到已选中的分镜；若无选中，则粘贴到鼠标悬停的分镜；若两者都没有，则在指针附近新建分镜。
 - `cg` 项目中，粘贴图片时默认新建一个铺满 stage 的 `1200 x 1600` 分镜。
 - 文字支持横排和竖排，但新建文字默认竖排。
-- 气泡内文字也默认竖排。
-- Inspector 必须提供文字与气泡的字体、字号、方向、对齐控制，以及连续数值滑杆。
+- 对白文字由独立文字框表示；气泡是形状容器，可与文字框组合或对齐。
+- Inspector 必须提供文字的字体、字号、方向、对齐和描边控制，以及气泡形状/样式控制和连续数值滑杆。
 - 非爆炸气泡必须同时支持拖拽尾巴尖端和尾巴与本体的连接点，并保证外轮廓连续、内部不出现尾巴边线。
-- 每一次会修改项目的操作后都必须立即持久化。
-- 网页版必须立即把数据写入仓库根目录的 `projects/`。
-- 桌面版必须立即把数据写入本地未跟踪的 `projects/`。
+- 项目编辑采用懒保存：修改操作会标记未保存状态，用户点击 `Save`、离开项目或在有未保存更改时关闭/隐藏页面，才会写入项目文件。
+- 网页版的项目保存必须写入仓库根目录的 `projects/`。
+- 桌面版的项目保存必须写入本地未跟踪的 `projects/`。
 - 默认网页版启动器必须创建一个 72 小时有效的 Gradio 分享链接，除非显式传入 `--no-share`。
 - 界面与根文档必须支持中英文阅读。
 - 所有主要 GUI 操作都必须具备命令/API 对齐。
@@ -100,7 +100,7 @@ Non-goals:
 
 ## Functional Areas / 功能分区
 ### Project and Page / 项目与页面
-- Create, rename, load, autosave, and manually save projects.
+- Create, rename, load, manually save, and leave-save projects.
 - Choose project type during creation and change it later from the sidebar.
 - Show welcome-screen thumbnails and delete projects from the welcome context menu.
 - Add, duplicate, delete, reorder, and select pages.
@@ -131,7 +131,7 @@ Non-goals:
 - Undo and redo.
 - Shared command model for UI, tests, and automation.
 - Local automation bridge via `window.mangaMaker`.
-- Immediate persistence after every mutation.
+- Lazy project persistence on manual save, project leave, and page close/hide.
 - Default web share launcher with terminal-printed public link output for the active share provider.
 
 ## Required UX Rules / 必需易用性规则
@@ -145,7 +145,7 @@ Non-goals:
 - When selected text or panels overlap the page edge, the page boundary must remain readable as a dashed overlay above them.
 - Right-click inside the editing surface must feel immediate and context-sensitive, and must never fall back to the browser menu.
 - Delete actions must be immediate and undoable.
-- `projects/` persistence must feel immediate enough that closing the app after an important action does not lose work.
+- `projects/` persistence must be reliable enough that clicking `Save`, leaving the project, or closing the app after an important action does not lose work.
 
 - 新用户必须能在无外部帮助的情况下完成：创建项目、选择 `manga` 或 `cg`、新增页面、创建分镜、导入或粘贴图片、加入文字或气泡、导出。
 - 页面必须居中放在明显更大的工作区中，工作区面积约为页面面积的 8 倍。
@@ -157,7 +157,7 @@ Non-goals:
 - 当已选中的文字或分镜压到页面边界时，页面边界必须以虚线叠加在对象上方，保持可读。
 - 编辑区右键菜单必须即刻出现并随对象变化，绝不能退回浏览器默认菜单。
 - 删除操作必须立即执行，但仍然能够撤销。
-- `projects/` 落盘必须足够及时，保证完成重要操作后立刻关闭也不会丢数据。
+- `projects/` 落盘必须可靠，保证点击 `Save`、离开项目或完成重要操作后关闭程序都不会丢数据。
 
 ## Required Engineering Rules / 必需工程规则
 - Product behavior must be command-backed.
@@ -202,8 +202,8 @@ Current status:
 - Welcome-screen project browsing, first-page thumbnails, project-type selection, and right-click project deletion are present.
 - Order-based page naming, page context menus, page background editing, export, and manual save are present.
 - Crop-based panel images, live selected-image dragging, polygon editing, layer controls, and panel description metadata are present.
-- Default vertical text, bubble Inspector typography controls, and tail-base editing for non-explosion bubbles are present.
-- Immediate persistence is present in both web and desktop runtimes, with web persistence rooted at repository `projects/`.
+- Default vertical text, text Inspector typography/stroke controls, bubble shape controls, and tail-base editing for non-explosion bubbles are present.
+- Lazy save-on-demand and save-on-exit persistence are present in both web and desktop runtimes, with web persistence rooted at repository `projects/`.
 - The default web launcher starts in share mode and prints the active provider link in the terminal.
 - Validation currently passes with `pnpm test`, `pnpm test:e2e`, and `pnpm build`.
 
@@ -211,8 +211,8 @@ Current status:
 - 欢迎页项目浏览、首页缩略图、项目类型选择和项目右键删除已经具备。
 - 顺序编号页面名称、页面右键菜单、页面背景编辑、导出和手动保存已经具备。
 - 基于裁切的分镜图片、选中后实时拖图、多边形编辑、图层控制和分镜描述元数据已经具备。
-- 默认竖排文字、气泡 Inspector 排版控制，以及非爆炸气泡的尾巴连接点编辑已经具备。
-- 网页版与桌面版都具备即时持久化，其中网页版落盘根目录为仓库 `projects/`。
+- 默认竖排文字、文字 Inspector 排版/描边控制、气泡形状控制，以及非爆炸气泡的尾巴连接点编辑已经具备。
+- 网页版与桌面版都具备按需保存和退出保存，其中网页版落盘根目录为仓库 `projects/`。
 - 默认网页版启动器会在终端打印 Gradio 分享链接。
 - 当前验证命令 `pnpm test`、`pnpm test:e2e` 和 `pnpm build` 可通过。
 
@@ -278,3 +278,18 @@ pnpm test
 pnpm test:e2e
 pnpm build
 ```
+
+## Built-in Creative Agent / 内置创作 Agent
+
+MangaMaker includes an in-product creative Agent in the editor sidebar. It is separate from external coding-agent workflows: it only works through the local command registry, validates command payloads with the existing Zod schemas, and executes approved plans through the editor undo/redo history.
+
+Open the Agent from the editor ribbon with the `Agent` button. The sidebar always shows its configuration state before chat is available:
+
+- `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode and does not require a real provider key.
+- `OPENROUTER_API_KEY` is required for the web/Vite OpenRouter backend. Do not commit real keys.
+- `MANGAMAKER_AGENT_MODEL` is required outside test mode. The app does not silently default to a non-vision model for multimodal use.
+- The sidebar shows whether visual input is enabled. If a canvas screenshot cannot be sent or read, the response shows a warning instead of silently falling back to text-only mode.
+
+Agent actions are previewed as command plans. Safe read-only or single normal edits may run automatically, while destructive actions, cross-page changes, and plans with multiple mutating commands require explicit confirmation. Multi-command mutating plans are grouped into one undo transaction whenever the underlying commands record history.
+
+The web/Vite backend provides `GET /__mangamaker__/agent/config` and `POST /__mangamaker__/agent/chat`. Desktop/Tauri builds use Tauri commands instead of fetching those web endpoints, so production desktop does not keep a failing `fetch`. The current desktop native backend supports test-mode availability and otherwise reports the Agent backend as unavailable unless a native provider proxy is configured.

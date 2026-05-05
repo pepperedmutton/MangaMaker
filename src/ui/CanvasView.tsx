@@ -32,7 +32,7 @@ import {
   snapValue,
   zoomImageViewBox,
 } from "../domain/helpers";
-import type { Bubble, Page, Panel, Point, Rect as PanelRect, TextItem } from "../domain/schema";
+import type { Bubble, ElementItem, Page, Panel, Point, Rect as PanelRect, TextItem } from "../domain/schema";
 import {
   createVerticalPunctuationOffsetMeasurer,
   FULL_WIDTH_SPACE,
@@ -71,7 +71,7 @@ type CustomBubblePreview = {
 
 type BoundaryOverlayPreview =
   | {
-      objectType: "panel" | "text";
+      objectType: "panel" | "text" | "element";
       objectId: string;
       rect: { x: number; y: number; width: number; height: number };
     }
@@ -92,6 +92,10 @@ type ContextMenuTarget =
   | {
       kind: "text";
       textId: string;
+    }
+  | {
+      kind: "element";
+      elementId: string;
     }
   | {
       kind: "bubble";
@@ -143,6 +147,18 @@ const EDGE_HANDLE_THICKNESS = 10;
 const EDGE_AXIS_LOCK_ENTER_RATIO = 0.45;
 const EDGE_AXIS_LOCK_EXIT_RATIO = 0.75;
 const CUSTOM_BUBBLE_CLOSE_DISTANCE_PX = 9;
+
+const getScaledTextStrokeProps = (
+  text: Pick<TextItem, "strokeWidth" | "strokeColor">,
+  scale: number,
+) => {
+  const strokeWidth = Math.max(0, text.strokeWidth) * scale;
+  return {
+    stroke: strokeWidth > 0 ? text.strokeColor : undefined,
+    strokeWidth,
+    fillAfterStrokeEnabled: strokeWidth > 0,
+  };
+};
 
 type CanvasLayoutSnapshot = {
   scale: number;
@@ -1750,6 +1766,8 @@ const TextNode = ({
   const verticalColumnAdvance = textLayout.vertical.columnAdvance * scale;
   const verticalOffsetX = textLayout.vertical.offsetX * scale;
   const verticalOffsetY = textLayout.vertical.offsetY * scale;
+  const textStrokePadding = Math.max(0, item.strokeWidth) * scale;
+  const textStrokeProps = getScaledTextStrokeProps(item, scale);
   const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
     event.cancelBubble = true;
     if (event.evt.shiftKey) {
@@ -1916,7 +1934,12 @@ const TextNode = ({
           <Group
             clipFunc={(ctx) => {
               ctx.beginPath();
-              ctx.rect(0, 0, displayRect.width * scale, displayRect.height * scale);
+              ctx.rect(
+                -textStrokePadding,
+                -textStrokePadding,
+                displayRect.width * scale + textStrokePadding * 2,
+                displayRect.height * scale + textStrokePadding * 2,
+              );
               ctx.closePath();
             }}
           >
@@ -1936,6 +1959,7 @@ const TextNode = ({
                     fontFamily={item.fontFamily}
                     fontStyle={String(item.fontWeight)}
                     fill={item.color}
+                    {...textStrokeProps}
                     x={verticalOffsetX + columnIndex * verticalColumnAdvance + punctuationOffsetX}
                     y={verticalOffsetY + rowIndex * verticalRowAdvance}
                     width={verticalColumnAdvance}
@@ -1958,6 +1982,7 @@ const TextNode = ({
             fontStyle={String(item.fontWeight)}
             letterSpacing={letterSpacing * scale}
             fill={item.color}
+            {...textStrokeProps}
             width={displayRect.width * scale}
             height={displayRect.height * scale}
             align={item.textAlign}
@@ -1996,6 +2021,273 @@ const TextNode = ({
                 y: nextRect.y,
                 width: nextRect.width,
                 height: nextRect.height,
+              });
+            }}
+          />
+        </>
+      ) : isHighlighted ? (
+        <Rect
+          x={displayRect.x * scale}
+          y={displayRect.y * scale}
+          width={displayRect.width * scale}
+          height={displayRect.height * scale}
+          stroke="#c36d2f"
+          dash={[8, 6]}
+          strokeWidth={1.5}
+          fillEnabled={false}
+          listening={false}
+        />
+      ) : null}
+    </>
+  );
+};
+
+const ElementNode = ({
+  page,
+  item,
+  scale,
+  selected,
+  highlighted,
+  onBoundaryPreviewChange,
+  onOpenContextMenu,
+}: {
+  page: Page;
+  item: ElementItem;
+  scale: number;
+  selected: boolean;
+  highlighted: boolean;
+  onBoundaryPreviewChange: (preview: BoundaryOverlayPreview) => void;
+  onOpenContextMenu: (
+    event: KonvaEventObject<MouseEvent>,
+    target: ContextMenuTarget,
+  ) => void;
+}) => {
+  const executeCommand = useEditorStore((state) => state.executeCommand);
+  const activeTool = useEditorStore((state) => state.activeTool);
+  const multiSelection = useEditorStore((state) => state.multiSelection);
+  const image = useImageElement(item.src);
+  const isHighlighted = highlighted || selected;
+  const isInMultiSelection = multiSelection.some(
+    (entry) =>
+      entry.pageId === page.id &&
+      entry.objectType === "element" &&
+      entry.objectId === item.id,
+  );
+  const [liveRect, setLiveRect] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [liveRotation, setLiveRotation] = useState<number | null>(null);
+  const displayRect = liveRect ?? item;
+  const displayRotation = liveRotation ?? item.rotation;
+  const centerX = (displayRect.x + displayRect.width * 0.5) * scale;
+  const centerY = (displayRect.y + displayRect.height * 0.5) * scale;
+
+  const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
+    event.cancelBubble = true;
+    if (event.evt.shiftKey) {
+      const currentPageSelection = multiSelection
+        .filter((entry) => entry.pageId === page.id)
+        .map((entry) => ({
+          objectType: entry.objectType,
+          objectId: entry.objectId,
+        }));
+      const alreadySelected = currentPageSelection.some(
+        (entry) => entry.objectType === "element" && entry.objectId === item.id,
+      );
+      const nextObjects = alreadySelected
+        ? currentPageSelection.filter(
+            (entry) => !(entry.objectType === "element" && entry.objectId === item.id),
+          )
+        : [
+            ...currentPageSelection,
+            {
+              objectType: "element" as const,
+              objectId: item.id,
+            },
+          ];
+      if (nextObjects.length === 0) {
+        void executeCommand("clearSelection", {});
+      } else {
+        void executeCommand("selectObjects", {
+          pageId: page.id,
+          objects: nextObjects,
+        });
+      }
+      return;
+    }
+    void executeCommand("selectObject", {
+      pageId: page.id,
+      objectType: "element",
+      objectId: item.id,
+    });
+  };
+
+  const commitRotationFromPointer = (event: KonvaEventObject<DragEvent>) => {
+    const stage = event.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) {
+      return item.rotation;
+    }
+    const angle = (Math.atan2(pointer.y - centerY, pointer.x - centerX) * 180) / Math.PI + 90;
+    return Math.round(angle);
+  };
+
+  return (
+    <>
+      <Group
+        x={centerX}
+        y={centerY}
+        rotation={displayRotation}
+        draggable={activeTool === "select" && !liveRect && liveRotation === null}
+        onContextMenu={(event) => {
+          if (!isInMultiSelection) {
+            event.cancelBubble = true;
+            void executeCommand("selectObject", {
+              pageId: page.id,
+              objectType: "element",
+              objectId: item.id,
+            });
+          } else {
+            event.cancelBubble = true;
+          }
+          onOpenContextMenu(event, {
+            kind: "element",
+            elementId: item.id,
+          });
+        }}
+        onDragStart={() => {
+          if (!selected) {
+            void executeCommand("selectObject", {
+              pageId: page.id,
+              objectType: "element",
+              objectId: item.id,
+            });
+          }
+          onBoundaryPreviewChange({
+            objectType: "element",
+            objectId: item.id,
+            rect: {
+              x: item.x,
+              y: item.y,
+              width: item.width,
+              height: item.height,
+            },
+          });
+        }}
+        onDragMove={(event) => {
+          const nextRect = {
+            x: event.target.x() / scale - item.width * 0.5,
+            y: event.target.y() / scale - item.height * 0.5,
+            width: item.width,
+            height: item.height,
+          };
+          onBoundaryPreviewChange({
+            objectType: "element",
+            objectId: item.id,
+            rect: nextRect,
+          });
+        }}
+        onClick={handleSelect}
+        onDragEnd={(event) => {
+          const nextRect = {
+            x: event.target.x() / scale - item.width * 0.5,
+            y: event.target.y() / scale - item.height * 0.5,
+            width: item.width,
+            height: item.height,
+          };
+          void executeCommand("updateElement", {
+            pageId: page.id,
+            elementId: item.id,
+            x: nextRect.x,
+            y: nextRect.y,
+          }).finally(() => {
+            onBoundaryPreviewChange(null);
+          });
+        }}
+      >
+        <Rect
+          x={(-displayRect.width * scale) / 2}
+          y={(-displayRect.height * scale) / 2}
+          width={displayRect.width * scale}
+          height={displayRect.height * scale}
+          fill="rgba(0,0,0,0.001)"
+        />
+        {image ? (
+          <KonvaImage
+            image={image}
+            x={(-displayRect.width * scale) / 2}
+            y={(-displayRect.height * scale) / 2}
+            width={displayRect.width * scale}
+            height={displayRect.height * scale}
+            opacity={item.opacity}
+          />
+        ) : null}
+      </Group>
+
+      {selected ? (
+        <>
+          <Group x={centerX} y={centerY} rotation={displayRotation} listening={false}>
+            <Rect
+              x={(-displayRect.width * scale) / 2}
+              y={(-displayRect.height * scale) / 2}
+              width={displayRect.width * scale}
+              height={displayRect.height * scale}
+              stroke="#c36d2f"
+              dash={[10, 6]}
+              strokeWidth={2}
+              fillEnabled={false}
+            />
+          </Group>
+          <ResizeHandles
+            rect={displayRect}
+            scale={scale}
+            color="#c36d2f"
+            mode="corners-and-edges"
+            resizeBehavior="anchored"
+            onLiveChange={setLiveRect}
+            onCommit={(_, nextRect) => {
+              setLiveRect(null);
+              void executeCommand("updateElement", {
+                pageId: page.id,
+                elementId: item.id,
+                x: nextRect.x,
+                y: nextRect.y,
+                width: nextRect.width,
+                height: nextRect.height,
+              });
+            }}
+          />
+          <Line
+            points={[centerX, centerY - displayRect.height * scale * 0.5, centerX, centerY - displayRect.height * scale * 0.5 - 34]}
+            stroke="#c36d2f"
+            strokeWidth={1.5}
+            listening={false}
+          />
+          <Circle
+            x={centerX}
+            y={centerY - displayRect.height * scale * 0.5 - 42}
+            radius={8}
+            fill="#ffffff"
+            stroke="#c36d2f"
+            strokeWidth={2}
+            draggable
+            onMouseDown={(event) => {
+              event.cancelBubble = true;
+            }}
+            onDragMove={(event) => {
+              const rotation = commitRotationFromPointer(event);
+              setLiveRotation(rotation);
+            }}
+            onDragEnd={(event) => {
+              const rotation = commitRotationFromPointer(event);
+              setLiveRotation(null);
+              void executeCommand("updateElement", {
+                pageId: page.id,
+                elementId: item.id,
+                rotation,
               });
             }}
           />
@@ -3246,7 +3538,7 @@ export const CanvasView = ({
     [multiSelection, page.id],
   );
   const isObjectHighlighted = (
-    objectType: "panel" | "text" | "bubble",
+    objectType: "panel" | "text" | "bubble" | "element",
     objectId: string,
   ) =>
     pageMultiSelection.some(
@@ -3259,7 +3551,9 @@ export const CanvasView = ({
       ? selectedObject
       : selectedObject && "tailTip" in selectedObject
         ? selectedObject
-        : selectedObject && "fontFamily" in selectedObject
+        : selectedObject && "src" in selectedObject
+          ? selectedObject
+          : selectedObject && "fontFamily" in selectedObject
           ? selectedObject
           : null;
 
@@ -3269,7 +3563,7 @@ export const CanvasView = ({
     selectedRect && Math.abs(selectedRect.y + selectedRect.height / 2 - page.height / 2) < 24;
   const selectedBoundaryRect =
     selection?.pageId === page.id &&
-    (selection.objectType === "panel" || selection.objectType === "text")
+    (selection.objectType === "panel" || selection.objectType === "text" || selection.objectType === "element")
       ? boundaryOverlayPreview &&
         boundaryOverlayPreview.objectId === selection.objectId &&
         boundaryOverlayPreview.objectType === selection.objectType
@@ -3288,6 +3582,13 @@ export const CanvasView = ({
                 width: selectedObject.width,
                 height: selectedObject.height,
               }
+            : selectedObject && "src" in selectedObject
+              ? {
+                  x: selectedObject.x,
+                  y: selectedObject.y,
+                  width: selectedObject.width,
+                  height: selectedObject.height,
+                }
             : null
       : null;
   const showPageBoundaryOverlay =
@@ -3488,6 +3789,7 @@ export const CanvasView = ({
   const contextMenuTarget = contextMenu?.target ?? null;
   const panelContextTarget = contextMenuTarget?.kind === "panel" ? contextMenuTarget : null;
   const textContextTarget = contextMenuTarget?.kind === "text" ? contextMenuTarget : null;
+  const elementContextTarget = contextMenuTarget?.kind === "element" ? contextMenuTarget : null;
   const bubbleContextTarget = contextMenuTarget?.kind === "bubble" ? contextMenuTarget : null;
   const canvasContextTarget = contextMenuTarget?.kind === "canvas" ? contextMenuTarget : null;
 
@@ -3497,10 +3799,13 @@ export const CanvasView = ({
   const textForContextMenu = textContextTarget
     ? page.texts.find((entry) => entry.id === textContextTarget.textId) ?? null
     : null;
+  const elementForContextMenu = elementContextTarget
+    ? (page.elements ?? []).find((entry) => entry.id === elementContextTarget.elementId) ?? null
+    : null;
   const bubbleForContextMenu = bubbleContextTarget
     ? page.bubbles.find((entry) => entry.id === bubbleContextTarget.bubbleId) ?? null
     : null;
-  const getLayerMoveState = (objectType: "panel" | "text" | "bubble", objectId: string) => {
+  const getLayerMoveState = (objectType: "panel" | "text" | "bubble" | "element", objectId: string) => {
     const layerRef = `${objectType}:${objectId}`;
     const currentIndex = page.layers.indexOf(layerRef);
     return {
@@ -3513,6 +3818,9 @@ export const CanvasView = ({
     : null;
   const textLayerMoveState = textForContextMenu
     ? getLayerMoveState("text", textForContextMenu.id)
+    : null;
+  const elementLayerMoveState = elementForContextMenu
+    ? getLayerMoveState("element", elementForContextMenu.id)
     : null;
   const bubbleLayerMoveState = bubbleForContextMenu
     ? getLayerMoveState("bubble", bubbleForContextMenu.id)
@@ -3561,7 +3869,7 @@ export const CanvasView = ({
     },
   ];
 
-  const confirmDeleteObject = (objectType: "panel" | "text" | "bubble", objectId: string) => {
+  const confirmDeleteObject = (objectType: "panel" | "text" | "bubble" | "element", objectId: string) => {
     closeContextMenu();
     void executeCommand("deleteObject", {
       pageId: page.id,
@@ -3575,9 +3883,11 @@ export const CanvasView = ({
       ? t("contextMenu.panel")
       : contextMenu?.target.kind === "text"
         ? t("contextMenu.text")
-        : contextMenu?.target.kind === "bubble"
-          ? t("contextMenu.bubble")
-          : t("contextMenu.canvas");
+        : contextMenu?.target.kind === "element"
+          ? t("contextMenu.element")
+          : contextMenu?.target.kind === "bubble"
+            ? t("contextMenu.bubble")
+            : t("contextMenu.canvas");
 
   const contextMenuActions: ContextMenuAction[] =
     contextMenu?.target.kind === "panel" && panelForContextMenu
@@ -3715,6 +4025,49 @@ export const CanvasView = ({
             },
             ...groupContextActions,
           ]
+        : contextMenu?.target.kind === "element" && elementForContextMenu
+          ? [
+              {
+                label: t("contextMenu.moveLayerUp"),
+                disabled: !elementLayerMoveState?.canMoveUp,
+                onSelect: () => {
+                  if (!elementLayerMoveState?.canMoveUp) {
+                    return;
+                  }
+                  closeContextMenu();
+                  void executeCommand("moveLayer", {
+                    pageId: page.id,
+                    objectType: "element",
+                    objectId: elementForContextMenu.id,
+                    direction: "up",
+                  });
+                },
+              },
+              {
+                label: t("contextMenu.moveLayerDown"),
+                disabled: !elementLayerMoveState?.canMoveDown,
+                onSelect: () => {
+                  if (!elementLayerMoveState?.canMoveDown) {
+                    return;
+                  }
+                  closeContextMenu();
+                  void executeCommand("moveLayer", {
+                    pageId: page.id,
+                    objectType: "element",
+                    objectId: elementForContextMenu.id,
+                    direction: "down",
+                  });
+                },
+              },
+              {
+                label: t("contextMenu.deleteElement"),
+                danger: true,
+                onSelect: () => {
+                  confirmDeleteObject("element", elementForContextMenu.id);
+                },
+              },
+              ...groupContextActions,
+            ]
         : contextMenu?.target.kind === "bubble" && bubbleForContextMenu
           ? [
               {
@@ -3906,6 +4259,18 @@ export const CanvasView = ({
                 if (entry.objectType === "text") {
                   return {
                     objectType: "text" as const,
+                    objectId: entry.object.id,
+                    rect: {
+                      x: entry.object.x,
+                      y: entry.object.y,
+                      width: entry.object.width,
+                      height: entry.object.height,
+                    },
+                  };
+                }
+                if (entry.objectType === "element") {
+                  return {
+                    objectType: "element" as const,
                     objectId: entry.object.id,
                     rect: {
                       x: entry.object.x,
@@ -4117,6 +4482,25 @@ export const CanvasView = ({
                       }
                       highlighted={isObjectHighlighted("panel", entry.object.id)}
                       showImagePreview={selectedImagePanel?.id === entry.object.id}
+                      onBoundaryPreviewChange={(preview) => setBoundaryOverlayPreview(preview)}
+                      onOpenContextMenu={openContextMenu}
+                    />
+                  );
+                }
+
+                if (entry.objectType === "element") {
+                  return (
+                    <ElementNode
+                      key={entry.layer}
+                      page={page}
+                      item={entry.object}
+                      scale={scale}
+                      selected={
+                        selection?.pageId === page.id &&
+                        selection.objectType === "element" &&
+                        selection.objectId === entry.object.id
+                      }
+                      highlighted={isObjectHighlighted("element", entry.object.id)}
                       onBoundaryPreviewChange={(preview) => setBoundaryOverlayPreview(preview)}
                       onOpenContextMenu={openContextMenu}
                     />

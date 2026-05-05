@@ -129,13 +129,30 @@ export const textItemSchema = z.object({
   letterSpacing: z.number().min(-40).max(160).default(0),
   lineSpacing: z.number().min(-40).max(160).default(0),
   color: z.string(),
+  strokeWidth: z.number().nonnegative().default(2),
+  strokeColor: z.string().default("#ffffff"),
   direction: textDirectionSchema.default("vertical"),
   textAlign: textAlignSchema.default("left"),
   verticalAlign: verticalAlignSchema.default("top"),
 });
 
+export const elementCategorySchema = z.enum(["text", "symbols", "artWords", "effects", "balloons"]);
+
+export const elementItemSchema = z.object({
+  id: z.string(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+  rotation: z.number().default(0),
+  src: z.string(),
+  title: z.string(),
+  category: elementCategorySchema.default("symbols"),
+  opacity: z.number().min(0).max(1).default(1),
+});
+
 export const objectRefSchema = z.object({
-  objectType: z.enum(["panel", "text", "bubble"]),
+  objectType: z.enum(["panel", "text", "bubble", "element"]),
   objectId: z.string(),
 });
 
@@ -221,7 +238,7 @@ export const bubbleSchema = z.object({
   customHandleProfile: bubbleCustomHandleProfileSchema.optional(),
 });
 
-export const objectTypeSchema = z.enum(["panel", "text", "bubble"]);
+export const objectTypeSchema = z.enum(["panel", "text", "bubble", "element"]);
 export const projectTypeSchema = z.enum(["manga", "cg"]);
 
 export const pageSchema = z.object({
@@ -233,6 +250,7 @@ export const pageSchema = z.object({
   panels: z.array(panelSchema),
   texts: z.array(textItemSchema),
   bubbles: z.array(bubbleSchema),
+  elements: z.array(elementItemSchema).default([]),
   groups: z.array(groupSchema).default([]),
   layers: z.array(z.string()),
 });
@@ -253,6 +271,8 @@ export type ImagePlacement = z.infer<typeof imagePlacementSchema>;
 export type Panel = z.infer<typeof panelSchema>;
 export type TextDirection = z.infer<typeof textDirectionSchema>;
 export type TextItem = z.infer<typeof textItemSchema>;
+export type ElementCategory = z.infer<typeof elementCategorySchema>;
+export type ElementItem = z.infer<typeof elementItemSchema>;
 export type ObjectRef = z.infer<typeof objectRefSchema>;
 export type Group = z.infer<typeof groupSchema>;
 export type Bubble = z.infer<typeof bubbleSchema>;

@@ -99,7 +99,8 @@ const createProjectWithTextAndBubble = (): Project => {
     {
       id: bubbleId,
       ...createDefaultBubble({
-        text: "Bubble should persist",
+        bubbleType: "thought",
+        strokeColor: "#334455",
       }),
     },
   ];
@@ -155,7 +156,8 @@ describe("localDraft persistence", () => {
 
     const persistedProject = mockSaveProjectToProjectsFolder.mock.calls[0]?.[0] as Project;
     expect(persistedProject.pages[0]?.texts[0]?.content).toBe("Text should persist");
-    expect(persistedProject.pages[0]?.bubbles[0]?.text).toBe("Bubble should persist");
+    expect(persistedProject.pages[0]?.bubbles[0]?.bubbleType).toBe("thought");
+    expect(persistedProject.pages[0]?.bubbles[0]?.strokeColor).toBe("#334455");
 
     const rawDraft = (
       (globalThis as { window: { localStorage: { getItem: (key: string) => string | null } } }).window
@@ -171,7 +173,8 @@ describe("localDraft persistence", () => {
 
     const parsed = JSON.parse(rawDraft ?? "{}") as Project;
     expect(parsed.pages[0]?.texts[0]?.content).toBe("Text should persist");
-    expect(parsed.pages[0]?.bubbles[0]?.text).toBe("Bubble should persist");
+    expect(parsed.pages[0]?.bubbles[0]?.bubbleType).toBe("thought");
+    expect(parsed.pages[0]?.bubbles[0]?.strokeColor).toBe("#334455");
   });
 
   it("keeps non-default bubbleType through compact save payloads", async () => {

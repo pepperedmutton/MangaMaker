@@ -4,6 +4,7 @@ import { svgPathProperties } from "svg-path-properties";
 import {
   createBlankProject,
   createDefaultBubble,
+  createDefaultElement,
   createDefaultPage,
   createDefaultPanelStyle,
   createDefaultText,
@@ -15,6 +16,7 @@ import {
 import {
   clamp,
   clampBubbleRectToWorkspace,
+  clampElementRectToWorkspace,
   clampBubbleTailBaseLocalPoint,
   clampPanelRectToWorkspace,
   clampPointToWorkspace,
@@ -36,7 +38,11 @@ import {
   snapValue,
   toLayerRef,
 } from "../domain/helpers";
-import { clipboardItemSchema } from "../domain/clipboard";
+import {
+  MANGAMAKER_CLIPBOARD_SIGNATURE,
+  clipboardItemSchema,
+  type ClipboardEnvelope,
+} from "../domain/clipboard";
 import {
   bubbleTypeSchema,
   objectRefSchema,
@@ -61,7 +67,12 @@ import {
   translate,
   type Locale,
 } from "../i18n";
-import { loadLocalDraft, saveLocalDraft } from "../storage/localDraft";
+import {
+  deleteLocalProject,
+  listLocalProjects,
+  loadLocalDraft,
+  saveLocalDraft,
+} from "../storage/localDraft";
 import { normalizeProjectForCurrentVersion } from "../storage/projectMigration";
 import type {
   EditorMultiSelection,
@@ -111,7 +122,7 @@ const createContextStatus = (
   params?: Parameters<typeof translate>[2],
 ) => createLocalizedStatus(getLocale(context), tone, key, params);
 
-const getToolLabel = (locale: Locale, tool: "select" | "panel" | "text" | "bubble") =>
+const getToolLabel = (locale: Locale, tool: "select" | "panel" | "text" | "bubble" | "element") =>
   translate(locale, `toolbar.${tool}`);
 
 const snapshotSession = (
@@ -147,7 +158,7 @@ const uniqueSelections = (entries: EditorSelectionItem[]) => {
 
 const isSelectionMember = (
   selection: EditorSelectionItem[],
-  objectType: "panel" | "text" | "bubble",
+  objectType: "panel" | "text" | "bubble" | "element",
   objectId: string,
 ) => selection.some((entry) => entry.objectType === objectType && entry.objectId === objectId);
 
@@ -207,6 +218,100 @@ const readImageMetadata = async (
   });
 };
 
+const blobToDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+
+const srcToDataUrl = async (src: string) => {
+  if (src.startsWith("data:")) {
+    return src;
+  }
+  const response = await fetch(src);
+  const blob = await response.blob();
+  return blobToDataUrl(blob);
+};
+
+const inlinePanelImageForClipboard = async (
+  panel: Project["pages"][number]["panels"][number],
+) => {
+  if (!panel.image) {
+    return panel;
+  }
+  try {
+    const inlinedSrc = await srcToDataUrl(panel.image.src);
+    return {
+      ...panel,
+      image: {
+        ...panel.image,
+        src: inlinedSrc,
+      },
+    };
+  } catch (error) {
+    console.warn("Failed to inline panel image for clipboard payload:", error);
+    return panel;
+  }
+};
+
+const inlinePageForClipboard = async (page: Project["pages"][number]) => {
+  const panels = await Promise.all(page.panels.map((panel) => inlinePanelImageForClipboard(panel)));
+  return {
+    ...page,
+    panels,
+  };
+};
+
+const buildClipboardEnvelopeForSession = async (
+  context: Parameters<CommandDefinition["execute"]>[0],
+): Promise<ClipboardEnvelope | null> => {
+  const session = context.getSession();
+  const project = context.getProject();
+  let item: ClipboardEnvelope["item"] | null = null;
+
+  if (session.selection) {
+    const selectionPage =
+      project.pages.find((page) => page.id === session.selection?.pageId) ?? null;
+    if (!selectionPage) {
+      return null;
+    }
+    if (session.selection.objectType === "panel") {
+      const panel =
+        selectionPage.panels.find((entry) => entry.id === session.selection?.objectId) ?? null;
+      item = panel ? { kind: "panel", panel: await inlinePanelImageForClipboard(panel) } : null;
+    } else if (session.selection.objectType === "text") {
+      const text =
+        selectionPage.texts.find((entry) => entry.id === session.selection?.objectId) ?? null;
+      item = text ? { kind: "text", text } : null;
+    } else {
+      const bubble =
+        selectionPage.bubbles.find((entry) => entry.id === session.selection?.objectId) ?? null;
+      item = bubble ? { kind: "bubble", bubble } : null;
+    }
+  } else {
+    const page =
+      (session.selectedPageId
+        ? project.pages.find((entry) => entry.id === session.selectedPageId)
+        : null) ??
+      project.pages[0] ??
+      null;
+    item = page ? { kind: "page", page: await inlinePageForClipboard(page) } : null;
+  }
+
+  if (!item) {
+    return null;
+  }
+
+  return {
+    signature: MANGAMAKER_CLIPBOARD_SIGNATURE,
+    copiedAt: new Date().toISOString(),
+    sourceProjectId: project.id,
+    item,
+  };
+};
+
 const assertObjectExists = (
   project: Project,
   pageId: string,
@@ -219,7 +324,9 @@ const assertObjectExists = (
       ? page.panels.some((item) => item.id === objectId)
       : objectType === "text"
         ? page.texts.some((item) => item.id === objectId)
-        : page.bubbles.some((item) => item.id === objectId);
+        : objectType === "element"
+          ? (page.elements ?? []).some((item) => item.id === objectId)
+          : page.bubbles.some((item) => item.id === objectId);
   if (!exists) {
     throw new Error(`Object not found: ${objectType}:${objectId}`);
   }
@@ -240,6 +347,10 @@ const getObjectRect = (
   if (ref.objectType === "text") {
     const text = page.texts.find((entry) => entry.id === ref.objectId);
     return text ? { x: text.x, y: text.y, width: text.width, height: text.height } : null;
+  }
+  if (ref.objectType === "element") {
+    const element = (page.elements ?? []).find((entry) => entry.id === ref.objectId);
+    return element ? { x: element.x, y: element.y, width: element.width, height: element.height } : null;
   }
   const bubble = page.bubbles.find((entry) => entry.id === ref.objectId);
   return bubble ? { x: bubble.x, y: bubble.y, width: bubble.width, height: bubble.height } : null;
@@ -266,6 +377,7 @@ const sanitizeGroupList = (
   const panelIds = new Set(page.panels.map((panel) => panel.id));
   const textIds = new Set(page.texts.map((text) => text.id));
   const bubbleIds = new Set(page.bubbles.map((bubble) => bubble.id));
+  const elementIds = new Set((page.elements ?? []).map((element) => element.id));
   return groups
     .map((group) => {
       const members = dedupeObjectRefs(
@@ -275,6 +387,9 @@ const sanitizeGroupList = (
           }
           if (member.objectType === "text") {
             return textIds.has(member.objectId);
+          }
+          if (member.objectType === "element") {
+            return elementIds.has(member.objectId);
           }
           return bubbleIds.has(member.objectId);
         }),
@@ -292,7 +407,7 @@ const sanitizeGroupList = (
 
 const getGroupForObject = (
   page: Project["pages"][number],
-  objectType: "panel" | "text" | "bubble",
+  objectType: "panel" | "text" | "bubble" | "element",
   objectId: string,
 ) =>
   page.groups.find((group) =>
@@ -301,7 +416,7 @@ const getGroupForObject = (
 
 const getMoveMembersForObject = (
   page: Project["pages"][number],
-  objectType: "panel" | "text" | "bubble",
+  objectType: "panel" | "text" | "bubble" | "element",
   objectId: string,
 ): ObjectSelectionRef[] => {
   const group = getGroupForObject(page, objectType, objectId);
@@ -395,6 +510,15 @@ const applyMoveDeltaToPage = (
             deltaY,
           )
         : bubble,
+    ),
+    elements: (page.elements ?? []).map((element) =>
+      memberKeys.has(`element:${element.id}`)
+        ? {
+            ...element,
+            x: element.x + deltaX,
+            y: element.y + deltaY,
+          }
+        : element,
     ),
   };
 };
@@ -1413,6 +1537,7 @@ const commands = {
         panelImageEditing: null,
         activeTool: "select",
         lastExport: null,
+        appView: "editor",
         statusMessage: createContextStatus(context, "success", "command.projectCreated"),
       });
       context.setHistory({ past: [], future: [] });
@@ -1477,8 +1602,9 @@ const commands = {
         saveStatus: {
           target: input.target,
           lastSavedAt: savedAt,
+          hasUnsavedChanges: false,
         },
-        statusMessage: createContextStatus(context, "info", "command.projectAutosaved"),
+        statusMessage: createContextStatus(context, "info", "command.projectSaved"),
       });
       return {
         target: input.target,
@@ -1507,10 +1633,108 @@ const commands = {
         panelImageEditing: null,
         activeTool: "select",
         lastExport: null,
+        appView: "editor",
+        saveStatus: {
+          target: "localDraft",
+          lastSavedAt: null,
+          hasUnsavedChanges: false,
+        },
         statusMessage: createContextStatus(context, "success", "command.projectLoaded"),
       });
       context.setHistory({ past: [], future: [] });
       return parsed;
+    },
+  },
+  goHome: {
+    id: "goHome",
+    label: "Go Home",
+    inputSchema: z.object({}),
+    execute: async (context) => {
+      const project = context.getProject();
+      const saveStatus = context.getSession().saveStatus;
+      if (saveStatus.hasUnsavedChanges && project.title.trim().length > 0) {
+        const savedAt = await saveLocalDraft(project);
+        context.setSession({
+          saveStatus: {
+            target: "localDraft",
+            lastSavedAt: savedAt,
+            hasUnsavedChanges: false,
+          },
+        });
+      }
+      context.setSession({
+        appView: "welcome",
+        statusMessage: null,
+      });
+      return {
+        appView: "welcome" as const,
+      };
+    },
+  },
+  listStoredProjects: {
+    id: "listStoredProjects",
+    label: "List Stored Projects",
+    inputSchema: z.object({}),
+    execute: async () => listLocalProjects(),
+  },
+  deleteStoredProject: {
+    id: "deleteStoredProject",
+    label: "Delete Stored Project",
+    inputSchema: z.object({
+      projectId: z.string().min(1),
+    }),
+    execute: async (context, input) => {
+      const deleted = await deleteLocalProject(input.projectId);
+      context.setSession({
+        statusMessage: createContextStatus(context, "info", "command.storedProjectDeleted"),
+      });
+      return {
+        projectId: input.projectId,
+        deleted,
+      };
+    },
+  },
+  duplicateStoredProject: {
+    id: "duplicateStoredProject",
+    label: "Duplicate Stored Project",
+    inputSchema: z
+      .object({
+        projectId: z.string().min(1).optional(),
+        project: z.unknown().optional(),
+      })
+      .refine((input) => input.projectId !== undefined || input.project !== undefined, {
+        message: "Either projectId or project is required.",
+      }),
+    execute: async (context, input) => {
+      let sourceProject: Project | null = input.project
+        ? ensureProject(normalizeProjectForCurrentVersion(input.project))
+        : null;
+
+      if (!sourceProject && input.projectId) {
+        const projects = await listLocalProjects();
+        sourceProject = projects.find((entry) => entry.id === input.projectId) ?? null;
+      }
+
+      if (!sourceProject) {
+        throw new Error(`Stored project not found: ${input.projectId ?? "project payload"}`);
+      }
+
+      const now = new Date().toISOString();
+      const baseTitle = sourceProject.title.trim() || translate(getLocale(context), "sidebar.untitledProject");
+      const copySuffix = getLocale(context) === "zh-CN" ? "副本" : "Copy";
+      const duplicatedProject = ensureProject({
+        ...structuredClone(sourceProject),
+        id: createId("project"),
+        title: `${baseTitle} ${copySuffix}`,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await saveLocalDraft(duplicatedProject);
+      context.setSession({
+        statusMessage: createContextStatus(context, "success", "command.storedProjectDuplicated"),
+      });
+      return duplicatedProject;
     },
   },
   addPage: {
@@ -1865,6 +2089,12 @@ const commands = {
       };
     },
   },
+  createClipboardEnvelope: {
+    id: "createClipboardEnvelope",
+    label: "Create Clipboard Envelope",
+    inputSchema: z.object({}),
+    execute: async (context) => buildClipboardEnvelopeForSession(context),
+  },
   selectPage: {
     id: "selectPage",
     label: "Select Page",
@@ -1887,7 +2117,7 @@ const commands = {
     id: "setTool",
     label: "Set Tool",
     inputSchema: z.object({
-      tool: z.enum(["select", "panel", "text", "bubble"]),
+      tool: z.enum(["select", "panel", "text", "bubble", "element"]),
     }),
     execute: (context, input) => {
       const locale = getLocale(context);
@@ -1958,7 +2188,9 @@ const commands = {
           ? page.panels.some((panel) => panel.id === input.objectId)
           : input.objectType === "text"
             ? page.texts.some((text) => text.id === input.objectId)
-            : page.bubbles.some((bubble) => bubble.id === input.objectId);
+            : input.objectType === "element"
+              ? (page.elements ?? []).some((element) => element.id === input.objectId)
+              : page.bubbles.some((bubble) => bubble.id === input.objectId);
       if (!exists) {
         throw new Error(`Object not found: ${input.objectType}:${input.objectId}`);
       }
@@ -1994,6 +2226,9 @@ const commands = {
             }
             if (object.objectType === "text") {
               return page.texts.some((text) => text.id === object.objectId);
+            }
+            if (object.objectType === "element") {
+              return (page.elements ?? []).some((element) => element.id === object.objectId);
             }
             return page.bubbles.some((bubble) => bubble.id === object.objectId);
           })
@@ -2858,6 +3093,150 @@ const commands = {
       );
     },
   },
+  createElement: {
+    id: "createElement",
+    label: "Create Element",
+    recordHistory: true,
+    inputSchema: z.object({
+      pageId: z.string(),
+      x: z.number(),
+      y: z.number(),
+      width: z.number().positive().optional(),
+      height: z.number().positive().optional(),
+      src: z.string(),
+      title: z.string(),
+      category: z.enum(["text", "symbols", "artWords", "effects", "balloons"]).optional(),
+      rotation: z.number().optional(),
+      opacity: z.number().min(0).max(1).optional(),
+    }),
+    execute: (context, input) => {
+      const page = getPageById(context.getProject(), input.pageId);
+      const defaults = createDefaultElement({
+        width: input.width ?? 240,
+        height: input.height ?? 180,
+        src: input.src,
+        title: input.title,
+        category: input.category ?? "symbols",
+        rotation: input.rotation ?? 0,
+        opacity: input.opacity ?? 1,
+      });
+      const rect = clampElementRectToWorkspace(page, {
+        x: input.x,
+        y: input.y,
+        width: defaults.width,
+        height: defaults.height,
+      });
+      const element = {
+        id: createId("element"),
+        ...defaults,
+        ...rect,
+      };
+      const nextProject = ensureProject(
+        touch(
+          updatePage(context.getProject(), input.pageId, (entry) => ({
+            ...entry,
+            elements: [...(entry.elements ?? []), element],
+            layers: [...entry.layers, toLayerRef("element", element.id)],
+          })),
+        ),
+      );
+      context.setProject(nextProject);
+      context.setSession({
+        selection: {
+          pageId: input.pageId,
+          objectType: "element",
+          objectId: element.id,
+        },
+        multiSelection: [
+          {
+            pageId: input.pageId,
+            objectType: "element",
+            objectId: element.id,
+          },
+        ],
+        activeTool: "select",
+        statusMessage: createContextStatus(context, "success", "command.elementAdded"),
+      });
+      return element;
+    },
+  },
+  updateElement: {
+    id: "updateElement",
+    label: "Update Element",
+    recordHistory: true,
+    inputSchema: z.object({
+      pageId: z.string(),
+      elementId: z.string(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().positive().optional(),
+      height: z.number().positive().optional(),
+      rotation: z.number().optional(),
+      opacity: z.number().min(0).max(1).optional(),
+      title: z.string().optional(),
+    }),
+    execute: (context, input) => {
+      const page = getPageById(context.getProject(), input.pageId);
+      const currentElement = (page.elements ?? []).find((element) => element.id === input.elementId);
+      if (!currentElement) {
+        throw new Error(`Element not found: ${input.elementId}`);
+      }
+      const nextRect = clampElementRectToWorkspace(page, {
+        x: input.x ?? currentElement.x,
+        y: input.y ?? currentElement.y,
+        width: input.width ?? currentElement.width,
+        height: input.height ?? currentElement.height,
+      });
+      const shouldApplyGroupedMove =
+        (input.x !== undefined || input.y !== undefined) &&
+        input.width === undefined &&
+        input.height === undefined;
+      const moveMembers = shouldApplyGroupedMove
+        ? getMoveMembersForObject(page, "element", input.elementId)
+        : [{ objectType: "element" as const, objectId: input.elementId }];
+      const requestedDelta = {
+        x: nextRect.x - currentElement.x,
+        y: nextRect.y - currentElement.y,
+      };
+      const clampedDelta = shouldApplyGroupedMove
+        ? clampGroupMoveDelta(page, moveMembers, requestedDelta.x, requestedDelta.y)
+        : { deltaX: requestedDelta.x, deltaY: requestedDelta.y };
+      const resolvedRect = {
+        x: currentElement.x + clampedDelta.deltaX,
+        y: currentElement.y + clampedDelta.deltaY,
+        width: nextRect.width,
+        height: nextRect.height,
+      };
+      const nextProject = ensureProject(
+        touch(
+          updatePage(context.getProject(), input.pageId, (entry) => {
+            const movedPage =
+              shouldApplyGroupedMove && moveMembers.length > 1
+                ? applyMoveDeltaToPage(entry, moveMembers, clampedDelta.deltaX, clampedDelta.deltaY)
+                : entry;
+            return {
+              ...movedPage,
+              elements: (movedPage.elements ?? []).map((element) =>
+                element.id === input.elementId
+                  ? {
+                      ...element,
+                      ...resolvedRect,
+                      ...(input.rotation !== undefined ? { rotation: input.rotation } : {}),
+                      ...(input.opacity !== undefined ? { opacity: input.opacity } : {}),
+                      ...(input.title !== undefined ? { title: input.title } : {}),
+                    }
+                  : element,
+              ),
+            };
+          }),
+        ),
+      );
+      context.setProject(nextProject);
+      return withPage(nextProject, input.pageId, (entry) =>
+        (entry.elements ?? []).find((item) => item.id === input.elementId),
+      );
+    },
+  },
   createText: {
     id: "createText",
     label: "Create Text",
@@ -2879,6 +3258,8 @@ const commands = {
         fontWeight: rememberedDefaults.fontWeight,
         letterSpacing: rememberedDefaults.letterSpacing,
         lineSpacing: rememberedDefaults.lineSpacing,
+        strokeWidth: rememberedDefaults.strokeWidth,
+        strokeColor: rememberedDefaults.strokeColor,
         ...(input.content ? { content: input.content } : {}),
       });
       const rect = clampTextBoxToWorkspace(page, {
@@ -2939,6 +3320,8 @@ const commands = {
       letterSpacing: z.number().min(-40).max(160).optional(),
       lineSpacing: z.number().min(-40).max(160).optional(),
       color: z.string().optional(),
+      strokeWidth: z.number().nonnegative().optional(),
+      strokeColor: z.string().optional(),
       direction: z.enum(["horizontal", "vertical"]).optional(),
       textAlign: z.enum(["left", "center", "right"]).optional(),
       verticalAlign: z.enum(["top", "middle", "bottom"]).optional(),
@@ -3012,6 +3395,8 @@ const commands = {
                         : {}),
                       ...(input.lineSpacing !== undefined ? { lineSpacing: input.lineSpacing } : {}),
                       ...(input.color !== undefined ? { color: input.color } : {}),
+                      ...(input.strokeWidth !== undefined ? { strokeWidth: input.strokeWidth } : {}),
+                      ...(input.strokeColor !== undefined ? { strokeColor: input.strokeColor } : {}),
                       ...(input.direction !== undefined ? { direction: input.direction } : {}),
                       ...(nextTextAlign !== undefined ? { textAlign: nextTextAlign } : {}),
                       ...(input.verticalAlign !== undefined ? { verticalAlign: input.verticalAlign } : {}),
@@ -3037,6 +3422,8 @@ const commands = {
             fontWeight: updatedText.fontWeight,
             letterSpacing: updatedText.letterSpacing,
             lineSpacing: updatedText.lineSpacing,
+            strokeWidth: updatedText.strokeWidth,
+            strokeColor: updatedText.strokeColor,
           },
         }));
       }
@@ -3412,6 +3799,10 @@ const commands = {
                 input.objectType === "text"
                   ? entry.texts.filter((item) => item.id !== input.objectId)
                   : entry.texts,
+              elements:
+                input.objectType === "element"
+                  ? (entry.elements ?? []).filter((item) => item.id !== input.objectId)
+                  : (entry.elements ?? []),
               bubbles:
                 input.objectType === "bubble"
                   ? entry.bubbles.filter((item) => item.id !== input.objectId)

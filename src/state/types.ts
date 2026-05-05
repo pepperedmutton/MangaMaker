@@ -1,7 +1,7 @@
 import type { BubbleType, ObjectType, Project } from "../domain/schema";
 import type { Locale } from "../i18n";
 
-export type ToolMode = "select" | "panel" | "text" | "bubble";
+export type ToolMode = "select" | "panel" | "text" | "bubble" | "element";
 export type BubbleInsertMode = "preset" | "customClickDraw";
 
 export type BubbleInsertState = {
@@ -41,7 +41,10 @@ export type StatusMessage = {
 export type SaveStatus = {
   target: "localDraft" | null;
   lastSavedAt: string | null;
+  hasUnsavedChanges: boolean;
 };
+
+export type AppView = "welcome" | "editor";
 
 export type TextInsertDefaults = {
   width: number;
@@ -51,6 +54,8 @@ export type TextInsertDefaults = {
   fontWeight: number;
   letterSpacing: number;
   lineSpacing: number;
+  strokeWidth: number;
+  strokeColor: string;
 };
 
 export type HistoryEntry = {
@@ -62,6 +67,7 @@ export type HistoryEntry = {
 };
 
 export type EditorSessionState = {
+  appView: AppView;
   project: Project;
   selectedPageId: string | null;
   selection: EditorSelection;

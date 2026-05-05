@@ -32,6 +32,66 @@ importers:
       '@fontpkg/zcool-ku-hei':
         specifier: ^3.12.0
         version: 3.12.0
+      '@fontsource/bangers':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/boogaloo':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/bubblegum-sans':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/carter-one':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/chewy':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/comic-neue':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/creepster':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/dela-gothic-one':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/dotgothic16':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/freckle-face':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/hachi-maru-pop':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/kaisei-decol':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/kiwi-maru':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/luckiest-guy':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/permanent-marker':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/rampart-one':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/reggae-one':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/stick':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/yomogi':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@fontsource/yuji-boku':
+        specifier: ^5.2.8
+        version: 5.2.8
       '@tauri-apps/api':
         specifier: ^2.3.0
         version: 2.10.1
@@ -361,6 +421,66 @@ packages:
 
   '@fontpkg/zcool-ku-hei@3.12.0':
     resolution: {integrity: sha512-O7tWr6SehokTLuiT3uoy0N/2wWslWt547ymyU5fWoTWmbpEAc10UyJFVbUlCp+prKEcDFbBIFDB2EFHrqj8g6A==}
+
+  '@fontsource/bangers@5.2.8':
+    resolution: {integrity: sha512-fFFXg+IHf05TEQ4U0gS8f7B0JHrhAN7oEw/Q8wR0APPLXnhnQSfZz2QDjg0kmVuM+IsM28ODga+0rSpnHLqFfQ==}
+
+  '@fontsource/boogaloo@5.2.8':
+    resolution: {integrity: sha512-jIE5LSwJUeJ+8Q0mqoAZuKk2NZwtkfAFb49cAFpvpaIzeP4saqxl+nVmX5nUaAdjKXejK58KoGhn7YKhE/DEVg==}
+
+  '@fontsource/bubblegum-sans@5.2.8':
+    resolution: {integrity: sha512-uRqoL/8HT4+ml/6qTcMl6hr8KqMwboPJpsZCHWeGy8nv4Lh/BpAkF+6anbpqNjjX6umsJW9jtxbJD2QHWJoxGg==}
+
+  '@fontsource/carter-one@5.2.8':
+    resolution: {integrity: sha512-7ZfDV7oXwaisG+BPhWDYqsKMPNHsF9y7k9XU8Obdv0DXr2ob05yTR9vNXHJ9QiF/4hnGp3ejVnPvfGpr9TQnNA==}
+
+  '@fontsource/chewy@5.2.7':
+    resolution: {integrity: sha512-Hn6YV2EAeubrcWkJWID0V5Ed+yLXdiBmFH2B99LpUaiA67LugM9fyozIOwQB1tIf8KxUiBm1+kJwg6Fcbo7I9w==}
+
+  '@fontsource/comic-neue@5.2.7':
+    resolution: {integrity: sha512-tNi0Nxbz0QMwHvZWJSP5G0SXq8CeX5b+K3l3q/afPmJ/WlQ+i3/NfOYWBzsojCZko1lNplfmjbsOGMuBs4WmcA==}
+
+  '@fontsource/creepster@5.2.7':
+    resolution: {integrity: sha512-dKTVl/9boPwxGTI7A4MsBzvpk12S/1TvZid7CI0EFyWSthYmAviK+6RlJz/ZVHB/rSSRbdCphRhwSfIjdISc1g==}
+
+  '@fontsource/dela-gothic-one@5.2.7':
+    resolution: {integrity: sha512-swkcFgr2HjPWbY7dGP/9H7zXePtwF6C5ASLriFSZ02nAh6zjUIudwz8TBWQu9mIXfbgWnvokZ0PjP2FWQGGIWQ==}
+
+  '@fontsource/dotgothic16@5.2.8':
+    resolution: {integrity: sha512-kKLp0jtNURDwQwdBBHB7CFs/i5b6MVPNVEOy8EFbdWwKT9xQZbQqYIEjW1nKayqcs0Uh6imBCeUFuIBufEJK4w==}
+
+  '@fontsource/freckle-face@5.2.7':
+    resolution: {integrity: sha512-FtFxEDEp8ej64E3vYAwso56icutIEWb7JVv6/9znJ79DO3KFNLs69RYb2eYarCmiEvmC2N2pqtHhvqp03UQg0w==}
+
+  '@fontsource/hachi-maru-pop@5.2.8':
+    resolution: {integrity: sha512-MaPBq9mELk30HLhT5vViDZoU+XYpCEGf03f34o7NzGdcA/GOhQXe3lLnAfKdr27RIb/PcJnNtyriyAmlO28mcw==}
+
+  '@fontsource/kaisei-decol@5.2.7':
+    resolution: {integrity: sha512-7SvyKTqZWON4XhH7HpA0gFyCznvWIEKS2ln77elgdkPaAigySo3iw/gfL1s4sjxBViXOhnNJwQUhmo7+RfwJHA==}
+
+  '@fontsource/kiwi-maru@5.2.8':
+    resolution: {integrity: sha512-2ENkh90aXGQDmhClqkrIjDpFJ1BQIuVeVKcYQC7ZYKbUcybBdth8mTAIkEPJsfMKc1RX7S63QMr9B+Bk/FtXjA==}
+
+  '@fontsource/luckiest-guy@5.2.8':
+    resolution: {integrity: sha512-S1k8+PNHSdDkJy9f+0WIx8rfScj3BZTVgBQehMOtpYOwXZ4wZC1+D++NACbfdG9Ve2glVz1boLXjJMCeVPLifA==}
+
+  '@fontsource/permanent-marker@5.2.7':
+    resolution: {integrity: sha512-Lpjv3yD6TSRvcxjhdv4OZuNtEttbUgVNfFqAE8Qf7D1J8L97qZTZ8rj8OExX2ezCNv920psv+HBHvthAQxNE+A==}
+
+  '@fontsource/rampart-one@5.2.8':
+    resolution: {integrity: sha512-nWboV2culpPRHY6RufoZHWHaYu1KyPEvHurvjAmLRLBdzy4wFd4NLcc2jlcrtimmf/oprCMRmpaOI/613+VLLQ==}
+
+  '@fontsource/reggae-one@5.2.8':
+    resolution: {integrity: sha512-pRyMofg5J3U9ae6KAYwufXxZXckPegUveeoDha8HLqKHwLKew2QFyrGP7hxTCWJMW3S+zOiJKofJfQnCV71otQ==}
+
+  '@fontsource/stick@5.2.8':
+    resolution: {integrity: sha512-BTaIWQac8GJepu4XiGwPQwub9vfNS5t3Fwfaa5l62qCD03B2U78VaE3RdoxW8yo4K5WFmvqbBg8fXKSAEg7geA==}
+
+  '@fontsource/yomogi@5.2.7':
+    resolution: {integrity: sha512-FtbtAOqRJlsjSK/wlw/S+uOkJXGWVp9yq6/utDmR6YXvvmTMoZQ75/mWimOS87Scg7gWlP4HU9gAgDUup6dLWg==}
+
+  '@fontsource/yuji-boku@5.2.8':
+    resolution: {integrity: sha512-IhleFZ9suaSibc8tQRfQlvKfaJHyJnXYd2aHzgw6t//c7W07Kq0+PQQJUdbjjFBVqYIykBsenh90sXNT52PHBg==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -1261,6 +1381,46 @@ snapshots:
   '@fontpkg/yrdzst@1.23.0': {}
 
   '@fontpkg/zcool-ku-hei@3.12.0': {}
+
+  '@fontsource/bangers@5.2.8': {}
+
+  '@fontsource/boogaloo@5.2.8': {}
+
+  '@fontsource/bubblegum-sans@5.2.8': {}
+
+  '@fontsource/carter-one@5.2.8': {}
+
+  '@fontsource/chewy@5.2.7': {}
+
+  '@fontsource/comic-neue@5.2.7': {}
+
+  '@fontsource/creepster@5.2.7': {}
+
+  '@fontsource/dela-gothic-one@5.2.7': {}
+
+  '@fontsource/dotgothic16@5.2.8': {}
+
+  '@fontsource/freckle-face@5.2.7': {}
+
+  '@fontsource/hachi-maru-pop@5.2.8': {}
+
+  '@fontsource/kaisei-decol@5.2.7': {}
+
+  '@fontsource/kiwi-maru@5.2.8': {}
+
+  '@fontsource/luckiest-guy@5.2.8': {}
+
+  '@fontsource/permanent-marker@5.2.7': {}
+
+  '@fontsource/rampart-one@5.2.8': {}
+
+  '@fontsource/reggae-one@5.2.8': {}
+
+  '@fontsource/stick@5.2.8': {}
+
+  '@fontsource/yomogi@5.2.7': {}
+
+  '@fontsource/yuji-boku@5.2.8': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

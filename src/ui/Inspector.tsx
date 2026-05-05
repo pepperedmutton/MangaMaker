@@ -6,12 +6,13 @@ import {
   createDefaultBubble,
   MIN_PANEL_SIZE,
 } from "../domain/defaults";
-import type { Bubble, Page, Panel, TextItem } from "../domain/schema";
+import type { Bubble, ElementItem, Page, Panel, TextItem } from "../domain/schema";
 import { formatLocaleTime } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
 import { CURATED_FONTS } from "../platform/localFonts";
 import type { ToolMode } from "../state/types";
 import { useEditorStore } from "../state/editorStore";
+import { DeferredColorInput } from "./DeferredColorInput";
 import { getBubbleBodyPath } from "./bubbleShapes";
 
 // Reusable range input with slider and number field
@@ -66,7 +67,7 @@ const DeleteButton = ({
   objectId,
 }: {
   pageId: string;
-  objectType: "panel" | "text" | "bubble";
+  objectType: "panel" | "text" | "bubble" | "element";
   objectId: string;
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
@@ -260,29 +261,29 @@ const PanelInspector = ({
         <div className="field-grid">
           <label>
             <span>{t("common.fill")}</span>
-            <input
-              type="color"
+            <DeferredColorInput
               value={panel.style.fill}
-              onChange={(event) =>
+              historyKey={`panel:${page.id}:${panel.id}:fill`}
+              onChange={(value, options) =>
                 void executeCommand("setPanelStyle", {
                   pageId: page.id,
                   panelId: panel.id,
-                  fill: event.target.value,
-                })
+                  fill: value,
+                }, options)
               }
             />
           </label>
           <label>
             <span>{t("common.border")}</span>
-            <input
-              type="color"
+            <DeferredColorInput
               value={panel.style.stroke}
-              onChange={(event) =>
+              historyKey={`panel:${page.id}:${panel.id}:stroke`}
+              onChange={(value, options) =>
                 void executeCommand("setPanelStyle", {
                   pageId: page.id,
                   panelId: panel.id,
-                  stroke: event.target.value,
-                })
+                  stroke: value,
+                }, options)
               }
             />
           </label>
@@ -576,14 +577,44 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
         <div className="field-grid">
           <label>
             <span>{t("common.color")}</span>
-            <input
-              type="color"
+            <DeferredColorInput
               value={text.color}
-              onChange={(event) =>
+              historyKey={`text:${page.id}:${text.id}:color`}
+              onChange={(value, options) =>
                 void executeCommand("updateText", {
                   pageId: page.id,
                   textId: text.id,
-                  color: event.target.value,
+                  color: value,
+                }, options)
+              }
+            />
+          </label>
+          <label>
+            <span>{t("inspector.strokeColor")}</span>
+            <DeferredColorInput
+              value={text.strokeColor}
+              historyKey={`text:${page.id}:${text.id}:strokeColor`}
+              onChange={(value, options) =>
+                void executeCommand("updateText", {
+                  pageId: page.id,
+                  textId: text.id,
+                  strokeColor: value,
+                }, options)
+              }
+            />
+          </label>
+          <label>
+            <span>{t("inspector.strokeWidth")}</span>
+            <RangeInput
+              min={0}
+              max={24}
+              step={1}
+              value={Math.round(text.strokeWidth)}
+              onChange={(value) =>
+                void executeCommand("updateText", {
+                  pageId: page.id,
+                  textId: text.id,
+                  strokeWidth: value,
                 })
               }
             />
@@ -621,6 +652,59 @@ const TextInspector = ({ page, text }: { page: Page; text: TextItem }) => {
             />
           </label>
         </div>
+      </section>
+    </>
+  );
+};
+
+const ElementInspector = ({ page, element }: { page: Page; element: ElementItem }) => {
+  const executeCommand = useEditorStore((state) => state.executeCommand);
+  const { t } = useI18n();
+  const workspace = getPageWorkspace(page);
+  const maxX = Math.ceil(workspace.x + workspace.width - element.width);
+  const maxY = Math.ceil(workspace.y + workspace.height - element.height);
+
+  return (
+    <>
+      <section>
+        <div className="insp-header">
+          <p className="eyebrow">{t("common.element")}</p>
+          <DeleteButton pageId={page.id} objectType="element" objectId={element.id} />
+        </div>
+        <h3>{element.title}</h3>
+        <div className="element-inspector-preview">
+          <img src={element.src} alt="" />
+        </div>
+      </section>
+      <section>
+        <p className="eyebrow">{t("inspector.sizeSection")}</p>
+        <label>
+          <span>{t("common.x")}</span>
+          <RangeInput value={Math.round(element.x)} min={Math.floor(workspace.x)} max={maxX} onChange={(x) => void executeCommand("updateElement", { pageId: page.id, elementId: element.id, x })} />
+        </label>
+        <label>
+          <span>{t("common.y")}</span>
+          <RangeInput value={Math.round(element.y)} min={Math.floor(workspace.y)} max={maxY} onChange={(y) => void executeCommand("updateElement", { pageId: page.id, elementId: element.id, y })} />
+        </label>
+        <label>
+          <span>{t("common.width")}</span>
+          <RangeInput value={Math.round(element.width)} min={24} max={Math.ceil(workspace.width)} onChange={(width) => void executeCommand("updateElement", { pageId: page.id, elementId: element.id, width })} />
+        </label>
+        <label>
+          <span>{t("common.height")}</span>
+          <RangeInput value={Math.round(element.height)} min={24} max={Math.ceil(workspace.height)} onChange={(height) => void executeCommand("updateElement", { pageId: page.id, elementId: element.id, height })} />
+        </label>
+      </section>
+      <section>
+        <p className="eyebrow">{t("inspector.elementTransform")}</p>
+        <label>
+          <span>{t("inspector.rotation")}</span>
+          <RangeInput value={Math.round(element.rotation)} min={-180} max={180} onChange={(rotation) => void executeCommand("updateElement", { pageId: page.id, elementId: element.id, rotation })} />
+        </label>
+        <label>
+          <span>{t("inspector.opacity")}</span>
+          <RangeInput value={Math.round(element.opacity * 100)} min={0} max={100} onChange={(opacity) => void executeCommand("updateElement", { pageId: page.id, elementId: element.id, opacity: opacity / 100 })} />
+        </label>
       </section>
     </>
   );
@@ -1055,29 +1139,29 @@ const BubbleInspector = ({ page, bubble }: { page: Page; bubble: Bubble }) => {
           )}
           <label>
             <span>{t("inspector.backgroundColor")}</span>
-            <input
-              type="color"
+            <DeferredColorInput
               value={bubble.backgroundColor}
-              onChange={(event) =>
+              historyKey={`bubble:${page.id}:${bubble.id}:backgroundColor`}
+              onChange={(value, options) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  backgroundColor: event.target.value,
-                })
+                  backgroundColor: value,
+                }, options)
               }
             />
           </label>
           <label>
             <span>{t("inspector.strokeColor")}</span>
-            <input
-              type="color"
+            <DeferredColorInput
               value={bubble.strokeColor}
-              onChange={(event) =>
+              historyKey={`bubble:${page.id}:${bubble.id}:strokeColor`}
+              onChange={(value, options) =>
                 void executeCommand("updateBubble", {
                   pageId: page.id,
                   bubbleId: bubble.id,
-                  strokeColor: event.target.value,
-                })
+                  strokeColor: value,
+                }, options)
               }
             />
           </label>
@@ -1153,6 +1237,7 @@ export const Inspector = ({
             <p>{t("inspector.panelCount", { count: page.panels.length })}</p>
             <p>{t("inspector.textCount", { count: page.texts.length })}</p>
             <p>{t("inspector.bubbleCount", { count: page.bubbles.length })}</p>
+            <p>{t("inspector.elementCount", { count: (page.elements ?? []).length })}</p>
           </section>
           <PanelDescriptionList page={page} />
           <section>
@@ -1185,6 +1270,8 @@ export const Inspector = ({
         <PanelInspector page={page} panel={selectedObject} onImportImage={onImportImage} />
       ) : "content" in selectedObject ? (
         <TextInspector page={page} text={selectedObject} />
+      ) : "src" in selectedObject ? (
+        <ElementInspector page={page} element={selectedObject} />
       ) : (
         <BubbleInspector page={page} bubble={selectedObject as Bubble} />
       )}
@@ -1197,11 +1284,13 @@ export const Inspector = ({
             : t("inspector.noExports")}
         </p>
         <p>
-          {saveStatus.lastSavedAt
+          {saveStatus.hasUnsavedChanges
+            ? t("status.unsavedChanges")
+            : saveStatus.lastSavedAt
             ? t("inspector.lastLocalSave", {
                 time: formatLocaleTime(locale, saveStatus.lastSavedAt),
               })
-            : t("inspector.autosaveHint")}
+            : t("inspector.saveHint")}
         </p>
       </section>
     </aside>

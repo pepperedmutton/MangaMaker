@@ -3,6 +3,7 @@ import type { Project } from "../domain/schema";
 import type { Locale } from "../i18n";
 import type {
   BubbleInsertState,
+  AppView,
   EditorSelection,
   EditorMultiSelection,
   EditorSessionState,
@@ -34,6 +35,7 @@ export type CommandContext = {
           lastExport: ExportArtifact;
           statusMessage: StatusMessage;
           saveStatus: SaveStatus;
+          appView: AppView;
         }>
       | ((session: EditorSessionState) => Partial<EditorSessionState>),
   ) => void;

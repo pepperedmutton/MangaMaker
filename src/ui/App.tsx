@@ -3,24 +3,22 @@ import { useEffect, useRef, useState } from "react";
 import { installAutomationApi } from "../automation/api";
 import type { ClipboardEnvelope, ClipboardItem } from "../domain/clipboard";
 import {
-  MANGAMAKER_CLIPBOARD_SIGNATURE,
   parseClipboardEnvelope,
   serializeClipboardEnvelope,
 } from "../domain/clipboard";
-import type { Page, Panel, Project, ProjectType } from "../domain/schema";
+import type { ElementLibraryItem } from "../domain/elementLibrary";
+import type { Page, Project, ProjectType } from "../domain/schema";
 import { downloadDataUrl } from "../export/download";
 import { formatLocaleTime, getDefaultProjectTitle, translate } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
-import { createId } from "../domain/defaults";
 import {
-  deleteLocalProject,
   hasLocalDraft,
-  listLocalProjects,
-  saveLocalDraft,
+  saveLocalDraftBeforeUnload,
 } from "../storage/localDraft";
 import { persistImportedImageForProject } from "../storage/projectFiles";
 import { useEditorStore } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
+import { AgentSidebar } from "./AgentSidebar";
 import { CanvasView } from "./CanvasView";
 import { Inspector } from "./Inspector";
 import { FirstRunGuide } from "./Onboarding";
@@ -42,56 +40,12 @@ const isTextEditingElement = (target: EventTarget | null) => {
   );
 };
 
-const blobToDataUrl = (blob: Blob) =>
-  new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ""));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-
 const inferImageExtension = (mimeType: string | null) => {
   if (!mimeType) {
     return "png";
   }
   const [, subtype] = mimeType.split("/");
   return subtype ? subtype.replace(/[^a-z0-9]/gi, "").toLowerCase() : "png";
-};
-
-const srcToDataUrl = async (src: string) => {
-  if (src.startsWith("data:")) {
-    return src;
-  }
-  const response = await fetch(src);
-  const blob = await response.blob();
-  return blobToDataUrl(blob);
-};
-
-const inlinePanelImageForClipboard = async (panel: Panel) => {
-  if (!panel.image) {
-    return panel;
-  }
-  try {
-    const inlinedSrc = await srcToDataUrl(panel.image.src);
-    return {
-      ...panel,
-      image: {
-        ...panel.image,
-        src: inlinedSrc,
-      },
-    };
-  } catch (error) {
-    console.warn("Failed to inline panel image for clipboard payload:", error);
-    return panel;
-  }
-};
-
-const inlinePageForClipboard = async (page: Page) => {
-  const panels = await Promise.all(page.panels.map((panel) => inlinePanelImageForClipboard(panel)));
-  return {
-    ...page,
-    panels,
-  };
 };
 
 const persistClipboardImageForProject = async (
@@ -208,6 +162,7 @@ export const App = () => {
   const zoom = useEditorStore((state) => state.zoom);
   const statusMessage = useEditorStore((state) => state.statusMessage);
   const saveStatus = useEditorStore((state) => state.saveStatus);
+  const appView = useEditorStore((state) => state.appView);
   const pastCount = useEditorStore((state) => state.past.length);
   const futureCount = useEditorStore((state) => state.future.length);
   const executeCommand = useEditorStore((state) => state.executeCommand);
@@ -215,7 +170,6 @@ export const App = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [projectTitleInput, setProjectTitleInput] = useState("");
   const [projectTypeInput, setProjectTypeInput] = useState<ProjectType>("manga");
-  const [view, setView] = useState<"welcome" | "editor">("welcome");
   const [projectsCatalog, setProjectsCatalog] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [pendingImportTarget, setPendingImportTarget] = useState<{
@@ -225,9 +179,12 @@ export const App = () => {
   const appShellRef = useRef<HTMLDivElement>(null);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(220);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(300);
+  const [rightSidebarMode, setRightSidebarMode] = useState<"inspector" | "agent">("inspector");
   const [isLayoutResizing, setIsLayoutResizing] = useState(false);
   const leftSidebarWidthRef = useRef(leftSidebarWidth);
   const rightSidebarWidthRef = useRef(rightSidebarWidth);
+  const latestProjectRef = useRef(project);
+  const latestSaveStatusRef = useRef(saveStatus);
   const sidebarDragRef = useRef<{
     side: "left" | "right";
     startX: number;
@@ -250,6 +207,14 @@ export const App = () => {
   useEffect(() => {
     rightSidebarWidthRef.current = rightSidebarWidth;
   }, [rightSidebarWidth]);
+
+  useEffect(() => {
+    latestProjectRef.current = project;
+  }, [project]);
+
+  useEffect(() => {
+    latestSaveStatusRef.current = saveStatus;
+  }, [saveStatus]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -331,26 +296,56 @@ export const App = () => {
 
   useEffect(() => {
     const loadCatalog = async () => {
+      if (appView !== "welcome") {
+        return;
+      }
       setProjectsLoading(true);
       try {
-        const projects = await listLocalProjects();
+        const projects = (await executeCommand("listStoredProjects", {})) as Project[];
         setProjectsCatalog(projects);
       } finally {
         setProjectsLoading(false);
       }
     };
     void loadCatalog();
-  }, []);
+  }, [appView, executeCommand]);
 
   const refreshProjectCatalog = async () => {
     setProjectsLoading(true);
     try {
-      const projects = await listLocalProjects();
+      const projects = (await executeCommand("listStoredProjects", {})) as Project[];
       setProjectsCatalog(projects);
     } finally {
       setProjectsLoading(false);
     }
   };
+
+  useEffect(() => {
+    const savePendingChangesBeforeUnload = () => {
+      const currentSaveStatus = latestSaveStatusRef.current;
+      const currentProject = latestProjectRef.current;
+      if (!currentSaveStatus.hasUnsavedChanges || currentProject.title.trim().length === 0) {
+        return;
+      }
+      saveLocalDraftBeforeUnload(currentProject);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        savePendingChangesBeforeUnload();
+      }
+    };
+
+    window.addEventListener("beforeunload", savePendingChangesBeforeUnload);
+    window.addEventListener("pagehide", savePendingChangesBeforeUnload);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("beforeunload", savePendingChangesBeforeUnload);
+      window.removeEventListener("pagehide", savePendingChangesBeforeUnload);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   const handleSidebarResizeStart =
     (side: "left" | "right") => (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -379,6 +374,22 @@ export const App = () => {
       pageId: selectedPage.id,
       bubbleType,
       keepTool: true,
+    });
+  };
+
+  const handleInsertElement = (item: ElementLibraryItem) => {
+    if (!selectedPage) {
+      return;
+    }
+    void executeCommand("createElement", {
+      pageId: selectedPage.id,
+      x: selectedPage.width * 0.5 - item.width * 0.5,
+      y: selectedPage.height * 0.5 - item.height * 0.5,
+      width: item.width,
+      height: item.height,
+      src: item.src,
+      title: item.title,
+      category: item.category,
     });
   };
 
@@ -413,13 +424,21 @@ export const App = () => {
     await refreshProjectCatalog();
   };
 
+  const handleSaveProjectIfDirty = async () => {
+    const { project: currentProject, saveStatus: currentSaveStatus } = useEditorStore.getState();
+    if (!currentSaveStatus.hasUnsavedChanges || currentProject.title.trim().length === 0) {
+      return;
+    }
+    await handleSaveProject();
+  };
+
   const handleReturnHome = async () => {
     try {
-      await handleSaveProject();
+      await executeCommand("goHome", {});
+      await refreshProjectCatalog();
     } catch (error) {
-      console.warn("Failed to save project before returning home:", error);
+      console.warn("Failed to return home:", error);
     }
-    setView("welcome");
   };
 
   const handleDeletePage = (pageId: string) => {
@@ -527,52 +546,11 @@ export const App = () => {
     });
   };
 
-  const buildClipboardItem = async (): Promise<ClipboardItem | null> => {
-    if (selection) {
-      const selectionPage = project.pages.find((page) => page.id === selection.pageId) ?? null;
-      if (!selectionPage) {
-        return null;
-      }
-      if (selection.objectType === "panel") {
-        const panel = selectionPage.panels.find((entry) => entry.id === selection.objectId) ?? null;
-        if (!panel) {
-          return null;
-        }
-        return {
-          kind: "panel",
-          panel: await inlinePanelImageForClipboard(panel),
-        };
-      }
-      if (selection.objectType === "text") {
-        const text = selectionPage.texts.find((entry) => entry.id === selection.objectId) ?? null;
-        return text ? { kind: "text", text } : null;
-      }
-      const bubble =
-        selectionPage.bubbles.find((entry) => entry.id === selection.objectId) ?? null;
-      return bubble ? { kind: "bubble", bubble } : null;
-    }
-
-    const page = selectedPage ?? project.pages[0] ?? null;
-    if (!page) {
-      return null;
-    }
-    return {
-      kind: "page",
-      page: await inlinePageForClipboard(page),
-    };
-  };
-
   const handleCopySelection = async () => {
-    const item = await buildClipboardItem();
-    if (!item) {
+    const payload = (await executeCommand("createClipboardEnvelope", {})) as ClipboardEnvelope | null;
+    if (!payload) {
       return;
     }
-    const payload: ClipboardEnvelope = {
-      signature: MANGAMAKER_CLIPBOARD_SIGNATURE,
-      copiedAt: new Date().toISOString(),
-      sourceProjectId: project.id,
-      item,
-    };
     try {
       await writeTextToClipboard(serializeClipboardEnvelope(payload));
     } catch (error) {
@@ -701,6 +679,11 @@ export const App = () => {
         return;
       }
 
+      if (!usesModifier && key === "m") {
+        void executeCommand("setTool", { tool: "element" });
+        return;
+      }
+
       if (!usesModifier && key === "i" && selectedPanel) {
         event.preventDefault();
         handleImportImage();
@@ -725,7 +708,7 @@ export const App = () => {
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
-      if (view !== "editor" || isTextEditingElement(event.target)) {
+      if (appView !== "editor" || isTextEditingElement(event.target)) {
         return;
       }
       const items = event.clipboardData?.items;
@@ -754,23 +737,22 @@ export const App = () => {
 
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
-  }, [view, project.id, selectedPage?.id, executeCommand, project.pages]);
+  }, [appView, project.id, selectedPage?.id, executeCommand, project.pages]);
 
   const handleCreateProjectFromWelcome = async () => {
+    await handleSaveProjectIfDirty();
     const title = projectTitleInput.trim() || getDefaultProjectTitle(locale);
     await executeCommand("createProject", { title, type: projectTypeInput });
-    await handleSaveProject();
-    setView("editor");
   };
 
   const handleRestoreDraftFromWelcome = async () => {
+    await handleSaveProjectIfDirty();
     await executeCommand("loadProject", { source: "localDraft" });
-    setView("editor");
   };
 
   const handleOpenProjectFromWelcome = async (nextProject: Project) => {
+    await handleSaveProjectIfDirty();
     await executeCommand("loadProject", { project: nextProject });
-    setView("editor");
   };
 
   const handleDeleteProjectFromWelcome = async (targetProject: Project) => {
@@ -783,7 +765,7 @@ export const App = () => {
       return;
     }
     try {
-      await deleteLocalProject(targetProject.id);
+      await executeCommand("deleteStoredProject", { projectId: targetProject.id });
       await refreshProjectCatalog();
     } catch (error) {
       console.warn("Failed to delete project from welcome screen:", error);
@@ -791,26 +773,15 @@ export const App = () => {
   };
 
   const handleDuplicateProjectFromWelcome = async (targetProject: Project) => {
-    const now = new Date().toISOString();
-    const baseTitle = targetProject.title.trim() || t("sidebar.untitledProject");
-    const copySuffix = locale === "zh-CN" ? "\u526F\u672C" : "Copy";
-    const duplicatedProject: Project = {
-      ...structuredClone(targetProject),
-      id: createId("project"),
-      title: `${baseTitle} ${copySuffix}`,
-      createdAt: now,
-      updatedAt: now,
-    };
-
     try {
-      await saveLocalDraft(duplicatedProject);
+      await executeCommand("duplicateStoredProject", { project: targetProject });
       await refreshProjectCatalog();
     } catch (error) {
       console.warn("Failed to duplicate project from welcome screen:", error);
     }
   };
 
-  if (view === "welcome") {
+  if (appView === "welcome") {
     return (
       <WelcomeScreen
         projects={projectsCatalog}
@@ -874,19 +845,22 @@ export const App = () => {
           canUndo={pastCount > 0}
           canRedo={futureCount > 0}
           canExport={Boolean(selectedPage)}
+          agentActive={rightSidebarMode === "agent"}
           pageFormat={
             selectedPage
               ? {
+                  pageId: selectedPage.id,
                   background: selectedPage.background,
-                  onBackgroundChange: (background: string) =>
+                  onBackgroundChange: (background, options) =>
                     void executeCommand("setPageBackground", {
                       pageId: selectedPage.id,
                       background,
-                    }),
+                    }, options),
                 }
               : undefined
           }
           onSetTool={(tool: ToolMode) => void executeCommand("setTool", { tool })}
+          onInsertElement={handleInsertElement}
           onSave={() => void handleSaveProject()}
           onGoHome={() => void handleReturnHome()}
           onExport={() => void handleExportPage()}
@@ -895,6 +869,9 @@ export const App = () => {
           onZoomChange={(nextZoom: number) => void executeCommand("setZoom", { zoom: nextZoom })}
           onSetLocale={(nextLocale) =>
             void executeCommand("setLocale", { locale: nextLocale })
+          }
+          onToggleAgent={() =>
+            setRightSidebarMode((mode) => (mode === "agent" ? "inspector" : "agent"))
           }
         />
         {project.pages.length === 0 ? (
@@ -906,12 +883,9 @@ export const App = () => {
             draftAvailable={draftAvailable}
             projectCreated={project.title.trim().length > 0}
             onCreateProject={() =>
-              void executeCommand("createProject", {
-                title: projectTitleInput.trim() || getDefaultProjectTitle(locale),
-                type: projectTypeInput,
-              })
+              void handleCreateProjectFromWelcome()
             }
-            onRestoreDraft={() => void executeCommand("loadProject", { source: "localDraft" })}
+            onRestoreDraft={() => void handleRestoreDraftFromWelcome()}
             onCreateFirstPage={() => void executeCommand("addPage", {})}
           />
         ) : (
@@ -926,8 +900,10 @@ export const App = () => {
             <div className="status-bar">
               <span>{statusMessage?.text ?? t("status.ready")}</span>
               <span>
-                {saveStatus.lastSavedAt
-                  ? t("status.autosavedAt", {
+                {saveStatus.hasUnsavedChanges
+                  ? t("status.unsavedChanges")
+                  : saveStatus.lastSavedAt
+                  ? t("status.savedAt", {
                       time: formatLocaleTime(locale, saveStatus.lastSavedAt),
                     })
                   : t("status.localDraftAvailable")}
@@ -942,17 +918,21 @@ export const App = () => {
         aria-orientation="vertical"
         onPointerDown={handleSidebarResizeStart("right")}
       />
-      <Inspector
-        page={selectedPage}
-        activeTool={activeTool}
-        onExportProjectPdf={() => void handleExportProjectPdf()}
-        onExportProjectJpgZip={() => void handleExportProjectJpgZip()}
-        onImportImage={handleImportImage}
-        onCreatePanel={() =>
-          selectedPage ? void executeCommand("setTool", { tool: "panel" }) : undefined
-        }
-        onInsertBubble={(bubbleType) => handleInsertBubble(bubbleType)}
-      />
+      {rightSidebarMode === "agent" ? (
+        <AgentSidebar onClose={() => setRightSidebarMode("inspector")} />
+      ) : (
+        <Inspector
+          page={selectedPage}
+          activeTool={activeTool}
+          onExportProjectPdf={() => void handleExportProjectPdf()}
+          onExportProjectJpgZip={() => void handleExportProjectJpgZip()}
+          onImportImage={handleImportImage}
+          onCreatePanel={() =>
+            selectedPage ? void executeCommand("setTool", { tool: "panel" }) : undefined
+          }
+          onInsertBubble={(bubbleType) => handleInsertBubble(bubbleType)}
+        />
+      )}
       <input
         ref={fileInputRef}
         className="hidden-input"

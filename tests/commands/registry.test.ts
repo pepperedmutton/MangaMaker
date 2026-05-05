@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getPageWorkspace } from "../../src/domain/helpers";
+import { clampBubbleTailBaseLocalPoint, getPageWorkspace } from "../../src/domain/helpers";
+import type { Bubble } from "../../src/domain/schema";
 import { createHarness, runCommand } from "./harness";
 
 describe("commandRegistry", () => {
@@ -180,6 +181,37 @@ describe("commandRegistry", () => {
       color: "#334455",
     });
 
+    const element = (await runCommand(harness, "createElement", {
+      pageId: page.id,
+      x: 180,
+      y: 220,
+      width: 260,
+      height: 180,
+      src: "/elements/artwords-bam.svg",
+      title: "BAM!",
+      category: "artWords",
+    })) as { id: string };
+    const updatedElement = await runCommand(harness, "updateElement", {
+      pageId: page.id,
+      elementId: element.id,
+      x: 220,
+      y: 260,
+      width: 300,
+      height: 220,
+      rotation: 15,
+      opacity: 0.75,
+    });
+    expect(updatedElement).toMatchObject({
+      x: 220,
+      y: 260,
+      width: 300,
+      height: 220,
+      rotation: 15,
+      opacity: 0.75,
+      src: "/elements/artwords-bam.svg",
+    });
+    expect(harness.readSession().project.pages[0].layers).toContain(`element:${element.id}`);
+
     const bubble = (await runCommand(harness, "createBubble", {
       pageId: page.id,
       x: 240,
@@ -188,12 +220,6 @@ describe("commandRegistry", () => {
       height: 150,
     })) as { id: string };
 
-    await runCommand(harness, "updateBubble", {
-      pageId: page.id,
-      bubbleId: bubble.id,
-      text: "Updated dialogue",
-      fontSize: 28,
-    });
     const tailHiddenBubble = (await runCommand(harness, "updateBubble", {
       pageId: page.id,
       bubbleId: bubble.id,
@@ -206,41 +232,36 @@ describe("commandRegistry", () => {
       opacity: 0.42,
     })) as { opacity: number };
     expect(translucentBubble.opacity).toBeCloseTo(0.42, 2);
+    const requestedTailBase = {
+      x: 60,
+      y: 40,
+    };
     const anchoredBubble = (await runCommand(harness, "updateBubble", {
       pageId: page.id,
       bubbleId: bubble.id,
-      tailBase: {
-        x: 60,
-        y: 40,
-      },
-    })) as {
-      tailBase: { x: number; y: number };
-      width: number;
-      height: number;
-    };
-    expect(anchoredBubble).toMatchObject({
-      tailBase: {
-        x: 60,
-        y: 40,
-      },
-    });
+      tailBase: requestedTailBase,
+    })) as Bubble;
+    const expectedTailBase = clampBubbleTailBaseLocalPoint(
+      anchoredBubble,
+      requestedTailBase,
+    );
+    expect(anchoredBubble.tailBase.x).toBeCloseTo(expectedTailBase.x, 6);
+    expect(anchoredBubble.tailBase.y).toBeCloseTo(expectedTailBase.y, 6);
 
     const resizedBubble = (await runCommand(harness, "updateBubble", {
       pageId: page.id,
       bubbleId: bubble.id,
       width: 520,
       height: 300,
-    })) as {
-      tailBase: { x: number; y: number };
-      width: number;
-      height: number;
-    };
-    expect(resizedBubble).toMatchObject({
-      tailBase: {
-        x: (anchoredBubble.tailBase.x * resizedBubble.width) / anchoredBubble.width,
-        y: (anchoredBubble.tailBase.y * resizedBubble.height) / anchoredBubble.height,
-      },
-    });
+    })) as Bubble;
+    expect(resizedBubble.tailBase.x).toBeCloseTo(
+      (anchoredBubble.tailBase.x * resizedBubble.width) / anchoredBubble.width,
+      6,
+    );
+    expect(resizedBubble.tailBase.y).toBeCloseTo(
+      (anchoredBubble.tailBase.y * resizedBubble.height) / anchoredBubble.height,
+      6,
+    );
 
     await runCommand(harness, "deleteObject", {
       pageId: page.id,
@@ -255,17 +276,16 @@ describe("commandRegistry", () => {
       direction: "down",
     });
     expect(movedLayer).toMatchObject({
-      fromIndex: 1,
-      toIndex: 0,
+      fromIndex: 2,
+      toIndex: 1,
     });
 
     expect(harness.readSession().project.pages[0].texts).toHaveLength(0);
-    expect(harness.readSession().project.pages[0].bubbles[0].text).toBe("Updated dialogue");
     expect(harness.readSession().project.pages[0].bubbles[0].showTail).toBe(false);
     expect(harness.readSession().project.pages[0].bubbles[0].opacity).toBeCloseTo(0.42, 2);
   });
 
-  it("reuses updated text typography and box size as defaults for the next inserted text and bubble", async () => {
+  it("reuses updated text typography and box size as defaults for the next inserted text", async () => {
     const harness = createHarness();
 
     await runCommand(harness, "createProject", { title: "Text Defaults" });
@@ -309,20 +329,6 @@ describe("commandRegistry", () => {
       fontWeight: 700,
     });
 
-    const bubble = (await runCommand(harness, "createBubble", {
-      pageId: page.id,
-    })) as {
-      id: string;
-      fontFamily: string;
-      fontSize: number;
-      fontWeight: number;
-    };
-
-    expect(bubble).toMatchObject({
-      fontFamily: "LXGW WenKai",
-      fontSize: 48,
-      fontWeight: 700,
-    });
   });
 
   it("centers text alignment by default for vertical text and when switching from legacy left alignment", async () => {
@@ -353,36 +359,30 @@ describe("commandRegistry", () => {
     expect(switched.textAlign).toBe("center");
   });
 
-  it("promotes updated bubble typography to global text defaults", async () => {
+  it("keeps bubble shape updates separate from global text defaults", async () => {
     const harness = createHarness();
 
-    await runCommand(harness, "createProject", { title: "Bubble Typography Defaults" });
+    await runCommand(harness, "createProject", { title: "Bubble Shape Defaults" });
     const page = (await runCommand(harness, "addPage", {})) as { id: string };
-    const firstBubble = (await runCommand(harness, "createBubble", {
+    const bubble = (await runCommand(harness, "createBubble", {
       pageId: page.id,
     })) as { id: string };
+    const defaultsBefore = harness.readSession().textInsertDefaults;
 
     await runCommand(harness, "updateBubble", {
       pageId: page.id,
-      bubbleId: firstBubble.id,
-      fontFamily: "Source Han Sans",
-      fontSize: 52,
-      fontWeight: 800,
+      bubbleId: bubble.id,
+      bubbleType: "cloud",
+      strokeWidth: 5,
+      backgroundColor: "#ffeeaa",
     });
 
-    const nextBubble = (await runCommand(harness, "createBubble", {
-      pageId: page.id,
-    })) as {
-      id: string;
-      fontFamily: string;
-      fontSize: number;
-      fontWeight: number;
-    };
+    expect(harness.readSession().textInsertDefaults).toEqual(defaultsBefore);
     const nextText = (await runCommand(harness, "createText", {
       pageId: page.id,
       x: 220,
       y: 260,
-      content: "From bubble defaults",
+      content: "Text defaults stay independent",
     })) as {
       id: string;
       fontFamily: string;
@@ -390,15 +390,10 @@ describe("commandRegistry", () => {
       fontWeight: number;
     };
 
-    expect(nextBubble).toMatchObject({
-      fontFamily: "Source Han Sans",
-      fontSize: 52,
-      fontWeight: 800,
-    });
     expect(nextText).toMatchObject({
-      fontFamily: "Source Han Sans",
-      fontSize: 52,
-      fontWeight: 800,
+      fontFamily: defaultsBefore.fontFamily,
+      fontSize: defaultsBefore.fontSize,
+      fontWeight: defaultsBefore.fontWeight,
     });
   });
 
@@ -484,6 +479,47 @@ describe("commandRegistry", () => {
     );
   });
 
+  it("creates clipboard envelopes through the command API", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Clipboard Envelope" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const text = (await runCommand(harness, "createText", {
+      pageId: page.id,
+      x: 120,
+      y: 160,
+      content: "Copy me",
+    })) as { id: string };
+
+    await runCommand(harness, "selectObject", {
+      pageId: page.id,
+      objectType: "text",
+      objectId: text.id,
+    });
+    const textEnvelope = await runCommand(harness, "createClipboardEnvelope", {});
+    expect(textEnvelope).toMatchObject({
+      signature: "mangamaker-clipboard/v1",
+      sourceProjectId: harness.readSession().project.id,
+      item: {
+        kind: "text",
+        text: {
+          content: "Copy me",
+        },
+      },
+    });
+
+    await runCommand(harness, "clearSelection", {});
+    const pageEnvelope = await runCommand(harness, "createClipboardEnvelope", {});
+    expect(pageEnvelope).toMatchObject({
+      item: {
+        kind: "page",
+        page: {
+          id: page.id,
+        },
+      },
+    });
+  });
+
   it("uses the same history model for undo and redo", async () => {
     const harness = createHarness();
 
@@ -496,6 +532,7 @@ describe("commandRegistry", () => {
           project: structuredClone(harness.readSession().project),
           selectedPageId: harness.readSession().selectedPageId,
           selection: null,
+          multiSelection: [],
           panelImageEditing: null,
         },
       ],
@@ -535,6 +572,7 @@ describe("commandRegistry", () => {
           project: structuredClone(harness.readSession().project),
           selectedPageId: harness.readSession().selectedPageId,
           selection: harness.readSession().selection,
+          multiSelection: harness.readSession().multiSelection,
           panelImageEditing: harness.readSession().panelImageEditing,
         },
       ],

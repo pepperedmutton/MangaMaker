@@ -10,6 +10,7 @@ import {
 } from "./defaults";
 import type {
   Bubble,
+  ElementItem,
   ObjectType,
   Page,
   Panel,
@@ -24,7 +25,8 @@ import type { EditorSelection } from "../state/types";
 type RenderableLayer =
   | { layer: string; objectType: "panel"; object: Panel }
   | { layer: string; objectType: "text"; object: TextItem }
-  | { layer: string; objectType: "bubble"; object: Bubble };
+  | { layer: string; objectType: "bubble"; object: Bubble }
+  | { layer: string; objectType: "element"; object: ElementItem };
 
 export const snapValue = (value: number, step = GRID_SIZE) =>
   Math.round(value / step) * step;
@@ -93,6 +95,13 @@ export const clampTextBoxToWorkspace = (
   rect: { x: number; y: number; width: number; height: number },
 ) => {
   return clampRectToWorkspace(page, rect, MIN_TEXT_BOX_WIDTH, MIN_TEXT_BOX_HEIGHT);
+};
+
+export const clampElementRectToWorkspace = (
+  page: Page,
+  rect: { x: number; y: number; width: number; height: number },
+) => {
+  return clampRectToWorkspace(page, rect, 24, 24);
 };
 
 export const clampPointToWorkspace = (
@@ -529,7 +538,7 @@ export const getPageById = (project: Project, pageId: string) => {
 export const getSelectedObject = (
   page: Page,
   selection: EditorSelection,
-): Panel | TextItem | Bubble | null => {
+): Panel | TextItem | Bubble | ElementItem | null => {
   if (!selection || selection.pageId !== page.id) {
     return null;
   }
@@ -542,6 +551,10 @@ export const getSelectedObject = (
     return page.texts.find((text) => text.id === selection.objectId) ?? null;
   }
 
+  if (selection.objectType === "element") {
+    return (page.elements ?? []).find((element) => element.id === selection.objectId) ?? null;
+  }
+
   return page.bubbles.find((bubble) => bubble.id === selection.objectId) ?? null;
 };
 
@@ -549,7 +562,8 @@ const isRenderableLayer = (
   entry:
     | { layer: string; objectType: "panel"; object: Panel | null }
     | { layer: string; objectType: "text"; object: TextItem | null }
-    | { layer: string; objectType: "bubble"; object: Bubble | null },
+    | { layer: string; objectType: "bubble"; object: Bubble | null }
+    | { layer: string; objectType: "element"; object: ElementItem | null },
 ): entry is RenderableLayer => entry.object !== null;
 
 export const getRenderableLayers = (page: Page): RenderableLayer[] =>
@@ -567,6 +581,13 @@ export const getRenderableLayers = (page: Page): RenderableLayer[] =>
           layer,
           objectType: "text" as const,
           object: page.texts.find((text) => text.id === layer.slice("text:".length)) ?? null,
+        };
+      }
+      if (layer.startsWith("element:")) {
+        return {
+          layer,
+          objectType: "element" as const,
+          object: (page.elements ?? []).find((element) => element.id === layer.slice("element:".length)) ?? null,
         };
       }
       return {

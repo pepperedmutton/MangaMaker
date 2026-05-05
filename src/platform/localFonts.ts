@@ -2,7 +2,9 @@ export type CuratedFontCategory =
   | "body_sans"
   | "body_serif"
   | "handwriting"
-  | "display_heavy";
+  | "display_heavy"
+  | "manga_japanese"
+  | "manga_latin";
 
 export type CuratedFont = {
   nameCn: string;
@@ -68,6 +70,146 @@ export const CURATED_FONTS: CuratedFont[] = [
     category: "handwriting",
     license: "Freeware",
     tags: ["\u5410\u69fd", "Q\u7248", "\u65e5\u8bb0\u624b\u5199"],
+  },
+  {
+    nameCn: "Yomogi \u65e5\u6587\u624b\u5199\u4f53",
+    fontFamily: "Yomogi",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u624b\u5199", "\u72ec\u767d", "\u6cbb\u6108"],
+  },
+  {
+    nameCn: "Hachi Maru Pop \u6ce1\u6ce1\u624b\u5199\u4f53",
+    fontFamily: "Hachi Maru Pop",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u53ef\u7231", "\u5410\u69fd", "\u6c14\u6ce1\u5b57"],
+  },
+  {
+    nameCn: "Dela Gothic One \u65e5\u6587\u9ed1\u4f53\u6807\u9898",
+    fontFamily: "Dela Gothic One",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u6807\u9898", "\u62df\u58f0\u8bcd", "\u91cd\u91cf\u611f"],
+  },
+  {
+    nameCn: "Reggae One \u5f8b\u52a8\u65e5\u6587\u4f53",
+    fontFamily: "Reggae One",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u5938\u5f20", "\u559c\u5267", "\u89d2\u8272\u53f0\u8bcd"],
+  },
+  {
+    nameCn: "Rampart One \u65e5\u6587\u7acb\u4f53\u8f6e\u5ed3",
+    fontFamily: "Rampart One",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u8f6e\u5ed3", "\u6807\u9898", "\u62df\u58f0\u8bcd"],
+  },
+  {
+    nameCn: "DotGothic16 \u70b9\u9635\u65e5\u6587\u4f53",
+    fontFamily: "DotGothic16",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u70b9\u9635", "\u7535\u5b50", "\u590d\u53e4"],
+  },
+  {
+    nameCn: "Stick \u65e5\u6587\u7b49\u7ebf\u624b\u5199",
+    fontFamily: "Stick",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u624b\u5199", "\u6807\u9898", "\u6e05\u6670"],
+  },
+  {
+    nameCn: "Kaisei Decol \u88c5\u9970\u660e\u671d\u4f53",
+    fontFamily: "Kaisei Decol",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u660e\u671d", "\u65c1\u767d", "\u620f\u5267"],
+  },
+  {
+    nameCn: "Kiwi Maru \u5706\u4f53\u65e5\u6587",
+    fontFamily: "Kiwi Maru",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u5706\u4f53", "\u5bf9\u8bdd", "\u67d4\u548c"],
+  },
+  {
+    nameCn: "Yuji Boku \u6bdb\u7b14\u65e5\u6587",
+    fontFamily: "Yuji Boku",
+    category: "manga_japanese",
+    license: "OFL 1.1",
+    tags: ["\u65e5\u8bed", "\u6bdb\u7b14", "\u53e4\u98ce", "\u65c1\u767d"],
+  },
+  {
+    nameCn: "Bangers \u7f8e\u5f0f\u6f2b\u753b\u6807\u9898",
+    fontFamily: "Bangers",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "comic", "title", "action"],
+  },
+  {
+    nameCn: "Luckiest Guy \u5361\u901a\u6807\u9898",
+    fontFamily: "Luckiest Guy",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "comic", "bold", "poster"],
+  },
+  {
+    nameCn: "Comic Neue \u5bf9\u767d\u624b\u5199\u4f53",
+    fontFamily: "Comic Neue",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "dialogue", "handwriting", "clean"],
+  },
+  {
+    nameCn: "Permanent Marker \u9a6c\u514b\u7b14\u4f53",
+    fontFamily: "Permanent Marker",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "marker", "shout", "rough"],
+  },
+  {
+    nameCn: "Chewy \u6ce1\u6ce1\u5361\u901a\u4f53",
+    fontFamily: "Chewy",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "comic", "bubble", "cute"],
+  },
+  {
+    nameCn: "Bubblegum Sans \u6c14\u6ce1\u82f1\u6587\u4f53",
+    fontFamily: "Bubblegum Sans",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "comic", "bubble", "dialogue"],
+  },
+  {
+    nameCn: "Boogaloo \u590d\u53e4\u6f2b\u753b\u4f53",
+    fontFamily: "Boogaloo",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "retro", "comic", "title"],
+  },
+  {
+    nameCn: "Carter One \u7c97\u91cd\u6807\u9898\u4f53",
+    fontFamily: "Carter One",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "bold", "display", "sound effect"],
+  },
+  {
+    nameCn: "Creepster \u60ca\u609a\u6f2b\u753b\u4f53",
+    fontFamily: "Creepster",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "horror", "monster", "effect"],
+  },
+  {
+    nameCn: "Freckle Face \u7ae5\u8da3\u6f2b\u753b\u4f53",
+    fontFamily: "Freckle Face",
+    category: "manga_latin",
+    license: "OFL 1.1",
+    tags: ["English", "comic", "kids", "handwriting"],
   },
 ];
 

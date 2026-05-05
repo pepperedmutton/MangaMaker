@@ -16,7 +16,16 @@ const parseStoredProject = (raw: unknown) =>
 const DRAFT_KEY = "mangamaker:draft:v2";
 const DRAFT_POINTER_KEY = "mangamaker:draft:pointer";
 const PROJECT_INDEX_KEY = "mangamaker:projects:v1";
+const WEB_PERSISTENCE_API_BASE = "/__mangamaker__/persistence";
+
+type SaveLocalDraftMode = "serial" | "last-write-wins";
+
+type SaveLocalDraftOptions = {
+  mode?: SaveLocalDraftMode;
+};
+
 let saveDraftQueue: Promise<void> = Promise.resolve();
+let latestLwwSaveToken = 0;
 
 const enqueueDraftSave = <T>(operation: () => Promise<T>): Promise<T> => {
   const next = saveDraftQueue.then(operation, operation);
@@ -231,50 +240,166 @@ export const hasLocalDraft = () => {
   return readProjectsFromIndex().length > 0;
 };
 
-export const saveLocalDraft = async (project: Project) => {
-  return enqueueDraftSave(async () => {
-    if (typeof window === "undefined") {
+const createStorageSnapshot = (project: Project) => {
+  const parsed = projectSchema.parse(structuredClone(project));
+  return {
+    parsed,
+    payload: serializeProjectForStorage(parsed),
+  };
+};
+
+const persistSnapshotToLocalStorage = (project: Project) => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const snapshot = createStorageSnapshot(project);
+    const wroteDraft = safeLocalStorageSet(DRAFT_KEY, snapshot.payload);
+    const wrotePointer = safeLocalStorageSet(DRAFT_POINTER_KEY, snapshot.parsed.id);
+    if (!wroteDraft || !wrotePointer) {
       return null;
     }
-    const snapshot = projectSchema.parse(structuredClone(project));
-    const materialized = await materializeProjectImageSources(snapshot);
-    const parsed = projectSchema.parse(materialized);
-    const filePersistenceRequired = isProjectsFilePersistenceAvailable();
+    upsertProjectInIndex(snapshot.parsed);
+    return {
+      ...snapshot,
+      savedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.warn("Failed to persist synchronous local draft snapshot:", error);
+    return null;
+  }
+};
 
-    let persistedToFiles = false;
-    let persistedToLocalStorage = false;
+const queueWebPersistenceOnUnload = (project: Project, projectJson: string) => {
+  if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") {
+    return false;
+  }
 
+  try {
+    const body = JSON.stringify({
+      project_id: project.id,
+      project_title: project.title,
+      project_json: projectJson,
+    });
+    return navigator.sendBeacon(
+      `${WEB_PERSISTENCE_API_BASE}/write_project_draft`,
+      new Blob([body], { type: "application/json" }),
+    );
+  } catch (error) {
+    console.warn("Failed to queue project save before page unload:", error);
+    return false;
+  }
+};
+
+export const saveLocalDraftSnapshot = (project: Project) =>
+  persistSnapshotToLocalStorage(project)?.savedAt ?? null;
+
+export const saveLocalDraftBeforeUnload = (project: Project) => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  let snapshot = persistSnapshotToLocalStorage(project);
+  if (!snapshot) {
     try {
-      const filePath = await saveProjectToProjectsFolder(parsed);
-      persistedToFiles = Boolean(filePath);
+      snapshot = {
+        ...createStorageSnapshot(project),
+        savedAt: new Date().toISOString(),
+      };
     } catch (error) {
-      console.warn("Failed to persist project to projects folder:", error);
+      console.warn("Failed to prepare project save before page unload:", error);
+      return null;
     }
+  }
 
-    if (filePersistenceRequired && !persistedToFiles) {
-      throw new Error(
-        "Project persistence failed: current runtime requires writing project data to the local projects folder.",
-      );
-    }
+  queueWebPersistenceOnUnload(snapshot.parsed, snapshot.payload);
+  return snapshot.savedAt;
+};
 
-    const payload = serializeProjectForStorage(parsed);
-    const wroteDraft = safeLocalStorageSet(DRAFT_KEY, payload);
-    const wrotePointer = safeLocalStorageSet(DRAFT_POINTER_KEY, parsed.id);
-    if (wroteDraft && wrotePointer) {
-      upsertProjectInIndex(parsed);
-      persistedToLocalStorage = true;
-    } else {
-      console.warn("LocalStorage draft persistence is unavailable; relying on file persistence.");
-    }
+const persistLocalDraft = async (
+  project: Project,
+  isStillLatest?: () => boolean,
+) => {
+  if (typeof window === "undefined") {
+    return null;
+  }
 
-    if (!persistedToFiles && !persistedToLocalStorage) {
-      throw new Error(
-        "Project persistence failed: both file persistence and localStorage persistence are unavailable.",
-      );
-    }
+  if (isStillLatest && !isStillLatest()) {
+    return null;
+  }
 
-    return new Date().toISOString();
-  });
+  const snapshot = projectSchema.parse(structuredClone(project));
+
+  if (isStillLatest && !isStillLatest()) {
+    return null;
+  }
+
+  const materialized = await materializeProjectImageSources(snapshot);
+
+  if (isStillLatest && !isStillLatest()) {
+    return null;
+  }
+
+  const parsed = projectSchema.parse(materialized);
+  const filePersistenceRequired = isProjectsFilePersistenceAvailable();
+
+  let persistedToFiles = false;
+  let persistedToLocalStorage = false;
+
+  try {
+    const filePath = await saveProjectToProjectsFolder(parsed);
+    persistedToFiles = Boolean(filePath);
+  } catch (error) {
+    console.warn("Failed to persist project to projects folder:", error);
+  }
+
+  if (isStillLatest && !isStillLatest()) {
+    return null;
+  }
+
+  if (filePersistenceRequired && !persistedToFiles) {
+    throw new Error(
+      "Project persistence failed: current runtime requires writing project data to the local projects folder.",
+    );
+  }
+
+  const payload = serializeProjectForStorage(parsed);
+  const wroteDraft = safeLocalStorageSet(DRAFT_KEY, payload);
+  const wrotePointer = safeLocalStorageSet(DRAFT_POINTER_KEY, parsed.id);
+  if (wroteDraft && wrotePointer) {
+    upsertProjectInIndex(parsed);
+    persistedToLocalStorage = true;
+  } else {
+    console.warn("LocalStorage draft persistence is unavailable; relying on file persistence.");
+  }
+
+  if (isStillLatest && !isStillLatest()) {
+    return null;
+  }
+
+  if (!persistedToFiles && !persistedToLocalStorage) {
+    throw new Error(
+      "Project persistence failed: both file persistence and localStorage persistence are unavailable.",
+    );
+  }
+
+  return new Date().toISOString();
+};
+
+export const saveLocalDraft = async (project: Project, options?: SaveLocalDraftOptions) => {
+  const mode = options?.mode ?? "serial";
+  if (mode === "last-write-wins") {
+    const saveToken = ++latestLwwSaveToken;
+    return enqueueDraftSave(async () => {
+      if (saveToken !== latestLwwSaveToken) {
+        return null;
+      }
+      return persistLocalDraft(project, () => saveToken === latestLwwSaveToken);
+    });
+  }
+
+  return enqueueDraftSave(async () => persistLocalDraft(project));
 };
 
 export const listLocalProjects = async () => {

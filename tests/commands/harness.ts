@@ -9,19 +9,27 @@ import type { EditorSessionState, HistoryEntry } from "../../src/state/types";
 
 export const createHarness = () => {
   let session: EditorSessionState = {
+    appView: "welcome",
     project: createBlankProject(""),
     selectedPageId: null,
     selection: null,
+    multiSelection: [],
     panelImageEditing: null,
     locale: "en",
     activeTool: "select",
     textInsertDefaults: { ...DEFAULT_TEXT_INSERT_DEFAULTS },
+    bubbleInsert: {
+      mode: "preset",
+      presetBubbleType: "round",
+      customSmoothness: 0.45,
+    },
     zoom: DEFAULT_ZOOM,
     lastExport: null,
     statusMessage: null,
     saveStatus: {
       target: null,
       lastSavedAt: null,
+      hasUnsavedChanges: false,
     },
   };
 

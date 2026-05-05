@@ -318,6 +318,8 @@ const main = async () => {
       ? spawnChild(pnpmCommand, [
           "exec",
           "vite",
+          "--config",
+          "vite.config.ts",
           "--host",
           options.host,
           "--port",
@@ -328,6 +330,8 @@ const main = async () => {
           "exec",
           "vite",
           "preview",
+          "--config",
+          "vite.config.ts",
           "--host",
           options.host,
           "--port",

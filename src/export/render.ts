@@ -3,7 +3,7 @@ import {
   getBubbleBasePoints,
   getRenderableLayers,
 } from "../domain/helpers";
-import type { Page, Panel, TextItem } from "../domain/schema";
+import type { ElementItem, Page, Panel, TextItem } from "../domain/schema";
 import {
   createVerticalPunctuationOffsetMeasurer,
   FULL_WIDTH_SPACE,
@@ -196,6 +196,15 @@ const buildPanelPath = (context: CanvasRenderingContext2D, panel: Panel) => {
   context.closePath();
 };
 
+const getTextStrokeConfig = (text: TextItem) => {
+  const strokeWidth = Math.max(0, text.strokeWidth);
+  return {
+    stroke: strokeWidth > 0 ? text.strokeColor : undefined,
+    strokeWidth,
+    fillAfterStrokeEnabled: strokeWidth > 0,
+  };
+};
+
 const drawPanelImage = async (context: CanvasRenderingContext2D, panel: Panel) => {
   if (!panel.image) {
     return;
@@ -220,6 +229,23 @@ const drawPanelImage = async (context: CanvasRenderingContext2D, panel: Panel) =
   );
   context.restore();
 };
+
+const drawElement = async (context: CanvasRenderingContext2D, element: ElementItem) => {
+  const image = await loadImage(element.src);
+  context.save();
+  context.globalAlpha = element.opacity;
+  context.translate(element.x + element.width * 0.5, element.y + element.height * 0.5);
+  context.rotate((element.rotation * Math.PI) / 180);
+  context.drawImage(
+    image,
+    -element.width * 0.5,
+    -element.height * 0.5,
+    element.width,
+    element.height,
+  );
+  context.restore();
+};
+
 const buildKonvaTextNode = (Konva: KonvaModule["default"], text: TextItem) => {
   const layout = resolveTextDisplayLayout({
     content: text.content,
@@ -245,6 +271,7 @@ const buildKonvaTextNode = (Konva: KonvaModule["default"], text: TextItem) => {
       fontStyle: String(text.fontWeight),
       letterSpacing: layout.letterSpacing,
       fill: text.color,
+      ...getTextStrokeConfig(text),
       width: text.width,
       height: text.height,
       align: text.textAlign,
@@ -264,8 +291,14 @@ const buildKonvaTextNode = (Konva: KonvaModule["default"], text: TextItem) => {
     x: text.x,
     y: text.y,
     clipFunc: (ctx) => {
+      const strokePadding = Math.max(0, text.strokeWidth);
       ctx.beginPath();
-      ctx.rect(0, 0, text.width, text.height);
+      ctx.rect(
+        -strokePadding,
+        -strokePadding,
+        text.width + strokePadding * 2,
+        text.height + strokePadding * 2,
+      );
       ctx.closePath();
     },
     listening: false,
@@ -285,6 +318,7 @@ const buildKonvaTextNode = (Konva: KonvaModule["default"], text: TextItem) => {
           fontFamily: text.fontFamily,
           fontStyle: String(text.fontWeight),
           fill: text.color,
+          ...getTextStrokeConfig(text),
           x:
             layout.vertical.offsetX +
             columnIndex * layout.vertical.columnAdvance +
@@ -446,6 +480,11 @@ export const renderPageToCanvas = async (page: Page) => {
 
     if (entry.objectType === "text") {
       orderedTextLayers.push(entry.object);
+      continue;
+    }
+
+    if (entry.objectType === "element") {
+      await drawElement(context, entry.object);
       continue;
     }
 

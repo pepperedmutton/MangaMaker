@@ -25,12 +25,16 @@ const getPanelImageRenderRect = (panel: Panel) => {
 };
 
 const {
+  mockDeleteLocalProject,
+  mockListLocalProjects,
   mockSaveLocalDraft,
   mockLoadLocalDraft,
   mockRenderPageToPngDataUrl,
   mockRenderProjectToJpgZipDataUrl,
   mockRenderProjectToPdfDataUrl,
 } = vi.hoisted(() => ({
+  mockDeleteLocalProject: vi.fn(async () => true),
+  mockListLocalProjects: vi.fn(async () => []),
   mockSaveLocalDraft: vi.fn(() => "2026-03-15T08:30:00.000Z"),
   mockLoadLocalDraft: vi.fn(),
   mockRenderPageToPngDataUrl: vi.fn(async () => "data:image/png;base64,ZmFrZQ=="),
@@ -39,7 +43,9 @@ const {
 }));
 
 vi.mock("../../src/storage/localDraft", () => ({
+  deleteLocalProject: mockDeleteLocalProject,
   hasLocalDraft: () => false,
+  listLocalProjects: mockListLocalProjects,
   saveLocalDraft: mockSaveLocalDraft,
   loadLocalDraft: mockLoadLocalDraft,
   clearLocalDraft: vi.fn(),
@@ -65,12 +71,17 @@ describe("commandRegistry coverage", () => {
         "renameProject",
         "saveProject",
         "loadProject",
+        "goHome",
+        "listStoredProjects",
+        "deleteStoredProject",
+        "duplicateStoredProject",
         "addPage",
         "setPageBackground",
         "duplicatePage",
         "removePage",
         "reorderPage",
         "moveLayer",
+        "createClipboardEnvelope",
         "pasteClipboardItem",
         "selectPage",
         "setTool",
@@ -97,6 +108,8 @@ describe("commandRegistry coverage", () => {
         "ungroupSelection",
         "createText",
         "updateText",
+        "createElement",
+        "updateElement",
         "createBubble",
         "updateBubble",
         "deleteObject",
@@ -117,6 +130,7 @@ describe("commandRegistry coverage", () => {
     };
 
     await runCommand(harness, "createProject", { title: "Saved Project", type: "cg" });
+    expect(harness.readSession().appView).toBe("editor");
     expect(harness.readSession().project.type).toBe("cg");
     const cgPage = (await runCommand(harness, "addPage", {})) as { width: number; height: number };
     expect(cgPage).toMatchObject({
@@ -133,6 +147,7 @@ describe("commandRegistry coverage", () => {
     });
 
     await runCommand(harness, "loadProject", { project: providedProject });
+    expect(harness.readSession().appView).toBe("editor");
     expect(harness.readSession().project.title).toBe("Loaded from payload");
 
     await runCommand(harness, "setLocale", { locale: "zh-CN" });
@@ -150,6 +165,47 @@ describe("commandRegistry coverage", () => {
     expect(updatedPage).toMatchObject({
       background: "#ccddee",
     });
+  });
+
+  it("backs home navigation and stored project catalog actions with commands", async () => {
+    const harness = createHarness();
+    const sourceProject = {
+      ...createBlankProject("Catalog Project"),
+      pages: [createDefaultPage(0)],
+    };
+
+    mockListLocalProjects.mockResolvedValueOnce([sourceProject]);
+    await expect(runCommand(harness, "listStoredProjects", {})).resolves.toEqual([sourceProject]);
+
+    await runCommand(harness, "createProject", { title: "Dirty Project" });
+    harness.context.setSession({
+      saveStatus: {
+        target: null,
+        lastSavedAt: null,
+        hasUnsavedChanges: true,
+      },
+    });
+    await runCommand(harness, "goHome", {});
+    expect(mockSaveLocalDraft).toHaveBeenCalledWith(harness.readSession().project);
+    expect(harness.readSession().appView).toBe("welcome");
+    expect(harness.readSession().saveStatus.hasUnsavedChanges).toBe(false);
+
+    const duplicated = await runCommand(harness, "duplicateStoredProject", {
+      project: sourceProject,
+    });
+    expect(duplicated).toMatchObject({
+      title: "Catalog Project Copy",
+    });
+    expect(mockSaveLocalDraft).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        title: "Catalog Project Copy",
+      }),
+    );
+
+    await runCommand(harness, "deleteStoredProject", {
+      projectId: sourceProject.id,
+    });
+    expect(mockDeleteLocalProject).toHaveBeenCalledWith(sourceProject.id);
   });
 
   it("covers page selection, zoom, and history state", async () => {
@@ -185,6 +241,7 @@ describe("commandRegistry coverage", () => {
           project: structuredClone(harness.readSession().project),
           selectedPageId: secondPage.id,
           selection: null,
+          multiSelection: [],
           panelImageEditing: null,
         },
       ],
@@ -328,7 +385,6 @@ describe("commandRegistry coverage", () => {
       y: 285,
       width: 255,
       height: 145,
-      text: "Speech",
     })) as { id: string };
 
     const styledPanel = await runCommand(harness, "setPanelStyle", {
@@ -368,6 +424,8 @@ describe("commandRegistry coverage", () => {
       fontSize: 42,
       fontFamily: "LXGW WenKai",
       color: "#334455",
+      strokeWidth: 4,
+      strokeColor: "#ffffff",
       direction: "vertical",
     });
     expect(updatedText).toMatchObject({
@@ -379,6 +437,8 @@ describe("commandRegistry coverage", () => {
       fontSize: 42,
       fontFamily: "LXGW WenKai",
       color: "#334455",
+      strokeWidth: 4,
+      strokeColor: "#ffffff",
       direction: "vertical",
     });
 
@@ -396,8 +456,6 @@ describe("commandRegistry coverage", () => {
       width: 301,
       height: 151,
       tailTip: { x: 1300, y: -60 },
-      text: "Updated dialogue",
-      fontSize: 30,
       bubbleType: "explosion",
       spikePositions: customSpikePositions,
     });

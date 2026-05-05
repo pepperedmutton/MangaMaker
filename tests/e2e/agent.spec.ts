@@ -1,0 +1,165 @@
+import { expect, test, type Page } from "@playwright/test";
+
+const clearStoredProjectDrafts = async (page: Page) => {
+  await page.evaluate(async () => {
+    const response = await fetch("/__mangamaker__/persistence/list_project_drafts");
+    if (!response.ok) {
+      throw new Error("Failed to list project drafts");
+    }
+    const payload = (await response.json()) as { projects?: string[] };
+    for (const rawProject of payload.projects ?? []) {
+      try {
+        const parsed = JSON.parse(rawProject) as { id?: unknown };
+        if (typeof parsed.id !== "string") {
+          continue;
+        }
+        await fetch("/__mangamaker__/persistence/delete_project_draft", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: parsed.id }),
+        });
+      } catch {
+        // Keep clearing the rest of the isolated E2E drafts.
+      }
+    }
+  });
+};
+
+const clearDraftAndOpen = async (page: Page) => {
+  await page.goto("/");
+  await page.evaluate(() => window.localStorage.clear());
+  await clearStoredProjectDrafts(page);
+  await page.reload();
+};
+
+const createProjectAndFirstPage = async (page: Page, title: string) => {
+  await page.getByLabel("Project title").fill(title);
+  await page.getByRole("button", { name: "Create project" }).click();
+  await page.getByRole("button", { name: "Create your first page" }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages.length))
+    .toBe(1);
+};
+
+const askAgent = async (page: Page, prompt: string) => {
+  await page.getByLabel("Agent prompt").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+};
+
+test("agent opens, reports test config, validates plans, and executes through commands", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Agent Workflow");
+
+  const config = await page.evaluate(async () => {
+    const response = await fetch("/__mangamaker__/agent/config");
+    return response.json();
+  });
+  expect(config).toMatchObject({
+    enabled: true,
+    provider: "test",
+    testMode: true,
+    visionEnabled: true,
+  });
+
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
+  await expect(page.getByLabel("Agent sidebar")).toBeVisible();
+  await expect(page.getByLabel("Agent configuration status")).toContainText("Test mode");
+  await expect(page.getByLabel("Agent context summary")).toContainText("Agent Workflow");
+
+  const createTextManifest = await page.evaluate(() =>
+    window.mangaMaker?.commands.describe().find((command) => command.id === "createText"),
+  );
+  expect(createTextManifest).toMatchObject({
+    id: "createText",
+    label: "Create Text",
+    recordHistory: true,
+    mutatesProject: true,
+    dangerLevel: "normal",
+  });
+  expect(createTextManifest?.inputJsonSchema).toBeTruthy();
+  expect(createTextManifest?.guiEquivalent).toContain("Text");
+
+  await askAgent(page, "What is the title and page count?");
+  await expect(page.getByLabel("Agent messages")).toContainText("Agent Workflow");
+  await expect(page.getByLabel("Agent messages")).toContainText("1 pages");
+
+  await askAgent(page, "Create a panel");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
+    .toBe(1);
+
+  await page.keyboard.press("Control+KeyZ");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
+    .toBe(0);
+  await page.keyboard.press("Control+KeyY");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
+    .toBe(1);
+
+  await askAgent(page, "Add text: Hello");
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.texts[0]?.content))
+    .toBe("Hello");
+
+  await askAgent(page, "Set text stroke red width 4");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const text = window.mangaMaker?.project.get().pages[0]?.texts[0];
+        return text ? { strokeColor: text.strokeColor, strokeWidth: text.strokeWidth } : null;
+      }),
+    )
+    .toEqual({ strokeColor: "#ff0000", strokeWidth: 4 });
+
+  const pageCountBeforeDeletePlan = await page.evaluate(
+    () => window.mangaMaker?.project.get().pages.length ?? 0,
+  );
+  await askAgent(page, "Delete current page");
+  await expect(page.getByLabel("Pending command plan")).toContainText("Needs confirmation");
+  await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages.length ?? 0))
+    .toBe(pageCountBeforeDeletePlan);
+
+  await page.getByRole("button", { name: "Confirm" }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages.length ?? 0))
+    .toBe(pageCountBeforeDeletePlan - 1);
+});
+
+test("agent warns when a response did not use visual input", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Vision Warning");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
+
+  await askAgent(page, "vision warning");
+
+  await expect(page.getByLabel("Agent configuration status")).toContainText("canvas image was not used");
+  await expect(page.getByLabel("Agent messages")).toContainText("without visual input");
+});
+
+test("agent disables chat when configuration is unavailable", async ({ page }) => {
+  await page.route("**/__mangamaker__/agent/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: false,
+        provider: "unavailable",
+        model: null,
+        apiKeyConfigured: false,
+        testMode: false,
+        visionEnabled: false,
+        reason: "OPENROUTER_API_KEY is not configured.",
+      }),
+    });
+  });
+
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Unconfigured Agent");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
+
+  await expect(page.getByLabel("Agent configuration status")).toContainText("OPENROUTER_API_KEY");
+  await expect(page.getByLabel("Agent prompt")).toBeDisabled();
+});

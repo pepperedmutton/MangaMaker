@@ -55,8 +55,8 @@ Minimum required API checks when the related behavior changes:
 8. Verify `setPanelDescription` persists per-panel metadata and does not create rendered comic text.
 9. Verify `pasteClipboardItem` accepts page/panel/text/bubble payloads and inserts new ids without overwriting originals.
 10. Verify panel/page paste payloads retain image data and can be persisted into the target project assets.
-11. Verify `updateBubble` can persist bubble type changes, typography changes, `tailTip`, `tailBase`, `tailWidth`, and `spikePositions` when relevant.
-12. Verify `saveProject` and autosave write the latest project state after a mutating operation.
+11. Verify `updateBubble` can persist bubble type changes, style changes, `tailTip`, `tailBase`, `tailWidth`, and `spikePositions` when relevant.
+12. Verify `saveProject`, `goHome`, project switching, and the page close/hide save path write dirty project state at the defined persistence points.
 
 1. 在 `src/commands` 中定位对应命令。
 2. 通过 `window.mangaMaker.commands.execute()` 验证命令执行。
@@ -68,8 +68,8 @@ Minimum required API checks when the related behavior changes:
 8. 验证 `setPanelDescription` 会持久化每个分镜的元数据，且不会生成渲染文字对象。
 9. 验证 `pasteClipboardItem` 能处理页面、分镜、文字、气泡 payload，并生成新的 id，不覆盖原对象。
 10. 验证分镜/页面粘贴 payload 能保留图片数据，并可写入目标项目资源目录。
-11. 在相关改动中，验证 `updateBubble` 能持久化气泡类型、排版、`tailTip`、`tailBase`、`tailWidth` 和 `spikePositions`。
-12. 验证 `saveProject` 与自动保存会在修改后写入最新项目状态。
+11. 在相关改动中，验证 `updateBubble` 能持久化气泡类型、样式、`tailTip`、`tailBase`、`tailWidth` 和 `spikePositions`。
+12. 验证 `saveProject`、`goHome`、项目切换以及页面关闭/隐藏保存路径会在定义的持久化节点写入脏项目状态。
 
 ### 2.3 Persistence Verification / 持久化验证
 When a change touches saving, importing, pasting, startup project discovery, or project naming, verify real filesystem results.
@@ -96,11 +96,11 @@ Desktop runtime checks:
 
 桌面版检查：
 
-1. Verify autosave creates or updates `projects/<project-id>/project.json`.
+1. Verify manual Save, Home/project switching, and close/hide save create or update `projects/<project-id>/project.json`.
 2. Verify imported and pasted images persist to `projects/<project-id>/assets/`.
 3. Verify startup project listing sees existing on-disk projects.
 
-1. 验证自动保存会创建或更新 `projects/<project-id>/project.json`。
+1. 验证手动 Save、Home/项目切换以及关闭/隐藏页面保存会创建或更新 `projects/<project-id>/project.json`。
 2. 验证导入和粘贴的图片写入 `projects/<project-id>/assets/`。
 3. 验证启动时的项目列表能够看到已有磁盘项目。
 
@@ -126,7 +126,7 @@ Minimum manual checklist:
 11. **Bubbles**: Bubble type switching works; continuous numeric controls use sliders; tail tip drag works; tail-base drag works; the bubble outline stays continuous without an internal tail border.
 12. **Explosion Bubbles**: Spike editing works and remains persisted.
 13. **Context Menus**: Right-click on canvas objects opens the custom menu and suppresses the browser menu; layer up/down changes stacking order.
-14. **Persistence**: After important actions such as page creation, image import, image paste, and bubble editing, the on-disk project files update immediately.
+14. **Persistence**: After important actions such as page creation, image import, image paste, and bubble editing, dirty state is set; Save, Home/project switch, and close/hide write the latest project files without losing work.
 15. **Home and Save**: Users can return to the welcome screen and save manually without losing work.
 16. **Export**: Export page PNG and project PDF both work and report status.
 17. **Language**: Chinese and English UI remain readable after switching.
@@ -144,7 +144,7 @@ Minimum manual checklist:
 11. **气泡**：气泡类型切换正常；连续数值控制使用滑杆；尾尖拖拽正常；尾根拖拽正常；气泡外轮廓保持连续，内部不出现尾巴边线。
 12. **爆炸气泡**：尖刺编辑正常并能持久化。
 13. **右键菜单**：在画布对象上右键会打开自定义菜单并屏蔽浏览器菜单；图层上移/下移会改变堆叠顺序。
-14. **持久化**：页面创建、图片导入、图片粘贴、气泡编辑等重要操作后，磁盘上的项目文件会立即更新。
+14. **持久化**：页面创建、图片导入、图片粘贴、气泡编辑等重要操作后会标记未保存；Save、Home/项目切换以及关闭/隐藏页面会写入最新项目文件且不丢失工作。
 15. **Home 与 Save**：用户可以返回欢迎页，并能手动保存且不丢失进度。
 16. **导出**：页面 PNG 和项目 PDF 导出都能工作，并有状态反馈。
 17. **语言**：切换中英文后，界面仍然可读。
@@ -186,3 +186,16 @@ A valid completion report must say:
 2. 手动验证了哪些行为
 3. 哪些内容未能验证
 4. 还存在哪些风险
+### 2.6 Built-in Creative Agent Verification / 内置创作 Agent 验证
+
+Agent changes must verify both backend contract and user-visible behavior:
+
+1. `GET /__mangamaker__/agent/config` reports test mode, missing API key, configured model, and vision status without exposing secrets.
+2. Invalid model responses are rejected for invalid JSON, unknown `commandId`, and payloads that fail the command Zod schema.
+3. Local command metadata overrides any model-supplied `dangerLevel`.
+4. Confirmation is required for destructive plans, cross-page plans, and plans with multiple mutating commands.
+5. Vision failure or text-only fallback must show a warning or error in the Agent UI.
+6. E2E coverage should open the Agent sidebar, receive a test-mode plan, show confirmation for risky plans, execute a confirmed command, and show a clear disabled state when configuration is unavailable.
+7. A multi-command mutating plan should be undoable with one undo action when the participating commands record history.
+
+Use `MANGAMAKER_AGENT_TEST_MODE=1` for deterministic tests. Real `OPENROUTER_API_KEY` values must not be committed or written to test fixtures.

@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { MAX_ZOOM, MIN_ZOOM, ZOOM_STEP } from "../domain/defaults";
+import {
+  ELEMENT_LIBRARY,
+  ELEMENT_LIBRARY_CATEGORIES,
+  type ElementLibraryItem,
+} from "../domain/elementLibrary";
 import { getToolbarZoomLabel } from "../domain/helpers";
 import { translate, type Locale } from "../i18n";
+import type { ExecuteCommandOptions } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
+import { DeferredColorInput } from "./DeferredColorInput";
 
 export type PageFormatState = {
+  pageId: string;
   background: string;
-  onBackgroundChange: (value: string) => void;
+  onBackgroundChange: (value: string, options?: ExecuteCommandOptions) => void;
 };
 
 type RibbonBarProps = {
@@ -16,8 +24,10 @@ type RibbonBarProps = {
   canUndo: boolean;
   canRedo: boolean;
   canExport: boolean;
+  agentActive: boolean;
   pageFormat?: PageFormatState;
   onSetTool: (tool: ToolMode) => void;
+  onInsertElement: (item: ElementLibraryItem) => void;
   onSave: () => void;
   onGoHome: () => void;
   onExport: () => void;
@@ -25,6 +35,7 @@ type RibbonBarProps = {
   onRedo: () => void;
   onZoomChange: (zoom: number) => void;
   onSetLocale: (locale: Locale) => void;
+  onToggleAgent: () => void;
 };
 
 const Divider = () => <span className="ribbon-divider" aria-hidden="true" />;
@@ -59,8 +70,10 @@ export const RibbonBar = ({
   canUndo,
   canRedo,
   canExport,
+  agentActive,
   pageFormat,
   onSetTool,
+  onInsertElement,
   onSave,
   onGoHome,
   onExport,
@@ -68,10 +81,15 @@ export const RibbonBar = ({
   onRedo,
   onZoomChange,
   onSetLocale,
+  onToggleAgent,
 }: RibbonBarProps) => {
   const t = (key: string, params?: Record<string, number | string>) =>
     translate(locale, key, params);
   const [sliderZoom, setSliderZoom] = useState(zoom);
+  const [elementMenuOpen, setElementMenuOpen] = useState(false);
+  const [activeElementCategory, setActiveElementCategory] = useState(
+    ELEMENT_LIBRARY_CATEGORIES[0]?.id ?? "artWords",
+  );
   const isDraggingZoomRef = useRef(false);
   const pendingZoomRef = useRef(zoom);
   const zoomFrameRef = useRef<number | null>(null);
@@ -141,6 +159,15 @@ export const RibbonBar = ({
       <Divider />
 
       <div className="ribbon-group">
+        <span className="ribbon-group-label">Agent</span>
+        <div className="ribbon-group-row">
+          <RibbonButton label="Agent" active={agentActive} onClick={onToggleAgent} />
+        </div>
+      </div>
+
+      <Divider />
+
+      <div className="ribbon-group">
         <span className="ribbon-group-label">{t("toolbar.undo")}</span>
         <div className="ribbon-group-row">
           <RibbonButton
@@ -187,6 +214,52 @@ export const RibbonBar = ({
             active={activeTool === "bubble"}
             onClick={() => onSetTool("bubble")}
           />
+          <div className="ribbon-menu-host">
+            <RibbonButton
+              label={t("toolbar.element")}
+              shortcut="M"
+              active={activeTool === "element" || elementMenuOpen}
+              onClick={() => {
+                setElementMenuOpen((open) => !open);
+                onSetTool("element");
+              }}
+            />
+            {elementMenuOpen ? (
+              <div className="element-insert-menu" role="menu" aria-label={t("toolbar.element")}>
+                <div className="element-category-tabs">
+                  {ELEMENT_LIBRARY_CATEGORIES.map((category) => (
+                    <button
+                      key={category.id}
+                      type="button"
+                      className={category.id === activeElementCategory ? "active" : ""}
+                      onClick={() => setActiveElementCategory(category.id)}
+                    >
+                      {t(category.titleKey)}
+                    </button>
+                  ))}
+                </div>
+                <div className="element-library-grid">
+                  {ELEMENT_LIBRARY.filter((item) => item.category === activeElementCategory).map(
+                    (item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="element-library-item"
+                        title={`${item.title} - ${item.license}`}
+                        onClick={() => {
+                          setElementMenuOpen(false);
+                          onInsertElement(item);
+                        }}
+                      >
+                        <img src={item.src} alt="" />
+                        <span>{item.title}</span>
+                      </button>
+                    ),
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -197,13 +270,15 @@ export const RibbonBar = ({
         <div className="ribbon-group-row">
           <label className="ribbon-color">
             <span className="ribbon-label">{t("toolbar.pageBackground")}</span>
-            <input
+            <DeferredColorInput
               className="ribbon-color-input"
               aria-label={t("toolbar.pageBackground")}
-              type="color"
               disabled={!pageFormat}
               value={pageFormat?.background ?? "#ffffff"}
-              onChange={(event) => pageFormat?.onBackgroundChange(event.target.value)}
+              historyKey={
+                pageFormat ? `page:${pageFormat.pageId}:background` : "page:none:background"
+              }
+              onChange={(value, options) => pageFormat?.onBackgroundChange(value, options)}
             />
           </label>
         </div>

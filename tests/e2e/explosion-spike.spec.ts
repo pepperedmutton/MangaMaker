@@ -1,8 +1,34 @@
 import { expect, test, type Page } from "@playwright/test";
 
+const clearStoredProjectDrafts = async (page: Page) => {
+  await page.evaluate(async () => {
+    const response = await fetch("/__mangamaker__/persistence/list_project_drafts");
+    if (!response.ok) {
+      throw new Error("Failed to list project drafts");
+    }
+    const payload = (await response.json()) as { projects?: string[] };
+    for (const rawProject of payload.projects ?? []) {
+      try {
+        const parsed = JSON.parse(rawProject) as { id?: unknown };
+        if (typeof parsed.id !== "string") {
+          continue;
+        }
+        await fetch("/__mangamaker__/persistence/delete_project_draft", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: parsed.id }),
+        });
+      } catch {
+        // Ignore malformed test drafts and continue clearing the rest.
+      }
+    }
+  });
+};
+
 const clearDraftAndOpen = async (page: Page) => {
   await page.goto("/");
   await page.evaluate(() => window.localStorage.clear());
+  await clearStoredProjectDrafts(page);
   await page.reload();
 };
 
@@ -90,6 +116,65 @@ const getCanvasBox = async (page: Page) => {
   return box;
 };
 
+const readCanvasLayout = () => {
+  const currentPage = window.mangaMaker?.project.get().pages[0];
+  const stage = document.querySelector(".canvas-wrap .konvajs-content") as HTMLDivElement | null;
+  const wrap = document.querySelector(".canvas-wrap") as HTMLDivElement | null;
+  if (!currentPage || !stage || !wrap) {
+    return null;
+  }
+
+  const stageRect = stage.getBoundingClientRect();
+  const styles = window.getComputedStyle(wrap);
+  const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+  const verticalPadding = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
+  const zoom = window.mangaMaker?.session.get().zoom ?? 1;
+  const workspaceScaleFactor = 1 / Math.sqrt(0.1);
+  const workspaceWidth = currentPage.width * workspaceScaleFactor;
+  const workspaceHeight = currentPage.height * workspaceScaleFactor;
+  const workspaceX = -((workspaceWidth - currentPage.width) * 0.5);
+  const workspaceY = -((workspaceHeight - currentPage.height) * 0.5);
+  const viewportWidth = Math.max(0, wrap.clientWidth - horizontalPadding);
+  const viewportHeight = Math.max(0, wrap.clientHeight - verticalPadding);
+  const fitScale =
+    viewportWidth > 0 && viewportHeight > 0
+      ? Math.min(viewportWidth / workspaceWidth, viewportHeight / workspaceHeight, 1)
+      : 1;
+  const coverWorkspaceScale =
+    viewportWidth > 0 && viewportHeight > 0
+      ? Math.max(viewportWidth / workspaceWidth, viewportHeight / workspaceHeight)
+      : 1;
+  const scale = Math.max(0.1, fitScale * zoom);
+  const workspaceScale = zoom > 1 ? Math.max(coverWorkspaceScale, scale) : coverWorkspaceScale;
+  const workspaceCanvasWidth = workspaceWidth * workspaceScale;
+  const workspaceCanvasHeight = workspaceHeight * workspaceScale;
+  const baseStageWidth = Math.max(1, viewportWidth);
+  const baseStageHeight = Math.max(1, viewportHeight);
+  const shouldUseScrollableStage =
+    zoom > 1 &&
+    (workspaceCanvasWidth > baseStageWidth || workspaceCanvasHeight > baseStageHeight);
+  const stageWidth = shouldUseScrollableStage
+    ? Math.max(1, Math.ceil(workspaceCanvasWidth))
+    : baseStageWidth;
+  const stageHeight = shouldUseScrollableStage
+    ? Math.max(1, Math.ceil(workspaceCanvasHeight))
+    : baseStageHeight;
+  const workspaceCanvasX = (stageWidth - workspaceCanvasWidth) * 0.5;
+  const workspaceCanvasY = (stageHeight - workspaceCanvasHeight) * 0.5;
+  const contentCanvasX =
+    workspaceCanvasWidth * 0.5 - (workspaceX + workspaceWidth * 0.5) * scale;
+  const contentCanvasY =
+    workspaceCanvasHeight * 0.5 - (workspaceY + workspaceHeight * 0.5) * scale;
+
+  return {
+    scale,
+    pageX: workspaceCanvasX + contentCanvasX,
+    pageY: workspaceCanvasY + contentCanvasY,
+    stageLeft: stageRect.left,
+    stageTop: stageRect.top,
+  };
+};
+
 const getBubbleResizeHandleScreenPoint = async (
   page: Page,
   handle:
@@ -102,29 +187,14 @@ const getBubbleResizeHandleScreenPoint = async (
     | "bottom"
     | "left",
 ) => {
-  const result = await page.evaluate(({ currentHandle }) => {
-    const currentPage = window.mangaMaker?.project.get().pages[0];
-    const bubble = currentPage?.bubbles[0];
-    const stage = document.querySelector(".canvas-wrap .konvajs-content") as HTMLDivElement | null;
-    if (!currentPage || !bubble || !stage) {
+  const layout = await page.evaluate(readCanvasLayout);
+  const point = await page.evaluate(({ currentHandle }) => {
+    const bubble = window.mangaMaker?.project.get().pages[0]?.bubbles[0];
+    if (!bubble) {
       return null;
     }
 
-    const rect = stage.getBoundingClientRect();
-    const zoom = window.mangaMaker?.session.get().zoom ?? 1;
-    const workspaceScaleFactor = 1 / Math.sqrt(0.25);
-    const workspaceWidth = currentPage.width * workspaceScaleFactor;
-    const workspaceHeight = currentPage.height * workspaceScaleFactor;
-    const workspaceScale = Math.min(rect.width / workspaceWidth, rect.height / workspaceHeight, 1);
-    const scale = workspaceScale * zoom;
-    const workspaceOriginX = (rect.width - workspaceWidth * workspaceScale) * 0.5;
-    const workspaceOriginY = (rect.height - workspaceHeight * workspaceScale) * 0.5;
-    const pageOriginX =
-      workspaceOriginX + workspaceWidth * workspaceScale * 0.5 - currentPage.width * scale * 0.5;
-    const pageOriginY =
-      workspaceOriginY + workspaceHeight * workspaceScale * 0.5 - currentPage.height * scale * 0.5;
-
-    const point =
+    return (
       currentHandle === "top-left"
         ? { x: bubble.x, y: bubble.y }
         : currentHandle === "top-right"
@@ -139,19 +209,18 @@ const getBubbleResizeHandleScreenPoint = async (
                   ? { x: bubble.x + bubble.width, y: bubble.y + bubble.height * 0.5 }
                   : currentHandle === "bottom"
                     ? { x: bubble.x + bubble.width * 0.5, y: bubble.y + bubble.height }
-                    : { x: bubble.x, y: bubble.y + bubble.height * 0.5 };
-
-    return {
-      x: rect.left + pageOriginX + point.x * scale,
-      y: rect.top + pageOriginY + point.y * scale,
-    };
+                    : { x: bubble.x, y: bubble.y + bubble.height * 0.5 }
+    );
   }, { currentHandle: handle });
 
-  if (!result) {
+  if (!layout || !point) {
     throw new Error("Bubble resize handle not available");
   }
 
-  return result;
+  return {
+    x: layout.stageLeft + layout.pageX + point.x * layout.scale,
+    y: layout.stageTop + layout.pageY + point.y * layout.scale,
+  };
 };
 
 test.describe("Explosion Bubble Spike Control", () => {
@@ -433,8 +502,7 @@ test.describe("Explosion Bubble Spike Control", () => {
   test("should allow spike drag via simulated mouse interaction", async ({ page }) => {
     // Create an explosion bubble via API
     await createBubbleViaApi(page);
-    
-    const canvasBox = await getCanvasBox(page);
+    const canvasLayout = await page.evaluate(readCanvasLayout);
     
     // Get bubble center position
     const bubbleInfo = await page.evaluate(() => {
@@ -445,64 +513,15 @@ test.describe("Explosion Bubble Spike Control", () => {
     if (!bubbleInfo) {
       throw new Error("Bubble not found");
     }
-    
-    // Calculate bubble center in screen coordinates
-    // Need to account for workspace scaling similar to editor.spec.ts
-    const metrics = await page.evaluate(() => {
-      const currentPage = window.mangaMaker?.project.get().pages[0];
-      const zoom = window.mangaMaker?.session.get().zoom ?? 1;
-      const stage = document.querySelector(".canvas-wrap .konvajs-content") as HTMLDivElement | null;
-      if (!currentPage || !stage) return null;
-      
-      const rect = stage.getBoundingClientRect();
-      const workspaceScaleFactor = 1 / Math.sqrt(0.25);
-      const workspaceWidth = currentPage.width * workspaceScaleFactor;
-      const workspaceHeight = currentPage.height * workspaceScaleFactor;
-      const workspaceScale = Math.min(rect.width / workspaceWidth, rect.height / workspaceHeight, 1);
-      const scale = workspaceScale * zoom;
-      
-      return { scale, workspaceScale };
-    });
-    
-    if (!metrics) {
+
+    if (!canvasLayout) {
       throw new Error("Could not get canvas metrics");
     }
     
     // Calculate bubble center on canvas
     const bubbleCenterX = bubbleInfo.x + bubbleInfo.width / 2;
     const bubbleCenterY = bubbleInfo.y + bubbleInfo.height / 2;
-    
-    // Get workspace origin (similar to editor.spec.ts getRenderedPageMetrics)
-    const origin = await page.evaluate(() => {
-      const currentPage = window.mangaMaker?.project.get().pages[0];
-      const zoom = window.mangaMaker?.session.get().zoom ?? 1;
-      const stage = document.querySelector(".canvas-wrap .konvajs-content") as HTMLDivElement | null;
-      if (!currentPage || !stage) return null;
-      
-      const rect = stage.getBoundingClientRect();
-      const workspaceScaleFactor = 1 / Math.sqrt(0.25);
-      const workspaceWidth = currentPage.width * workspaceScaleFactor;
-      const workspaceHeight = currentPage.height * workspaceScaleFactor;
-      const workspaceScale = Math.min(rect.width / workspaceWidth, rect.height / workspaceHeight, 1);
-      const scale = workspaceScale * zoom;
-      
-      const workspaceOriginX = (rect.width - workspaceWidth * workspaceScale) * 0.5;
-      const workspaceOriginY = (rect.height - workspaceHeight * workspaceScale) * 0.5;
-      
-      return {
-        x: workspaceOriginX + workspaceWidth * workspaceScale * 0.5 - currentPage.width * scale * 0.5,
-        y: workspaceOriginY + workspaceHeight * workspaceScale * 0.5 - currentPage.height * scale * 0.5,
-      };
-    });
-    
-    if (!origin) {
-      throw new Error("Could not calculate origin");
-    }
-    
-    // Calculate screen position of bubble center
-    const screenX = canvasBox.x + origin.x + bubbleCenterX * metrics.scale;
-    const screenY = canvasBox.y + origin.y + bubbleCenterY * metrics.scale;
-    
+
     // The spike control points are at the edges of the bubble
     // First spike is at the top (angle -PI/2)
     // Let's click on where the first spike should be
@@ -510,8 +529,8 @@ test.describe("Explosion Bubble Spike Control", () => {
     const spikeX = bubbleCenterX;  // cos(-PI/2) = 0
     const spikeY = bubbleCenterY - outerRadius * (0.3 + 0.5 * 0.7);  // sin(-PI/2) = -1
     
-    const spikeScreenX = canvasBox.x + origin.x + spikeX * metrics.scale;
-    const spikeScreenY = canvasBox.y + origin.y + spikeY * metrics.scale;
+    const spikeScreenX = canvasLayout.stageLeft + canvasLayout.pageX + spikeX * canvasLayout.scale;
+    const spikeScreenY = canvasLayout.stageTop + canvasLayout.pageY + spikeY * canvasLayout.scale;
     
     // Perform drag on the spike handle
     await page.mouse.move(spikeScreenX, spikeScreenY);
