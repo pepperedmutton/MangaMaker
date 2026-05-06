@@ -151,14 +151,18 @@ describe("agent response validation", () => {
         message: "Need render",
         requestedToolCalls: [
           { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
+          { toolName: "readPages", input: { pageIds: ["p1", "p2"] }, reason: "Read a sample" },
           { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
+          { toolName: "renderPages", input: { pageIds: ["p1", "p2"] }, reason: "Inspect several pages" },
           { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
         ],
         pendingCommandPlan: null,
       }).requestedToolCalls,
     ).toEqual([
       { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
+      { toolName: "readPages", input: { pageIds: ["p1", "p2"] }, reason: "Read a sample" },
       { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
+      { toolName: "renderPages", input: { pageIds: ["p1", "p2"] }, reason: "Inspect several pages" },
       { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
     ]);
 

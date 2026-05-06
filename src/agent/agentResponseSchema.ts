@@ -35,10 +35,12 @@ const allowedToolNames = new Set([
   "listPages",
   "searchProject",
   "readPage",
+  "readPages",
   "inspectSelection",
   "listImageAssets",
   "renderCurrentPage",
   "renderPage",
+  "renderPages",
   "listCommandManifest",
 ]);
 
@@ -54,6 +56,12 @@ const validateRequestedToolCalls = (
     }
     if (call.toolName === "renderPage" || call.toolName === "readPage") {
       const parsed = z.object({ pageId: z.string().min(1) }).parse(call.input);
+      return { toolName: call.toolName, input: parsed, reason: call.reason };
+    }
+    if (call.toolName === "renderPages" || call.toolName === "readPages") {
+      const parsed = z.object({
+        pageIds: z.array(z.string().min(1)).min(1).max(call.toolName === "renderPages" ? 6 : 12),
+      }).parse(call.input);
       return { toolName: call.toolName, input: parsed, reason: call.reason };
     }
     if (call.toolName === "searchProject") {

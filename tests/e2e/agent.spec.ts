@@ -210,6 +210,10 @@ test("agent opens, reports test config, validates plans, and executes through co
   await expect(page.getByLabel("Agent tool log")).toContainText("renderPage");
   await expect(page.getByLabel("Agent tool log")).toContainText("success");
 
+  await askAgent(page, "Read a few pages / several pages and summarize them.");
+  await expect(page.getByLabel("Agent messages")).toContainText("rendered sample");
+  await expect(page.getByLabel("Agent tool log")).toContainText("renderPages");
+
   await askAgent(page, "Create a panel");
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
@@ -291,6 +295,18 @@ test("agent warns when a response did not use visual input", async ({ page }) =>
 
   await expect(page.getByLabel("Agent configuration status")).toContainText("canvas image was not used");
   await expect(page.getByLabel("Agent messages")).toContainText("without visual input");
+});
+
+test("agent answers from gathered context when the tool budget is exhausted", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Tool Budget");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Agent" }).click();
+
+  await askAgent(page, "tool budget loop");
+
+  await expect(page.getByLabel("Agent messages")).toContainText("tool budget");
+  await expect(page.getByLabel("Agent messages")).not.toContainText("more tool calls than the current safety limit");
+  await expect(page.getByLabel("Agent configuration status")).toContainText("Tool budget reached");
 });
 
 test("agent disables chat when configuration is unavailable", async ({ page }) => {

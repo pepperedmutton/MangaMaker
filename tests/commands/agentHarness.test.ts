@@ -136,6 +136,18 @@ describe("agent harness", () => {
       id: "page-1",
       objects: [expect.objectContaining({ id: "text-1", content: "Earlier page" })],
     });
+
+    const readPages = await executeAgentHarnessToolCall(context, {
+      toolName: "readPages",
+      input: { pageIds: ["page-1", "page-2"] },
+    });
+    expect(readPages.result).toMatchObject({
+      pageIds: ["page-1", "page-2"],
+      pages: [
+        expect.objectContaining({ id: "page-1" }),
+        expect.objectContaining({ id: "page-2" }),
+      ],
+    });
   });
 
   it("publishes command-plan-only mutation policy", () => {

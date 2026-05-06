@@ -10,6 +10,8 @@ import { renderPageSnapshot } from "./context";
 const now = () => new Date().toISOString();
 const DEFAULT_SEARCH_LIMIT = 20;
 const DEFAULT_ASSET_LIMIT = 40;
+const MAX_BATCH_READ_PAGES = 12;
+const MAX_BATCH_RENDER_PAGES = 6;
 
 const tool = (
   definition: AgentHarnessToolDefinition,
@@ -222,6 +224,26 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     requiresConfirmation: false,
   }),
   tool({
+    name: "readPages",
+    description: "Read several pages' full structured context in one call. Use this when comparing a small sample of pages.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pageIds"],
+      properties: {
+        pageIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_BATCH_READ_PAGES,
+          items: { type: "string" },
+        },
+      },
+    },
+    outputDescription: "Requested page object summaries in pageIds order, without raw image bytes.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
     name: "inspectSelection",
     description: "Read the current selection and selected object summary, if any.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
@@ -263,6 +285,26 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
       properties: { pageId: { type: "string" } },
     },
     outputDescription: "Screenshot metadata plus the page's structured resources. The screenshot is attached as a vision image when the provider supports vision.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "renderPages",
+    description: "Render several pages to bounded visual screenshots in one call. Use this instead of many one-page render requests when reading a few pages.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pageIds"],
+      properties: {
+        pageIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_BATCH_RENDER_PAGES,
+          items: { type: "string" },
+        },
+      },
+    },
+    outputDescription: "Requested screenshots plus each page's structured resources. Screenshots are attached as vision images when supported.",
     mutatesProject: false,
     requiresConfirmation: false,
   }),
@@ -345,6 +387,15 @@ export const buildAgentHarness = (
 const getPageById = (context: AgentContextSnapshot, pageId: string) =>
   context.pages.find((page) => page.id === pageId) ?? null;
 
+const getPageIdsInput = (input: unknown, maxItems: number) => {
+  const pageIds = Array.isArray((input as { pageIds?: unknown }).pageIds)
+    ? (input as { pageIds: unknown[] }).pageIds
+    : [];
+  return pageIds
+    .filter((pageId): pageId is string => typeof pageId === "string" && pageId.trim().length > 0)
+    .slice(0, maxItems);
+};
+
 export const executeAgentHarnessToolCall = async (
   context: AgentContextSnapshot,
   call: AgentToolCallRequest,
@@ -379,6 +430,13 @@ export const executeAgentHarnessToolCall = async (
   if (call.toolName === "readPage") {
     const pageId = (call.input as { pageId?: string }).pageId ?? "";
     return result(call.toolName, call.input, getPageById(context, pageId));
+  }
+  if (call.toolName === "readPages") {
+    const pageIds = getPageIdsInput(call.input, MAX_BATCH_READ_PAGES);
+    return result(call.toolName, call.input, {
+      pageIds,
+      pages: pageIds.map((pageId) => getPageById(context, pageId)),
+    });
   }
   if (call.toolName === "inspectSelection") {
     return result(call.toolName, call.input, {
@@ -416,6 +474,28 @@ export const executeAgentHarnessToolCall = async (
         imageAssets: context.imageAssets.filter((asset) => asset.pageId === pageId),
       },
       canvasSnapshot,
+    });
+  }
+  if (call.toolName === "renderPages") {
+    const pageIds = getPageIdsInput(call.input, MAX_BATCH_RENDER_PAGES);
+    const results = [];
+    for (const pageId of pageIds) {
+      const page = getPageById(context, pageId);
+      const canvasSnapshot = await renderPageSnapshot(pageId);
+      results.push({
+        pageId,
+        pageName: page?.name ?? null,
+        isCurrent: Boolean(page?.isCurrent),
+        resources: {
+          page,
+          imageAssets: context.imageAssets.filter((asset) => asset.pageId === pageId),
+        },
+        canvasSnapshot,
+      });
+    }
+    return result(call.toolName, call.input, {
+      pageIds,
+      results,
     });
   }
   if (call.toolName === "listCommandManifest") {

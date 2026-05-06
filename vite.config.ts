@@ -712,10 +712,12 @@ const AGENT_SYSTEM_PROMPT = [
   "You are MangaMaker's built-in creator assistance agent.",
   "Manga creation is the human creator's work; you assist with inspection, suggestions, and bounded editor operations.",
   "You operate through a coding-agent-style harness. The initial context is intentionally lightweight: project summary, page index, current-page marker, current selection summary, and tool catalog.",
-  "Do not assume all resources were included up front. Decide which project details you need, then request tools such as searchProject, readPage, listImageAssets, renderPage, or listCommandManifest.",
+  "Do not assume all resources were included up front. Decide which project details you need, then request tools such as searchProject, readPage, readPages, listImageAssets, renderPage, renderPages, or listCommandManifest.",
   "All project pages are readable on demand through the harness. The page the creator is currently viewing is marked isCurrent=true.",
   "Do not pretend to have seen a page, asset, or render unless it is present in tool results or attached as vision input.",
-  "For broad questions, search first. For page-specific questions, read that page. For visual judgment, render that page. For edits, read listCommandManifest before returning a command plan.",
+  "For broad questions, search first. For page-specific questions, read that page. For several pages, prefer readPages or renderPages in one request instead of one page per round. For visual judgment, render the relevant page or a bounded sample of pages. For edits, read listCommandManifest before returning a command plan.",
+  "Do not request the same toolName and input again if that tool result is already present in the harness.",
+  "If the harness reports toolBudget.exhausted=true or remainingToolCalls=0, stop requesting tools and answer from the gathered evidence. State the limitation if the evidence is incomplete.",
   "If you need to judge a page's composed visual result, request a tool call first: {\"message\":\"I need to inspect the rendered page.\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\"},\"reason\":\"Inspect the composed page render\"}],\"pendingCommandPlan\":null}.",
   "After renderPage returns, compare the screenshot with that page's structured resources and then answer or propose a command plan.",
   "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
@@ -800,9 +802,11 @@ const compactAgentContextForPrompt = (context: AgentContextPayload | undefined) 
     saveStatus: context.saveStatus ?? null,
     resourceAccess: {
       fullPagesAvailableVia: "readPage",
+      multiplePagesAvailableVia: "readPages",
       searchAvailableVia: "searchProject",
       imageAssetsAvailableVia: "listImageAssets",
       pageRendersAvailableVia: "renderPage",
+      multiplePageRendersAvailableVia: "renderPages",
       commandManifestAvailableVia: "listCommandManifest",
       currentCanvasSnapshotAttachedInitially: false,
     },
@@ -822,22 +826,45 @@ const getHarnessToolResults = (harness: AgentChatPayload["harness"]) => [
   ...(harness?.dynamicToolResults ?? []),
 ];
 
+const MAX_AGENT_IMAGE_ATTACHMENTS = 8;
+
+const collectImageDataUrls = (value: unknown): string[] => {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(collectImageDataUrls);
+  }
+  const record = value as Record<string, unknown>;
+  const ownDataUrl =
+    typeof record.dataUrl === "string" && record.dataUrl.startsWith("data:image/")
+      ? [record.dataUrl]
+      : [];
+  return [
+    ...ownDataUrl,
+    ...Object.entries(record)
+      .filter(([key]) => key === "canvasSnapshot" || key === "results")
+      .flatMap(([, entry]) => collectImageDataUrls(entry)),
+  ];
+};
+
 const getHarnessImageDataUrls = (harness: AgentChatPayload["harness"]) =>
-  getHarnessToolResults(harness).flatMap((entry) => {
-    const value = entry.result as {
-      dataUrl?: unknown;
-      canvasSnapshot?: { dataUrl?: unknown };
-    } | null;
-    const urls = [value?.dataUrl, value?.canvasSnapshot?.dataUrl];
-    return urls.filter(
-      (url): url is string => typeof url === "string" && url.startsWith("data:image/"),
-    );
-  });
+  getHarnessToolResults(harness)
+    .flatMap((entry) => collectImageDataUrls(entry.result))
+    .slice(-MAX_AGENT_IMAGE_ATTACHMENTS);
 
 const getRenderedPageToolResults = (payload: AgentChatPayload) =>
   getHarnessToolResults(payload.harness).filter(
-    (entry) => entry.toolName === "renderPage",
+    (entry) => entry.toolName === "renderPage" || entry.toolName === "renderPages",
   );
+
+const hasExhaustedToolBudget = (payload: AgentChatPayload) =>
+  getHarnessToolResults(payload.harness).some((entry) => {
+    if (entry.toolName !== "toolBudget" || !entry.result || typeof entry.result !== "object") {
+      return false;
+    }
+    return (entry.result as { exhausted?: unknown }).exhausted === true;
+  });
 
 const getCurrentPageId = (context: AgentContextPayload) =>
   context.pages?.find((page) => page.isCurrent || page.viewing)?.id ??
@@ -875,6 +902,50 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   const hasVisionInput = getHarnessImageDataUrls(payload.harness).length > 0;
   const renderedPageResults = getRenderedPageToolResults(payload);
 
+  if (hasExhaustedToolBudget(payload)) {
+    return {
+      message: "I reached the harness tool budget, so I am answering from the pages and resources already inspected.",
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+      warning: "Tool budget reached; answer is based on gathered context only.",
+    };
+  }
+
+  if (normalized.includes("tool budget loop")) {
+    return {
+      message: "I need one more tool call.",
+      requestedToolCalls: [
+        {
+          toolName: "readProjectSummary",
+          input: {},
+          reason: "Simulate a model that keeps requesting tools.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if ((normalized.includes("several pages") || normalized.includes("read a few pages")) && renderedPageResults.length === 0 && pageId) {
+    const pageIds =
+      context.pages
+        ?.filter((page) => (page.objects?.length ?? 0) > 0)
+        .slice(0, 3)
+        .map((page) => page.id) ?? [pageId];
+    return {
+      message: "I need to inspect a small rendered page sample before summarizing characters and plot.",
+      requestedToolCalls: [
+        {
+          toolName: "renderPages",
+          input: { pageIds },
+          reason: "Inspect several composed page renders and their resources in one harness call.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
   if ((normalized.includes("screenshot tool") || normalized.includes("render page") || latest.includes("截图工具")) && renderedPageResults.length === 0 && pageId) {
     return {
       message: "I need to inspect the composed page render before answering.",
@@ -893,6 +964,14 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   if (renderedPageResults.length > 0 && (normalized.includes("screenshot tool") || normalized.includes("render page") || latest.includes("截图工具"))) {
     return {
       message: `I inspected ${renderedPageResults.length} rendered page screenshot(s) and the matching page resources.`,
+      pendingCommandPlan: null,
+      usedVision: true,
+    };
+  }
+
+  if (renderedPageResults.length > 0 && (normalized.includes("several pages") || normalized.includes("read a few pages"))) {
+    return {
+      message: `I inspected a rendered sample of ${renderedPageResults.length} page tool result(s) and their matching page resources.`,
       pendingCommandPlan: null,
       usedVision: true,
     };
