@@ -3,6 +3,8 @@ import type {
   AgentHarnessSnapshot,
   AgentHarnessToolDefinition,
   AgentHarnessToolResult,
+  AgentRenderDetail,
+  AgentSnapshotCrop,
   AgentToolCallRequest,
 } from "./types";
 import { renderPageSnapshot } from "./context";
@@ -12,6 +14,19 @@ const DEFAULT_SEARCH_LIMIT = 20;
 const DEFAULT_ASSET_LIMIT = 40;
 const MAX_BATCH_READ_PAGES = 12;
 const MAX_BATCH_RENDER_PAGES = 6;
+
+const renderDetailSchema = { type: "string", enum: ["preview", "detail"] };
+const renderCropSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["x", "y", "width", "height"],
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" },
+    width: { type: "number", exclusiveMinimum: 0 },
+    height: { type: "number", exclusiveMinimum: 0 },
+  },
+};
 
 const tool = (
   definition: AgentHarnessToolDefinition,
@@ -269,20 +284,31 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "renderCurrentPage",
-    description: "Read the current page visual render metadata and attached vision image status.",
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    description: "Read the current page visual render metadata and attached vision image status. Defaults to detail=\"preview\"; use detail=\"detail\" only when small text, faces, or fine line art must be inspected.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        detail: renderDetailSchema,
+        crop: renderCropSchema,
+      },
+    },
     outputDescription: "Canvas snapshot metadata. The prompt may include the current render as a separate image attachment when vision is enabled.",
     mutatesProject: false,
     requiresConfirmation: false,
   }),
   tool({
     name: "renderPage",
-    description: "Render a specific page to a bounded visual screenshot so the multimodal model can inspect the final composed page result.",
+    description: "Render a specific page to a bounded visual screenshot so the multimodal model can inspect the final composed page result. Defaults to detail=\"preview\"; pass crop for a panel/region, and use detail=\"detail\" only for small text, faces, or fine line art.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["pageId"],
-      properties: { pageId: { type: "string" } },
+      properties: {
+        pageId: { type: "string" },
+        detail: renderDetailSchema,
+        crop: renderCropSchema,
+      },
     },
     outputDescription: "Screenshot metadata plus the page's structured resources. The screenshot is attached as a vision image when the provider supports vision.",
     mutatesProject: false,
@@ -290,7 +316,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "renderPages",
-    description: "Render several pages to bounded visual screenshots in one call. Use this instead of many one-page render requests when reading a few pages.",
+    description: "Render several pages to bounded visual screenshots in one call. Defaults to detail=\"preview\" and should be used for a small visual sample, not whole-project high-detail review.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -302,6 +328,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
           maxItems: MAX_BATCH_RENDER_PAGES,
           items: { type: "string" },
         },
+        detail: renderDetailSchema,
       },
     },
     outputDescription: "Requested screenshots plus each page's structured resources. Screenshots are attached as vision images when supported.",
@@ -396,6 +423,39 @@ const getPageIdsInput = (input: unknown, maxItems: number) => {
     .slice(0, maxItems);
 };
 
+const getRenderDetailInput = (input: unknown): AgentRenderDetail => {
+  if (!input || typeof input !== "object") {
+    return "preview";
+  }
+  return (input as { detail?: unknown }).detail === "detail" ? "detail" : "preview";
+};
+
+const getRenderCropInput = (input: unknown): AgentSnapshotCrop | undefined => {
+  if (!input || typeof input !== "object") {
+    return undefined;
+  }
+  const crop = (input as { crop?: unknown }).crop;
+  if (!crop || typeof crop !== "object") {
+    return undefined;
+  }
+  const { x, y, width, height } = crop as Partial<Record<keyof AgentSnapshotCrop, unknown>>;
+  if (
+    typeof x !== "number" ||
+    typeof y !== "number" ||
+    typeof width !== "number" ||
+    typeof height !== "number" ||
+    !Number.isFinite(x) ||
+    !Number.isFinite(y) ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return undefined;
+  }
+  return { x, y, width, height };
+};
+
 export const executeAgentHarnessToolCall = async (
   context: AgentContextSnapshot,
   call: AgentToolCallRequest,
@@ -463,12 +523,18 @@ export const executeAgentHarnessToolCall = async (
       call.toolName === "renderPage"
         ? (call.input as { pageId?: string }).pageId ?? ""
         : context.currentPage?.id ?? context.selectedPageId ?? "";
+    const detail = getRenderDetailInput(call.input);
+    const crop = getRenderCropInput(call.input);
     const page = getPageById(context, pageId);
-    const canvasSnapshot = await renderPageSnapshot(pageId);
+    const canvasSnapshot = await renderPageSnapshot(pageId, { detail, crop });
     return result(call.toolName, call.input, {
       pageId,
       pageName: page?.name ?? null,
       isCurrent: Boolean(page?.isCurrent),
+      renderOptions: {
+        detail,
+        crop: crop ?? null,
+      },
       resources: {
         page,
         imageAssets: context.imageAssets.filter((asset) => asset.pageId === pageId),
@@ -478,14 +544,19 @@ export const executeAgentHarnessToolCall = async (
   }
   if (call.toolName === "renderPages") {
     const pageIds = getPageIdsInput(call.input, MAX_BATCH_RENDER_PAGES);
+    const detail = getRenderDetailInput(call.input);
     const results = [];
     for (const pageId of pageIds) {
       const page = getPageById(context, pageId);
-      const canvasSnapshot = await renderPageSnapshot(pageId);
+      const canvasSnapshot = await renderPageSnapshot(pageId, { detail });
       results.push({
         pageId,
         pageName: page?.name ?? null,
         isCurrent: Boolean(page?.isCurrent),
+        renderOptions: {
+          detail,
+          crop: null,
+        },
         resources: {
           page,
           imageAssets: context.imageAssets.filter((asset) => asset.pageId === pageId),
@@ -495,6 +566,7 @@ export const executeAgentHarnessToolCall = async (
     }
     return result(call.toolName, call.input, {
       pageIds,
+      detail,
       results,
     });
   }

@@ -162,4 +162,21 @@ describe("agent harness", () => {
       requiresConfirmation: true,
     });
   });
+
+  it("publishes low-cost render controls for multimodal inspection", () => {
+    const harness = buildAgentHarness(context);
+    expect(harness.tools.find((entry) => entry.name === "renderPage")?.inputSchema).toMatchObject({
+      properties: {
+        detail: { enum: ["preview", "detail"] },
+        crop: {
+          required: ["x", "y", "width", "height"],
+        },
+      },
+    });
+    expect(harness.tools.find((entry) => entry.name === "renderPages")?.inputSchema).toMatchObject({
+      properties: {
+        detail: { enum: ["preview", "detail"] },
+      },
+    });
+  });
 });

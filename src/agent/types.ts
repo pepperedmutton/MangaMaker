@@ -14,6 +14,20 @@ export type AgentCommandManifestEntry = {
   examples: unknown[];
 };
 
+export type AgentRenderDetail = "preview" | "detail";
+
+export type AgentSnapshotCrop = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type AgentSnapshotOptions = {
+  detail?: AgentRenderDetail;
+  crop?: AgentSnapshotCrop;
+};
+
 export type AgentCommandPlanItem = {
   commandId: string;
   payload: unknown;
@@ -59,6 +73,9 @@ export type AgentCanvasSnapshot = {
   capturedAt: string;
   reason?: string;
   source?: "page-render" | "konva-stage" | "dom-canvas";
+  detail?: AgentRenderDetail;
+  maxEdge?: number;
+  crop?: AgentSnapshotCrop;
 };
 
 export type AgentImageAsset = {

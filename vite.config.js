@@ -511,6 +511,9 @@ const getCurrentAgentConfig = async () => {
         visionEnabled: true,
     };
 };
+const AGENT_PREVIEW_RENDER_MAX_EDGE = 768;
+const AGENT_DETAIL_RENDER_MAX_EDGE = 1280;
+const MAX_AGENT_IMAGE_ATTACHMENTS = 8;
 const AGENT_SYSTEM_PROMPT = [
     "You are MangaMaker's built-in creator assistance agent.",
     "Manga creation is the human creator's work; you assist with inspection, suggestions, and bounded editor operations.",
@@ -519,9 +522,13 @@ const AGENT_SYSTEM_PROMPT = [
     "All project pages are readable on demand through the harness. The page the creator is currently viewing is marked isCurrent=true.",
     "Do not pretend to have seen a page, asset, or render unless it is present in tool results or attached as vision input.",
     "For broad questions, search first. For page-specific questions, read that page. For several pages, prefer readPages or renderPages in one request instead of one page per round. For visual judgment, render the relevant page or a bounded sample of pages. For edits, read listCommandManifest before returning a command plan.",
+    "Visual budget rule: do not request screenshots unless structured tool results are insufficient for the user's question.",
+    "Use the cheapest visual path that can answer the question: readPage/readPages first; renderPages with detail=\"preview\" for small page samples; renderPage with crop for local inspection; detail=\"detail\" only for small text, faces, or fine line art.",
+    "Do not request high-detail full-page renders for every page. Prefer one bounded sample or a cropped region, and ask the creator to narrow scope when the project is too large.",
+    "Image format alone is not a reliable token reducer. Reduce pixels, crop to the relevant region, and avoid sending images that are not needed.",
     "Do not request the same toolName and input again if that tool result is already present in the harness.",
     "If the harness reports toolBudget.exhausted=true or remainingToolCalls=0, stop requesting tools and answer from the gathered evidence. State the limitation if the evidence is incomplete.",
-    "If you need to judge a page's composed visual result, request a tool call first: {\"message\":\"I need to inspect the rendered page.\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\"},\"reason\":\"Inspect the composed page render\"}],\"pendingCommandPlan\":null}.",
+    "If you need to judge a page's composed visual result, request a tool call first: {\"message\":\"I need to inspect the rendered page.\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\",\"detail\":\"preview\"},\"reason\":\"Inspect the composed page render\"}],\"pendingCommandPlan\":null}.",
     "After renderPage returns, compare the screenshot with that page's structured resources and then answer or propose a command plan.",
     "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
     "Never claim an edit is complete unless it has been executed by the app.",
@@ -529,7 +536,7 @@ const AGENT_SYSTEM_PROMPT = [
     "Destructive or batch operations must be returned as a pending plan that requires confirmation.",
     "Command payloads must match the manifest schema.",
     "Keep natural-language responses concise.",
-    "Return JSON only: {\"message\":\"...\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\"},\"reason\":\"...\"}],\"pendingCommandPlan\":null|{\"summary\":\"...\",\"commands\":[{\"commandId\":\"...\",\"payload\":{},\"reason\":\"...\"}],\"requiresConfirmation\":true|false}}.",
+    "Return JSON only: {\"message\":\"...\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\",\"detail\":\"preview\"},\"reason\":\"...\"}],\"pendingCommandPlan\":null|{\"summary\":\"...\",\"commands\":[{\"commandId\":\"...\",\"payload\":{},\"reason\":\"...\"}],\"requiresConfirmation\":true|false}}.",
 ].join("\n");
 const TEST_AGENT_MODELS = [
     {
@@ -605,6 +612,14 @@ const compactAgentContextForPrompt = (context) => {
             multiplePageRendersAvailableVia: "renderPages",
             commandManifestAvailableVia: "listCommandManifest",
             currentCanvasSnapshotAttachedInitially: false,
+            visionTokenPolicy: {
+                initialImagesAttached: false,
+                defaultRenderDetail: "preview",
+                previewMaxEdge: AGENT_PREVIEW_RENDER_MAX_EDGE,
+                detailMaxEdge: AGENT_DETAIL_RENDER_MAX_EDGE,
+                maxImageAttachments: MAX_AGENT_IMAGE_ATTACHMENTS,
+                cropSupportedBy: "renderPage",
+            },
         },
         counts: {
             pages: pages.length,
@@ -618,7 +633,6 @@ const getHarnessToolResults = (harness) => [
     ...(harness?.initialToolResults ?? []),
     ...(harness?.dynamicToolResults ?? []),
 ];
-const MAX_AGENT_IMAGE_ATTACHMENTS = 8;
 const collectImageDataUrls = (value) => {
     if (!value || typeof value !== "object") {
         return [];
@@ -704,7 +718,7 @@ const createTestAgentResponse = (payload) => {
             requestedToolCalls: [
                 {
                     toolName: "renderPages",
-                    input: { pageIds },
+                    input: { pageIds, detail: "preview" },
                     reason: "Inspect several composed page renders and their resources in one harness call.",
                 },
             ],
@@ -718,7 +732,7 @@ const createTestAgentResponse = (payload) => {
             requestedToolCalls: [
                 {
                     toolName: "renderPage",
-                    input: { pageId },
+                    input: { pageId, detail: "preview" },
                     reason: "Inspect this page's final visual render and compare it with the page resources.",
                 },
             ],

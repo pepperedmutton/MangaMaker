@@ -307,6 +307,7 @@ Context rules:
 - The Agent must be able to read all project pages on demand, not only the currently selected page. The creator's current page must be marked with `isCurrent=true` in the page index and detailed page reads.
 - The Agent harness should present project reading as local tools such as project summary, page listing, project search, single-page and batch page reading, selection inspection, filtered image asset listing, single-page and batch page rendering, and command manifest reading.
 - The Agent must be able to close the multimodal loop for a page: request a screenshot/render tool for a specific page, receive the composed visual result as a vision attachment, and receive the same page's structured resources so it can compare resource-level state with rendered outcome.
+- The Agent must follow a structured-first visual budget policy. It should search/read resources before screenshots, use preview renders by default, request cropped page renders for local details, and reserve high-detail renders for small text, faces, or fine line art. Token savings must come from reducing image count, pixels, and crop area rather than relying on PNG/JPG format differences.
 - The Agent UI must enforce a finite per-turn tool budget, skip repeated identical tool calls, and request a final answer from gathered evidence instead of surfacing a generic tool-loop failure to the creator.
 - Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
 - Large base64 assets must not be sent without bounds.

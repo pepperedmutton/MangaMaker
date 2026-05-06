@@ -11,9 +11,15 @@ import type {
   AgentObjectSummary,
   AgentPageContextSummary,
   AgentPageSummary,
+  AgentSnapshotCrop,
+  AgentSnapshotOptions,
 } from "./types";
 
-const MAX_SNAPSHOT_EDGE = 1280;
+const PREVIEW_SNAPSHOT_EDGE = 768;
+const DETAIL_SNAPSHOT_EDGE = 1280;
+
+const getSnapshotMaxEdge = (detail?: AgentSnapshotOptions["detail"]) =>
+  detail === "detail" ? DETAIL_SNAPSHOT_EDGE : PREVIEW_SNAPSHOT_EDGE;
 
 const byteLengthFromDataUrl = (dataUrl: string) => {
   const base64 = dataUrl.split(",", 2)[1] ?? "";
@@ -59,9 +65,10 @@ const getFallbackCanvas = () => {
 
 const drawScaledCanvas = (
   source: HTMLCanvasElement,
-  crop: { x: number; y: number; width: number; height: number },
+  crop: AgentSnapshotCrop,
+  maxEdge: number,
 ) => {
-  const scale = Math.min(1, MAX_SNAPSHOT_EDGE / Math.max(crop.width, crop.height));
+  const scale = Math.min(1, maxEdge / Math.max(crop.width, crop.height));
   const target = document.createElement("canvas");
   target.width = Math.max(1, Math.round(crop.width * scale));
   target.height = Math.max(1, Math.round(crop.height * scale));
@@ -85,11 +92,14 @@ const drawScaledCanvas = (
 
 const snapshotFromCanvas = (
   source: HTMLCanvasElement,
-  crop: { x: number; y: number; width: number; height: number },
+  crop: AgentSnapshotCrop,
   scope: "canvas" | "selection",
   sourceType: AgentCanvasSnapshot["source"],
+  options: AgentSnapshotOptions = { detail: "detail" },
 ): AgentCanvasSnapshot => {
-  const target = drawScaledCanvas(source, crop);
+  const detail = options.detail ?? "detail";
+  const maxEdge = getSnapshotMaxEdge(detail);
+  const target = drawScaledCanvas(source, crop, maxEdge);
   if (!target) {
     return createEmptySnapshot(scope, "Could not prepare canvas snapshot.");
   }
@@ -103,12 +113,15 @@ const snapshotFromCanvas = (
     byteLength: byteLengthFromDataUrl(dataUrl),
     capturedAt: new Date().toISOString(),
     source: sourceType,
+    detail,
+    maxEdge,
+    crop,
   };
 };
 
 const clampCrop = (
   canvas: HTMLCanvasElement,
-  crop: { x: number; y: number; width: number; height: number },
+  crop: AgentSnapshotCrop,
 ) => {
   const x = Math.max(0, Math.min(canvas.width - 1, crop.x));
   const y = Math.max(0, Math.min(canvas.height - 1, crop.y));
@@ -243,18 +256,26 @@ export const captureCurrentCanvasSnapshot = async (
   }
 };
 
-export const renderPageSnapshot = async (pageId: string): Promise<AgentCanvasSnapshot> => {
+export const renderPageSnapshot = async (
+  pageId: string,
+  options: AgentSnapshotOptions = { detail: "preview" },
+): Promise<AgentCanvasSnapshot> => {
   const page = useEditorStore.getState().project.pages.find((entry) => entry.id === pageId) ?? null;
   if (!page) {
     return createEmptySnapshot("canvas", `Page not found: ${pageId}`);
   }
   try {
     const renderedPage = await renderPageToCanvas(page);
+    const crop = clampCrop(
+      renderedPage,
+      options.crop ?? { x: 0, y: 0, width: renderedPage.width, height: renderedPage.height },
+    );
     return snapshotFromCanvas(
       renderedPage,
-      { x: 0, y: 0, width: renderedPage.width, height: renderedPage.height },
+      crop,
       "canvas",
       "page-render",
+      { detail: options.detail ?? "preview", crop },
     );
   } catch (error) {
     return createEmptySnapshot(

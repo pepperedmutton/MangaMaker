@@ -44,6 +44,14 @@ const allowedToolNames = new Set([
   "listCommandManifest",
 ]);
 
+const renderDetailSchema = z.enum(["preview", "detail"]).optional();
+const renderCropSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().finite().positive(),
+  height: z.number().finite().positive(),
+}).strict().optional();
+
 const validateRequestedToolCalls = (
   value: Array<{ toolName: string; input?: unknown; reason?: string }> | undefined,
 ): AgentToolCallRequest[] => {
@@ -54,14 +62,36 @@ const validateRequestedToolCalls = (
     if (!allowedToolNames.has(call.toolName)) {
       throw new Error(`Agent requested unknown tool at requestedToolCalls[${index}]: ${call.toolName}`);
     }
-    if (call.toolName === "renderPage" || call.toolName === "readPage") {
-      const parsed = z.object({ pageId: z.string().min(1) }).parse(call.input);
+    if (call.toolName === "readPage") {
+      const parsed = z.object({ pageId: z.string().min(1) }).strict().parse(call.input);
       return { toolName: call.toolName, input: parsed, reason: call.reason };
     }
-    if (call.toolName === "renderPages" || call.toolName === "readPages") {
+    if (call.toolName === "renderCurrentPage") {
       const parsed = z.object({
-        pageIds: z.array(z.string().min(1)).min(1).max(call.toolName === "renderPages" ? 6 : 12),
-      }).parse(call.input);
+        detail: renderDetailSchema,
+        crop: renderCropSchema,
+      }).strict().parse(call.input ?? {});
+      return { toolName: call.toolName, input: parsed, reason: call.reason };
+    }
+    if (call.toolName === "renderPage") {
+      const parsed = z.object({
+        pageId: z.string().min(1),
+        detail: renderDetailSchema,
+        crop: renderCropSchema,
+      }).strict().parse(call.input);
+      return { toolName: call.toolName, input: parsed, reason: call.reason };
+    }
+    if (call.toolName === "readPages") {
+      const parsed = z.object({
+        pageIds: z.array(z.string().min(1)).min(1).max(12),
+      }).strict().parse(call.input);
+      return { toolName: call.toolName, input: parsed, reason: call.reason };
+    }
+    if (call.toolName === "renderPages") {
+      const parsed = z.object({
+        pageIds: z.array(z.string().min(1)).min(1).max(6),
+        detail: renderDetailSchema,
+      }).strict().parse(call.input);
       return { toolName: call.toolName, input: parsed, reason: call.reason };
     }
     if (call.toolName === "searchProject") {

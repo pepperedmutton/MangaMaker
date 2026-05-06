@@ -153,8 +153,12 @@ describe("agent response validation", () => {
           { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
           { toolName: "readPages", input: { pageIds: ["p1", "p2"] }, reason: "Read a sample" },
           { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
-          { toolName: "renderPages", input: { pageIds: ["p1", "p2"] }, reason: "Inspect several pages" },
-          { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
+          { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
+          {
+            toolName: "renderPage",
+            input: { pageId: "p1", detail: "detail", crop: { x: 0, y: 0, width: 120, height: 80 } },
+            reason: "Inspect composed page",
+          },
         ],
         pendingCommandPlan: null,
       }).requestedToolCalls,
@@ -162,8 +166,12 @@ describe("agent response validation", () => {
       { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
       { toolName: "readPages", input: { pageIds: ["p1", "p2"] }, reason: "Read a sample" },
       { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
-      { toolName: "renderPages", input: { pageIds: ["p1", "p2"] }, reason: "Inspect several pages" },
-      { toolName: "renderPage", input: { pageId: "p1" }, reason: "Inspect composed page" },
+      { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
+      {
+        toolName: "renderPage",
+        input: { pageId: "p1", detail: "detail", crop: { x: 0, y: 0, width: 120, height: 80 } },
+        reason: "Inspect composed page",
+      },
     ]);
 
     expect(() =>
@@ -173,6 +181,14 @@ describe("agent response validation", () => {
         pendingCommandPlan: null,
       }),
     ).toThrow(/unknown tool/);
+
+    expect(() =>
+      validateAgentChatResponse({
+        message: "Bad render detail",
+        requestedToolCalls: [{ toolName: "renderPage", input: { pageId: "p1", detail: "high" } }],
+        pendingCommandPlan: null,
+      }),
+    ).toThrow();
   });
 
   it("does not trust model-provided dangerLevel", () => {
