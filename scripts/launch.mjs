@@ -8,13 +8,19 @@ const rootDir = process.cwd();
 const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const pythonCommand = process.platform === "win32" ? "python" : "python3";
 const defaultNgrokCommand = process.platform === "win32" ? "ngrok.exe" : "ngrok";
-const defaultHost = "127.0.0.1";
+const isRenderRuntime = process.env.RENDER === "true" || Boolean(process.env.RENDER_SERVICE_ID);
+const parsePortEnv = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
+};
+const defaultHost = process.env.HOST?.trim() || (isRenderRuntime ? "0.0.0.0" : "127.0.0.1");
 const defaultPreviewPort = 4173;
 const defaultDevPort = 5173;
 const defaultTtlHours = 72;
 const healthPath = "/__mangamaker__/persistence/health";
 const defaultShareProvider = "gradio";
 const defaultNgrokApiUrl = "http://127.0.0.1:4040";
+const envPort = parsePortEnv(process.env.PORT);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -56,7 +62,7 @@ const quoteWindowsArg = (value) => {
 
 const parseArgs = (argv) => {
   const options = {
-    share: true,
+    share: !isRenderRuntime,
     shareProvider: defaultShareProvider,
     host: defaultHost,
     port: null,
@@ -117,7 +123,7 @@ const parseArgs = (argv) => {
   }
 
   if (!portProvided) {
-    options.port = options.devServer ? defaultDevPort : defaultPreviewPort;
+    options.port = envPort ?? (options.devServer ? defaultDevPort : defaultPreviewPort);
   }
 
   if (!Number.isFinite(options.port) || options.port <= 0) {
@@ -153,6 +159,8 @@ Environment:
   GRADIO_SHARE_SERVER_ADDRESS  Override the share tunnel server address, for example 44.237.78.176:7000
   NGROK_BIN                    Absolute path to the ngrok executable
   NGROK_API_URL                Override the local ngrok API URL. Default: http://127.0.0.1:4040
+  PORT                         Default port when --port is omitted. Used by Render.
+  HOST                         Default host when --host is omitted. Render defaults to 0.0.0.0.
 `);
 };
 

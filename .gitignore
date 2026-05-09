@@ -3,12 +3,18 @@ dist/
 test-results/
 .codex_tmp/
 .mangamaker_runtime/
+.tmp_*/
+.tmp_*
 scripts/__pycache__/
 src/assets/fonts/
+public/elements/
 projects/
+projects_backup_*/
+image/
 
 *.tsbuildinfo
 *.log
+*.cookie.txt
 
 test-output.txt
 test-results.json

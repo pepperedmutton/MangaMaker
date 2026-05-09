@@ -6,17 +6,63 @@ import { createHash, scryptSync, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { defineConfig, type PreviewServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
+import {
+  AGENT_DEFAULT_DOCUMENT_DEFINITIONS,
+  agentDocumentManifestSchema,
+  agentDocumentMetaSchema,
+  agentDocumentSchema,
+  agentDocumentFromMarkdown,
+  buildAgentDocumentMarkdown,
+  createDefaultAgentRolesForDocuments,
+  createAgentDocumentMeta,
+  type AgentDocument,
+  type AgentDocumentManifest,
+  type AgentDocumentMeta,
+} from "./src/agent/documentSchema";
+import {
+  agentRoleDefinitionSchema,
+  createAgentRoleId,
+  getAgentRole,
+  type AgentRoleDefinition,
+} from "./src/agent/roles";
+import {
+  AGENT_PROTOCOL_SYSTEM_PROMPT,
+  DEFAULT_AGENT_SYSTEM_PROMPT,
+  normalizeAgentSystemPrompt,
+} from "./src/agent/systemPrompt";
+import {
+  OpenRouterNonJsonResponseError,
+  extractOpenRouterAssistantContent,
+  parseOpenRouterResponseJson,
+} from "./src/agent/openRouterResponse";
+import {
+  getOpenRouterFallbackProviderRouting,
+  getOpenRouterProviderRouting,
+  type OpenRouterProviderRouting,
+} from "./src/agent/openRouterProviderRouting";
 
 const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projects";
 const PROJECT_META_FILE = ".latest_project";
 const PROJECT_JSON_FILE = "project.json";
 const PROJECT_ASSETS_DIR = "assets";
-const AGENT_CHAT_HISTORY_FILE = "agent-chat.json";
+const AGENT_CONVERSATION_CONTEXT_FILE = "agent-conversation-context.json";
+const LEGACY_AGENT_CHAT_HISTORY_FILE = "agent-chat.json";
+const DEFAULT_AGENT_CONVERSATION_ROLE_ID = "assistant";
+const AGENT_DOCS_DIR = "docs";
+const AGENT_DOCS_MANIFEST_FILE = "manifest.json";
+const AGENT_DOCS_OPERATIONS_FILE = ".agent-document-operations.json";
+const AGENT_RUNS_DIR = "agent-runs";
+const AGENT_RUN_FILE = "run.json";
 const API_BASE = "/__mangamaker__/persistence";
 const AGENT_API_BASE = "/__mangamaker__/agent";
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const AGENT_TEST_MODE = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
+const parsePositiveIntegerEnv = (value: string | undefined, fallback: number) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+};
+const OPENROUTER_REQUEST_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.MANGAMAKER_OPENROUTER_TIMEOUT_MS, 120000);
 const AUTH_COOKIE_NAME = "mangamaker_auth";
 const AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const AUTH_LOGIN_PATH = "/__mangamaker__/auth/login";
@@ -377,27 +423,52 @@ const readJsonBody = async <T>(req: IncomingMessage): Promise<T> => {
   return JSON.parse(raw) as T;
 };
 
-const validateAgentChatHistory = (value: unknown): AgentChatHistory => {
-  if (!value || typeof value !== "object") {
-    throw new Error("Agent chat history must be an object.");
+const writeFileAtomically = async (filePath: string, contents: string) => {
+  const directory = path.dirname(filePath);
+  await fsp.mkdir(directory, { recursive: true });
+  const tempFile = path.join(
+    directory,
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
+  );
+  try {
+    await fsp.writeFile(tempFile, contents, "utf8");
+    await fsp.rename(tempFile, filePath);
+  } catch (error) {
+    await fsp.rm(tempFile, { force: true }).catch(() => undefined);
+    throw error;
   }
-  const history = value as {
+};
+
+const validateAgentConversationContext = (
+  value: unknown,
+  fallback: { projectId?: string; roleId?: string } = {},
+): AgentConversationContext => {
+  if (!value || typeof value !== "object") {
+    throw new Error("Agent conversation context must be an object.");
+  }
+  const context = value as {
     projectId?: unknown;
+    roleId?: unknown;
     updatedAt?: unknown;
     messages?: unknown;
   };
-  if (typeof history.projectId !== "string" || history.projectId.trim().length === 0) {
-    throw new Error("Agent chat history projectId must be a non-empty string.");
+  const projectId = typeof context.projectId === "string" ? context.projectId.trim() : fallback.projectId ?? "";
+  const roleId = typeof context.roleId === "string" ? context.roleId.trim() : fallback.roleId ?? "";
+  if (projectId.length === 0) {
+    throw new Error("Agent conversation context projectId must be a non-empty string.");
   }
-  if (typeof history.updatedAt !== "string" || history.updatedAt.trim().length === 0) {
-    throw new Error("Agent chat history updatedAt must be a non-empty string.");
+  if (roleId.length === 0) {
+    throw new Error("Agent conversation context roleId must be a non-empty string.");
   }
-  if (!Array.isArray(history.messages)) {
-    throw new Error("Agent chat history messages must be an array.");
+  if (typeof context.updatedAt !== "string" || context.updatedAt.trim().length === 0) {
+    throw new Error("Agent conversation context updatedAt must be a non-empty string.");
   }
-  const messages = history.messages.slice(-200).map((entry) => {
+  if (!Array.isArray(context.messages)) {
+    throw new Error("Agent conversation context messages must be an array.");
+  }
+  const messages = context.messages.slice(-200).map((entry) => {
     if (!entry || typeof entry !== "object") {
-      throw new Error("Agent chat history message must be an object.");
+      throw new Error("Agent conversation context message must be an object.");
     }
     const message = entry as {
       id?: unknown;
@@ -406,71 +477,701 @@ const validateAgentChatHistory = (value: unknown): AgentChatHistory => {
       createdAt?: unknown;
     };
     if (typeof message.id !== "string" || message.id.trim().length === 0) {
-      throw new Error("Agent chat history message id must be a non-empty string.");
+      throw new Error("Agent conversation context message id must be a non-empty string.");
     }
     if (message.role !== "user" && message.role !== "assistant") {
-      throw new Error("Agent chat history message role must be user or assistant.");
+      throw new Error("Agent conversation context message role must be user or assistant.");
     }
     if (typeof message.content !== "string") {
-      throw new Error("Agent chat history message content must be a string.");
+      throw new Error("Agent conversation context message content must be a string.");
     }
     if (typeof message.createdAt !== "string" || message.createdAt.trim().length === 0) {
-      throw new Error("Agent chat history message createdAt must be a non-empty string.");
+      throw new Error("Agent conversation context message createdAt must be a non-empty string.");
     }
     return {
       id: message.id,
       role: message.role,
       content: message.content,
       createdAt: message.createdAt,
-    } satisfies AgentChatHistory["messages"][number];
+    } satisfies AgentConversationContext["messages"][number];
   });
   return {
-    projectId: history.projectId,
-    updatedAt: history.updatedAt,
+    projectId,
+    roleId,
+    updatedAt: context.updatedAt,
     messages,
+  };
+};
+
+const normalizeAgentConversationContextStore = (
+  value: unknown,
+  projectId: string,
+): AgentConversationContextStore => {
+  const now = new Date().toISOString();
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { projectId, updatedAt: now, contexts: [] };
+  }
+  const record = value as { projectId?: unknown; updatedAt?: unknown; contexts?: unknown };
+  const contexts = Array.isArray(record.contexts)
+    ? record.contexts
+    : [record];
+  const deduped = new Map<string, AgentConversationContext>();
+  for (const entry of contexts) {
+    const entryRecord = entry && typeof entry === "object" && !Array.isArray(entry)
+      ? entry as { roleId?: unknown }
+      : {};
+    const roleId =
+      typeof entryRecord.roleId === "string" && entryRecord.roleId.trim().length > 0
+        ? entryRecord.roleId.trim()
+        : DEFAULT_AGENT_CONVERSATION_ROLE_ID;
+    const context = validateAgentConversationContext(entry, { projectId, roleId });
+    if (context.projectId === projectId) {
+      deduped.set(context.roleId, context);
+    }
+  }
+  return {
+    projectId,
+    updatedAt: typeof record.updatedAt === "string" && record.updatedAt.trim().length > 0
+      ? record.updatedAt
+      : now,
+    contexts: Array.from(deduped.values()).sort((left, right) => left.roleId.localeCompare(right.roleId)),
   };
 };
 
 const publicProjectRelativePath = (absolutePath: string) =>
   path.relative(process.cwd(), absolutePath).replace(/\\/g, "/");
 
-const resolveAgentChatHistoryFile = async (projectId: string, createProjectDir: boolean) => {
+const resolveAgentConversationContextFile = async (
+  projectId: string,
+  createProjectDir: boolean,
+  fileName = AGENT_CONVERSATION_CONTEXT_FILE,
+) => {
   const root = await ensureProjectsRoot();
   const existingDir = await findProjectDirById(root, projectId);
   const projectDir = existingDir ?? path.join(root, sanitizePathComponent(projectId, "project"));
   if (createProjectDir) {
     await fsp.mkdir(projectDir, { recursive: true });
   }
-  return path.join(projectDir, AGENT_CHAT_HISTORY_FILE);
+  return path.join(projectDir, fileName);
 };
 
-const readAgentChatHistoryFile = async (projectId: string): Promise<AgentChatHistory | null> => {
-  const historyFile = await resolveAgentChatHistoryFile(projectId, false);
-  const raw = await fsp.readFile(historyFile, "utf8").catch(() => null);
+const readAgentConversationContextStoreFile = async (
+  projectId: string,
+): Promise<{ contextFile: string; store: AgentConversationContextStore; legacy: boolean }> => {
+  const contextFile = await resolveAgentConversationContextFile(projectId, false);
+  const raw = await fsp.readFile(contextFile, "utf8").catch(() => null);
+  if (raw) {
+    return {
+      contextFile,
+      store: normalizeAgentConversationContextStore(JSON.parse(raw), projectId),
+      legacy: false,
+    };
+  }
+  const legacyFile = await resolveAgentConversationContextFile(projectId, false, LEGACY_AGENT_CHAT_HISTORY_FILE);
+  const legacyRaw = await fsp.readFile(legacyFile, "utf8").catch(() => null);
+  if (legacyRaw) {
+    return {
+      contextFile: legacyFile,
+      store: normalizeAgentConversationContextStore(JSON.parse(legacyRaw), projectId),
+      legacy: true,
+    };
+  }
+  return {
+    contextFile,
+    store: { projectId, updatedAt: new Date().toISOString(), contexts: [] },
+    legacy: false,
+  };
+};
+
+const readAgentConversationContextFile = async (
+  projectId: string,
+  roleId: string,
+): Promise<AgentConversationContext | null> => {
+  const { contextFile, store } = await readAgentConversationContextStoreFile(projectId);
+  const context = store.contexts.find((entry) => entry.roleId === roleId) ?? null;
+  if (!context) {
+    return null;
+  }
+  return {
+    ...context,
+    storagePath: publicProjectRelativePath(contextFile),
+  };
+};
+
+const writeAgentConversationContextStoreFile = async (
+  projectId: string,
+  store: AgentConversationContextStore,
+) => {
+  const contextFile = await resolveAgentConversationContextFile(projectId, true);
+  const payload = {
+    projectId,
+    updatedAt: new Date().toISOString(),
+    contexts: store.contexts
+      .map((context) => validateAgentConversationContext(context, { projectId, roleId: context.roleId }))
+      .sort((left, right) => left.roleId.localeCompare(right.roleId)),
+  };
+  await fsp.writeFile(contextFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const legacyFile = await resolveAgentConversationContextFile(
+    projectId,
+    false,
+    LEGACY_AGENT_CHAT_HISTORY_FILE,
+  );
+  await fsp.rm(legacyFile, { force: true }).catch(() => undefined);
+  return {
+    contextFile,
+    store: payload,
+  };
+};
+
+const writeAgentConversationContextFile = async (
+  context: AgentConversationContext,
+): Promise<AgentConversationContext> => {
+  const normalized = validateAgentConversationContext(context, {
+    roleId: DEFAULT_AGENT_CONVERSATION_ROLE_ID,
+  });
+  const { store } = await readAgentConversationContextStoreFile(normalized.projectId);
+  const contexts = store.contexts.filter((entry) => entry.roleId !== normalized.roleId).concat(normalized);
+  const written = await writeAgentConversationContextStoreFile(normalized.projectId, {
+    projectId: normalized.projectId,
+    updatedAt: new Date().toISOString(),
+    contexts,
+  });
+  return {
+    ...normalized,
+    storagePath: publicProjectRelativePath(written.contextFile),
+  };
+};
+
+const deleteAgentConversationContextFile = async (projectId: string, roleId: string) => {
+  const { store } = await readAgentConversationContextStoreFile(projectId);
+  const contexts = store.contexts.filter((entry) => entry.roleId !== roleId);
+  if (contexts.length === 0) {
+    const contextFile = await resolveAgentConversationContextFile(projectId, false);
+    const legacyFile = await resolveAgentConversationContextFile(projectId, false, LEGACY_AGENT_CHAT_HISTORY_FILE);
+    await Promise.all([
+      fsp.rm(contextFile, { force: true }),
+      fsp.rm(legacyFile, { force: true }),
+    ]);
+    return;
+  }
+  await writeAgentConversationContextStoreFile(projectId, {
+    projectId,
+    updatedAt: new Date().toISOString(),
+    contexts,
+  });
+};
+
+const resolveProjectDirById = async (projectId: string, createProjectDir: boolean) => {
+  const root = await ensureProjectsRoot();
+  const existingDir = await findProjectDirById(root, projectId);
+  const projectDir = existingDir ?? path.join(root, sanitizePathComponent(projectId, "project"));
+  if (createProjectDir) {
+    await fsp.mkdir(projectDir, { recursive: true });
+  }
+  return projectDir;
+};
+
+const normalizeAgentDocumentPath = (value: string, fallbackId: string) => {
+  const raw = value.trim() || `${AGENT_DOCS_DIR}/${sanitizePathComponent(fallbackId, "document")}.md`;
+  const withForwardSlashes = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+  const normalized = path.posix.normalize(withForwardSlashes);
+  if (
+    normalized.startsWith("../") ||
+    normalized.includes("/../") ||
+    path.posix.isAbsolute(normalized) ||
+    !normalized.startsWith(`${AGENT_DOCS_DIR}/`) ||
+    !normalized.toLowerCase().endsWith(".md")
+  ) {
+    throw new Error("Agent document path must stay under docs/ and end with .md.");
+  }
+  return normalized;
+};
+
+const resolvePathInsideProjectDir = (projectDir: string, relativePath: string) => {
+  const candidate = path.resolve(projectDir, relativePath);
+  const rootWithSep = projectDir.endsWith(path.sep) ? projectDir : `${projectDir}${path.sep}`;
+  if (!candidate.startsWith(rootWithSep)) {
+    throw new Error("Resolved Agent document path escaped the project directory.");
+  }
+  return candidate;
+};
+
+const resolveAgentDocsManifestFile = async (projectId: string, createProjectDir: boolean) => {
+  const projectDir = await resolveProjectDirById(projectId, createProjectDir);
+  if (createProjectDir) {
+    await fsp.mkdir(path.join(projectDir, AGENT_DOCS_DIR), { recursive: true });
+  }
+  return path.join(projectDir, AGENT_DOCS_DIR, AGENT_DOCS_MANIFEST_FILE);
+};
+
+const readRawAgentDocumentManifestFile = async (projectId: string): Promise<AgentDocumentManifest | null> => {
+  const manifestFile = await resolveAgentDocsManifestFile(projectId, false);
+  const raw = await fsp.readFile(manifestFile, "utf8").catch(() => null);
   if (!raw) {
     return null;
   }
-  const history = validateAgentChatHistory(JSON.parse(raw));
+  return agentDocumentManifestSchema.parse(JSON.parse(raw));
+};
+
+const writeAgentDocumentManifestFile = async (manifest: AgentDocumentManifest) => {
+  const normalized = agentDocumentManifestSchema.parse(manifest);
+  const manifestFile = await resolveAgentDocsManifestFile(normalized.projectId, true);
+  await writeFileAtomically(manifestFile, `${JSON.stringify(normalized, null, 2)}\n`);
+  return normalized;
+};
+
+const normalizeAgentRolesForDocuments = (
+  roles: AgentRoleDefinition[],
+  documents: AgentDocumentMeta[],
+) => {
+  const documentIds = new Set(documents.map((document) => document.id));
+  const usedRoleIds = new Set<string>();
+  const usedMetadocIds = new Set<string>();
+  const normalizedRoles: AgentRoleDefinition[] = [];
+  for (const role of roles) {
+    if (
+      usedRoleIds.has(role.id) ||
+      !documentIds.has(role.metadocId) ||
+      usedMetadocIds.has(role.metadocId)
+    ) {
+      continue;
+    }
+    normalizedRoles.push(agentRoleDefinitionSchema.parse(role));
+    usedRoleIds.add(role.id);
+    usedMetadocIds.add(role.metadocId);
+  }
+  return normalizedRoles.sort((left, right) => left.name.localeCompare(right.name));
+};
+
+const createDefaultAgentRoleList = (documents: AgentDocumentMeta[]) =>
+  normalizeAgentRolesForDocuments(createDefaultAgentRolesForDocuments(documents), documents);
+
+const ensureProjectDocuments = async (projectId: string): Promise<AgentDocumentManifest> => {
+  const now = new Date().toISOString();
+  const projectDir = await resolveProjectDirById(projectId, true);
+  await fsp.mkdir(path.join(projectDir, AGENT_DOCS_DIR), { recursive: true });
+  const existingManifest = await readRawAgentDocumentManifestFile(projectId).catch(() => null);
+  const documentMap = new Map<string, AgentDocumentMeta>();
+  for (const document of existingManifest?.documents ?? []) {
+    const meta = agentDocumentMetaSchema.parse({
+      ...document,
+      path: normalizeAgentDocumentPath(document.path, document.id),
+    });
+    documentMap.set(meta.id, meta);
+  }
+
+  let changed = !existingManifest;
+  if (!existingManifest) {
+    for (const definition of AGENT_DEFAULT_DOCUMENT_DEFINITIONS) {
+      const meta = createAgentDocumentMeta(definition, now);
+      documentMap.set(meta.id, meta);
+      const documentPath = resolvePathInsideProjectDir(
+        projectDir,
+        normalizeAgentDocumentPath(meta.path, meta.id),
+      );
+      const stats = await fsp.stat(documentPath).catch(() => null);
+      if (!stats?.isFile()) {
+        await fsp.mkdir(path.dirname(documentPath), { recursive: true });
+        await fsp.writeFile(documentPath, `${buildAgentDocumentMarkdown(meta, definition.body)}\n`, "utf8");
+      }
+    }
+  }
+
+  const documents = Array.from(documentMap.values()).sort((left, right) => left.path.localeCompare(right.path));
+  const existingRoles = existingManifest?.roles ?? [];
+  const roles =
+    existingManifest && existingManifest.roleSetupVersion > 0
+      ? normalizeAgentRolesForDocuments(existingRoles, documents)
+      : createDefaultAgentRoleList(documents);
+  if (
+    existingManifest &&
+    (existingManifest.roleSetupVersion === 0 ||
+      existingRoles.length !== roles.length ||
+      JSON.stringify(existingRoles) !== JSON.stringify(roles))
+  ) {
+    changed = true;
+  }
+
+  const manifest = agentDocumentManifestSchema.parse({
+    projectId,
+    updatedAt: existingManifest?.updatedAt ?? now,
+    roleSetupVersion: 1,
+    documents,
+    roles,
+  });
+  if (changed) {
+    return writeAgentDocumentManifestFile({ ...manifest, updatedAt: now });
+  }
+  return manifest;
+};
+
+const normalizeAgentDocumentLookup = (value: string) =>
+  value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+/g, "/");
+
+const stripMarkdownExtension = (value: string) =>
+  value.toLowerCase().endsWith(".md") ? value.slice(0, -3) : value;
+
+const describeAgentDocumentLookupOptions = (manifest: AgentDocumentManifest) => {
+  const options = manifest.documents
+    .slice(0, 12)
+    .map((document) => `${document.id} (${document.path})`)
+    .join(", ");
+  return options.length > 0
+    ? ` Available documents: ${options}${manifest.documents.length > 12 ? ", ..." : ""}`
+    : "";
+};
+
+const resolveAgentDocumentMeta = (
+  manifest: AgentDocumentManifest,
+  documentLookup: string,
+): AgentDocumentMeta => {
+  const trimmed = documentLookup.trim();
+  if (!trimmed) {
+    throw new Error(`Agent document id/path/title is required.${describeAgentDocumentLookupOptions(manifest)}`);
+  }
+  const normalized = normalizeAgentDocumentLookup(trimmed);
+  const normalizedLower = normalized.toLowerCase();
+  const normalizedWithoutDocsPrefix = normalizedLower.startsWith(`${AGENT_DOCS_DIR}/`)
+    ? normalizedLower.slice(AGENT_DOCS_DIR.length + 1)
+    : normalizedLower;
+  const normalizedWithoutExtension = stripMarkdownExtension(normalizedLower);
+  const basename = path.posix.basename(normalizedLower);
+  const basenameWithoutExtension = stripMarkdownExtension(basename);
+
+  const scoreDocument = (document: AgentDocumentMeta) => {
+    const idLower = document.id.toLowerCase();
+    const pathLower = normalizeAgentDocumentLookup(document.path).toLowerCase();
+    const pathWithoutDocsPrefix = pathLower.startsWith(`${AGENT_DOCS_DIR}/`)
+      ? pathLower.slice(AGENT_DOCS_DIR.length + 1)
+      : pathLower;
+    const pathWithoutExtension = stripMarkdownExtension(pathLower);
+    const pathBasename = path.posix.basename(pathLower);
+    const pathBasenameWithoutExtension = stripMarkdownExtension(pathBasename);
+    const titleLower = document.title.trim().toLowerCase();
+    const titleWithoutExtension = stripMarkdownExtension(titleLower);
+
+    if (document.id === trimmed) return 100;
+    if (idLower === normalizedLower) return 95;
+    if (pathLower === normalizedLower) return 90;
+    if (pathWithoutDocsPrefix === normalizedWithoutDocsPrefix) return 85;
+    if (pathBasename === basename && basename.includes(".")) return 80;
+    if (pathWithoutExtension === normalizedWithoutExtension) return 75;
+    if (pathBasenameWithoutExtension === basenameWithoutExtension) return 70;
+    if (titleLower === normalizedLower) return 65;
+    if (titleWithoutExtension === normalizedWithoutExtension || titleWithoutExtension === basenameWithoutExtension) return 60;
+    return 0;
+  };
+
+  const matches = manifest.documents
+    .map((document) => ({ document, score: scoreDocument(document) }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  if (matches.length === 0) {
+    throw new Error(`Agent document not found: ${documentLookup}.${describeAgentDocumentLookupOptions(manifest)}`);
+  }
+  if (matches.length > 1 && matches[0].score === matches[1].score) {
+    const ambiguous = matches
+      .filter((entry) => entry.score === matches[0].score)
+      .map((entry) => `${entry.document.id} (${entry.document.path})`)
+      .join(", ");
+    throw new Error(`Agent document lookup is ambiguous: ${documentLookup}. Use the document id. Matches: ${ambiguous}`);
+  }
+  return matches[0].document;
+};
+
+const readAgentDocumentFile = async (projectId: string, documentId: string): Promise<AgentDocument> => {
+  const manifest = await ensureProjectDocuments(projectId);
+  const meta = resolveAgentDocumentMeta(manifest, documentId);
+  const projectDir = await resolveProjectDirById(projectId, false);
+  const documentPath = resolvePathInsideProjectDir(projectDir, normalizeAgentDocumentPath(meta.path, meta.id));
+  const raw = await fsp.readFile(documentPath, "utf8").catch(() => null);
+  if (raw === null) {
+    return agentDocumentSchema.parse({ ...meta, content: "" });
+  }
+  return agentDocumentFromMarkdown(meta, raw);
+};
+
+const getAgentDocumentOperationsFilePath = async (projectId: string) => {
+  const projectDir = await resolveProjectDirById(projectId, true);
+  const docsDir = resolvePathInsideProjectDir(projectDir, AGENT_DOCS_DIR);
+  await fsp.mkdir(docsDir, { recursive: true });
+  return path.join(docsDir, AGENT_DOCS_OPERATIONS_FILE);
+};
+
+const readAgentDocumentOperationLog = async (projectId: string): Promise<AgentDocumentOperationLog> => {
+  const operationsFile = await getAgentDocumentOperationsFilePath(projectId);
+  const raw = await fsp.readFile(operationsFile, "utf8").catch(() => null);
+  if (!raw) {
+    return {
+      projectId,
+      updatedAt: new Date().toISOString(),
+      operations: [],
+    };
+  }
+  const parsed = JSON.parse(raw) as Partial<AgentDocumentOperationLog>;
   return {
-    ...history,
-    storagePath: publicProjectRelativePath(historyFile),
+    projectId,
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+    operations: Array.isArray(parsed.operations)
+      ? parsed.operations
+          .filter((entry): entry is AgentDocumentOperationRecord =>
+            Boolean(
+              entry &&
+                typeof entry.operationId === "string" &&
+                typeof entry.documentId === "string" &&
+                typeof entry.contentHash === "string" &&
+                typeof entry.path === "string" &&
+                typeof entry.appliedAt === "string",
+            ),
+          )
+          .slice(-500)
+      : [],
   };
 };
 
-const writeAgentChatHistoryFile = async (history: AgentChatHistory): Promise<AgentChatHistory> => {
-  const normalized = validateAgentChatHistory(history);
-  const historyFile = await resolveAgentChatHistoryFile(normalized.projectId, true);
-  const payload = {
-    ...normalized,
-    storagePath: publicProjectRelativePath(historyFile),
-  };
-  await fsp.writeFile(historyFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  return payload;
+const writeAgentDocumentOperationLog = async (log: AgentDocumentOperationLog) => {
+  const operationsFile = await getAgentDocumentOperationsFilePath(log.projectId);
+  await writeFileAtomically(operationsFile, `${JSON.stringify(log, null, 2)}\n`);
 };
 
-const deleteAgentChatHistoryFile = async (projectId: string) => {
-  const historyFile = await resolveAgentChatHistoryFile(projectId, false);
-  await fsp.rm(historyFile, { force: true });
+const writeAgentDocumentFile = async (
+  projectId: string,
+  documentInput: Partial<AgentDocumentMeta> & { content: string; operationId?: string },
+): Promise<AgentDocument> => {
+  const manifest = await ensureProjectDocuments(projectId);
+  const existing = documentInput.id
+    ? manifest.documents.find((document) => document.id === documentInput.id)
+    : null;
+  const now = new Date().toISOString();
+  const id = String(documentInput.id ?? existing?.id ?? "").trim();
+  if (!id) {
+    throw new Error("Agent document id is required.");
+  }
+  const role = documentInput.role ?? existing?.role;
+  const meta = agentDocumentSchema.omit({ content: true }).parse({
+    id,
+    title: documentInput.title ?? existing?.title ?? id,
+    ...(role ? { role } : {}),
+    status: documentInput.status ?? existing?.status ?? "draft",
+    path: normalizeAgentDocumentPath(
+      documentInput.path ?? existing?.path ?? `${AGENT_DOCS_DIR}/${sanitizePathComponent(String(role ?? "general"), "role")}/${sanitizePathComponent(id, "document")}.md`,
+      id,
+    ),
+    relatedPageIds: documentInput.relatedPageIds ?? existing?.relatedPageIds ?? [],
+    updatedAt: now,
+    lastAgentRunId: documentInput.lastAgentRunId ?? existing?.lastAgentRunId,
+    summary: documentInput.summary ?? existing?.summary,
+  });
+  const document = agentDocumentSchema.parse({ ...meta, content: documentInput.content });
+  const projectDir = await resolveProjectDirById(projectId, true);
+  const documentPath = resolvePathInsideProjectDir(projectDir, meta.path);
+  const operationId =
+    typeof documentInput.operationId === "string" && documentInput.operationId.trim().length > 0
+      ? documentInput.operationId.trim()
+      : null;
+  const markdown = `${buildAgentDocumentMarkdown(meta, document.content)}\n`;
+  const contentHash = createHash("sha256").update(markdown).digest("hex");
+  if (operationId) {
+    const operationLog = await readAgentDocumentOperationLog(projectId);
+    const existingOperation = operationLog.operations.find((entry) => entry.operationId === operationId);
+    if (existingOperation) {
+      if (existingOperation.documentId !== document.id || existingOperation.contentHash !== contentHash) {
+        throw new Error(
+          `Document write operationId ${operationId} was already applied with different document content.`,
+        );
+      }
+      return readAgentDocumentFile(projectId, document.id);
+    }
+  }
+  const previousDocumentPath = existing
+    ? resolvePathInsideProjectDir(
+        projectDir,
+        normalizeAgentDocumentPath(existing.path, existing.id),
+      )
+    : null;
+  await fsp.mkdir(path.dirname(documentPath), { recursive: true });
+  await writeFileAtomically(documentPath, markdown);
+  if (previousDocumentPath) {
+    const samePath =
+      process.platform === "win32"
+        ? path.resolve(previousDocumentPath).toLowerCase() === path.resolve(documentPath).toLowerCase()
+        : path.resolve(previousDocumentPath) === path.resolve(documentPath);
+    if (!samePath) {
+      await fsp.rm(previousDocumentPath, { force: true });
+    }
+  }
+
+  const nextDocuments = manifest.documents
+    .filter((entry) => entry.id !== document.id)
+    .concat(meta)
+    .sort((left, right) => left.path.localeCompare(right.path));
+  await writeAgentDocumentManifestFile({
+    projectId,
+    updatedAt: now,
+    roleSetupVersion: 1,
+    documents: nextDocuments,
+    roles: normalizeAgentRolesForDocuments(manifest.roles, nextDocuments),
+  });
+  if (operationId) {
+    const operationLog = await readAgentDocumentOperationLog(projectId);
+    const operations = [
+      ...operationLog.operations.filter((entry) => entry.operationId !== operationId),
+      {
+        operationId,
+        documentId: document.id,
+        contentHash,
+        path: meta.path,
+        appliedAt: now,
+      },
+    ].slice(-500);
+    await writeAgentDocumentOperationLog({
+      projectId,
+      updatedAt: now,
+      operations,
+    });
+  }
+  return document;
+};
+
+const deleteAgentDocumentFile = async (
+  projectId: string,
+  documentId: string,
+): Promise<AgentDocumentManifest> => {
+  const manifest = await ensureProjectDocuments(projectId);
+  const meta = resolveAgentDocumentMeta(manifest, documentId);
+  const projectDir = await resolveProjectDirById(projectId, false);
+  const documentPath = resolvePathInsideProjectDir(
+    projectDir,
+    normalizeAgentDocumentPath(meta.path, meta.id),
+  );
+  await fsp.rm(documentPath, { force: true });
+  const now = new Date().toISOString();
+  const nextDocuments = manifest.documents
+    .filter((entry) => entry.id !== meta.id)
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return writeAgentDocumentManifestFile({
+    projectId,
+    updatedAt: now,
+    roleSetupVersion: 1,
+    documents: nextDocuments,
+    roles: normalizeAgentRolesForDocuments(manifest.roles, nextDocuments),
+  });
+};
+
+type AgentRoleInput = Partial<Omit<AgentRoleDefinition, "metadocId">> & {
+  name?: string;
+  metadocId?: string;
+  metadocTitle?: string;
+  metadocPath?: string;
+};
+
+const createAgentRoleWithMetadocFile = async (
+  projectId: string,
+  roleInput: AgentRoleInput,
+): Promise<AgentDocumentManifest> => {
+  const manifest = await ensureProjectDocuments(projectId);
+  const now = new Date().toISOString();
+  const name = String(roleInput.name ?? "").trim();
+  if (!name) {
+    throw new Error("Agent role name is required.");
+  }
+  const id = String(roleInput.id ?? createAgentRoleId(name, manifest.roles)).trim();
+  if (!id) {
+    throw new Error("Agent role id is required.");
+  }
+  if (manifest.roles.some((role) => role.id === id)) {
+    throw new Error(`Agent role already exists: ${id}`);
+  }
+
+  let documents = [...manifest.documents];
+  let metadocId = roleInput.metadocId?.trim() ?? "";
+  if (metadocId) {
+    if (!documents.some((document) => document.id === metadocId)) {
+      throw new Error(`Metadoc document not found: ${metadocId}`);
+    }
+  } else {
+    metadocId = createAgentRoleId(`${id}-metadoc`, manifest.roles);
+    const meta = agentDocumentMetaSchema.parse({
+      id: metadocId,
+      title: roleInput.metadocTitle?.trim() || `${name} Metadoc`,
+      role: id,
+      status: "draft",
+      path: normalizeAgentDocumentPath(
+        roleInput.metadocPath?.trim() || `${AGENT_DOCS_DIR}/roles/${sanitizePathComponent(id, "role")}.md`,
+        metadocId,
+      ),
+      relatedPageIds: [],
+      updatedAt: now,
+      summary: `Metadoc for ${name}.`,
+    });
+    if (documents.some((document) => document.id === meta.id)) {
+      throw new Error(`Agent document already exists: ${meta.id}`);
+    }
+    if (documents.some((document) => document.path.toLowerCase() === meta.path.toLowerCase())) {
+      throw new Error(`Agent document path already exists: ${meta.path}`);
+    }
+    const projectDir = await resolveProjectDirById(projectId, true);
+    const documentPath = resolvePathInsideProjectDir(projectDir, meta.path);
+    await fsp.mkdir(path.dirname(documentPath), { recursive: true });
+    const body = [
+      `# ${meta.title}`,
+      "",
+      "## Role",
+      "",
+      roleInput.title?.trim() || name,
+      "",
+      "## Responsibilities",
+      "",
+      "- Define this role's working rules.",
+      "- Record this role's durable output here.",
+      "",
+      "## Output Log",
+      "",
+    ].join("\n");
+    await fsp.writeFile(documentPath, `${buildAgentDocumentMarkdown(meta, body)}\n`, "utf8");
+    documents = documents.concat(meta).sort((left, right) => left.path.localeCompare(right.path));
+  }
+
+  if (manifest.roles.some((role) => role.metadocId === metadocId)) {
+    throw new Error(`Metadoc is already bound to a role: ${metadocId}`);
+  }
+
+  const role = agentRoleDefinitionSchema.parse({
+    id,
+    name,
+    title: roleInput.title?.trim() || name,
+    metadocId,
+    defaultAutonomy: roleInput.defaultAutonomy,
+    allowedCommandGroups: roleInput.allowedCommandGroups,
+    preferredTools: roleInput.preferredTools,
+    prompt: roleInput.prompt?.trim() || `Operate as ${name}. Read your metadoc first and record durable output there.`,
+    builtIn: false,
+  });
+  return writeAgentDocumentManifestFile({
+    projectId,
+    updatedAt: now,
+    roleSetupVersion: 1,
+    documents,
+    roles: normalizeAgentRolesForDocuments(manifest.roles.concat(role), documents),
+  });
+};
+
+const deleteAgentRoleBinding = async (
+  projectId: string,
+  roleId: string,
+): Promise<AgentDocumentManifest> => {
+  const manifest = await ensureProjectDocuments(projectId);
+  if (!manifest.roles.some((role) => role.id === roleId)) {
+    throw new Error(`Agent role not found: ${roleId}`);
+  }
+  return writeAgentDocumentManifestFile({
+    projectId,
+    updatedAt: new Date().toISOString(),
+    roleSetupVersion: 1,
+    documents: manifest.documents,
+    roles: manifest.roles.filter((role) => role.id !== roleId),
+  });
 };
 
 type AgentDangerLevel = "safe" | "normal" | "destructive";
@@ -557,20 +1258,141 @@ type AgentContextPayload = {
 
 type AgentChatPayload = {
   messages?: Array<{ role: "user" | "assistant"; content: string }>;
+  systemPrompt?: string;
   agentContext?: AgentContextPayload;
+  activeRoleId?: string;
+  activeRole?: AgentRoleDefinition;
+  activeDocumentId?: string | null;
   harness?: {
-    initialToolResults?: Array<{ toolName?: string; result?: unknown }>;
-    dynamicToolResults?: Array<{ toolName?: string; result?: unknown }>;
+    initialToolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
+    dynamicToolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
   };
   canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
   approvedCommandPlan?: AgentCommandPlan | null;
+  requestTrace?: AgentRequestTraceMetadata;
 };
 
-type AgentChatHistory = {
+type AgentRequestTraceStatus = "pending" | "success" | "error" | "timeout";
+
+type AgentRequestTraceDetailValue = string | number | boolean | null;
+
+type AgentRequestTraceMetadata = {
+  requestId: string;
+  parentRequestId?: string;
+  stage: string;
+  createdAt: string;
+};
+
+type AgentRequestTraceEvent = {
+  phase: string;
+  at: string;
+  elapsedMs: number;
+  message?: string;
+  detail?: Record<string, AgentRequestTraceDetailValue>;
+};
+
+type AgentRequestTrace = {
+  requestId: string;
+  parentRequestId?: string;
+  stage: string;
+  status: AgentRequestTraceStatus;
+  provider: "openrouter" | "test" | "unavailable" | null;
+  model: string | null;
+  usedVision: boolean | null;
+  startedAt: string;
+  updatedAt: string;
+  durationMs: number;
+  events: AgentRequestTraceEvent[];
+  error?: string;
+};
+
+type AgentRunStatus =
+  | "queued"
+  | "running"
+  | "waiting_for_tool"
+  | "waiting_for_confirmation"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+type AgentRunStepKind =
+  | "model_request"
+  | "model_resume"
+  | "tool_call"
+  | "tool_result"
+  | "command_plan"
+  | "command_result"
+  | "retry"
+  | "error";
+
+type AgentRunStepStatus = "pending" | "running" | "success" | "error" | "waiting";
+
+type AgentRunStep = {
+  id: string;
+  runId: string;
+  kind: AgentRunStepKind;
+  status: AgentRunStepStatus;
+  operationId: string;
+  summary: string;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  input?: unknown;
+  output?: unknown;
+  trace?: AgentRequestTrace;
+  error?: string;
+};
+
+type AgentRunPublic = {
+  id: string;
   projectId: string;
+  roleId: string;
+  status: AgentRunStatus;
+  createdAt: string;
+  updatedAt: string;
+  modelTurnIndex: number;
+  steps: AgentRunStep[];
+  trace: AgentRequestTrace[];
+  pendingToolCalls: Array<{ toolName: string; input: unknown; reason?: string }>;
+  latestResponse?: unknown;
+  error?: string;
+};
+
+type AgentRunState = AgentRunPublic & {
+  payload: AgentChatPayload;
+  dynamicToolResults: Array<{ toolName: string; input: unknown; result: unknown; createdAt: string }>;
+};
+
+type AgentRunEvent =
+  | { type: "run_snapshot" | "run_updated"; run: AgentRunPublic }
+  | { type: "run_error"; run?: AgentRunPublic; error: string };
+
+type AgentConversationContext = {
+  projectId: string;
+  roleId: string;
   updatedAt: string;
   messages: Array<{ id: string; role: "user" | "assistant"; content: string; createdAt: string }>;
   storagePath?: string;
+};
+
+type AgentConversationContextStore = {
+  projectId: string;
+  updatedAt: string;
+  contexts: AgentConversationContext[];
+};
+
+type AgentDocumentOperationRecord = {
+  operationId: string;
+  documentId: string;
+  contentHash: string;
+  path: string;
+  appliedAt: string;
+};
+
+type AgentDocumentOperationLog = {
+  projectId: string;
+  updatedAt: string;
+  operations: AgentDocumentOperationRecord[];
 };
 
 type OpenRouterModelMetadata = {
@@ -620,6 +1442,322 @@ const filterAllowedAgentModels = (models: OpenRouterModelMetadata[]): AgentAvail
 let agentModelsCache: { fetchedAt: number; models: AgentAvailableModel[] } | null = null;
 const AGENT_MODELS_CACHE_MS = 5 * 60 * 1000;
 let latestAgentDebugSnapshot: unknown = null;
+let agentRequestTraces: AgentRequestTrace[] = [];
+const MAX_AGENT_REQUEST_TRACES = 80;
+
+const createAgentRequestId = () =>
+  `agent-request-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const readTraceMetadata = (value: unknown): AgentRequestTraceMetadata => {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const requestId =
+    typeof record.requestId === "string" && record.requestId.trim().length > 0
+      ? record.requestId.trim()
+      : createAgentRequestId();
+  const stage =
+    typeof record.stage === "string" && record.stage.trim().length > 0
+      ? record.stage.trim()
+      : "agentChat";
+  const createdAt =
+    typeof record.createdAt === "string" && Number.isFinite(Date.parse(record.createdAt))
+      ? record.createdAt
+      : new Date().toISOString();
+  const parentRequestId =
+    typeof record.parentRequestId === "string" && record.parentRequestId.trim().length > 0
+      ? record.parentRequestId.trim()
+      : undefined;
+  return {
+    requestId,
+    ...(parentRequestId ? { parentRequestId } : {}),
+    stage,
+    createdAt,
+  };
+};
+
+const traceElapsedMs = (startedAt: string, at = new Date().toISOString()) => {
+  const start = Date.parse(startedAt);
+  const current = Date.parse(at);
+  if (!Number.isFinite(start) || !Number.isFinite(current)) {
+    return 0;
+  }
+  return Math.max(0, current - start);
+};
+
+const normalizeTraceDetailValue = (value: unknown): AgentRequestTraceDetailValue => {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : String(value);
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (value === undefined) {
+    return null;
+  }
+  return (JSON.stringify(value) ?? String(value)).slice(0, 600);
+};
+
+const normalizeTraceDetail = (detail?: Record<string, unknown>) =>
+  detail
+    ? Object.fromEntries(
+        Object.entries(detail).map(([key, value]) => [key, normalizeTraceDetailValue(value)]),
+      )
+    : undefined;
+
+const upsertAgentRequestTrace = (trace: AgentRequestTrace) => {
+  agentRequestTraces = [
+    trace,
+    ...agentRequestTraces.filter((entry) => entry.requestId !== trace.requestId),
+  ].slice(0, MAX_AGENT_REQUEST_TRACES);
+};
+
+const createAgentRequestTrace = (metadata: AgentRequestTraceMetadata): AgentRequestTrace => {
+  const now = new Date().toISOString();
+  return {
+    requestId: metadata.requestId,
+    ...(metadata.parentRequestId ? { parentRequestId: metadata.parentRequestId } : {}),
+    stage: metadata.stage,
+    status: "pending",
+    provider: null,
+    model: null,
+    usedVision: null,
+    startedAt: metadata.createdAt,
+    updatedAt: now,
+    durationMs: traceElapsedMs(metadata.createdAt, now),
+    events: [],
+  };
+};
+
+const recordAgentTraceEvent = (
+  trace: AgentRequestTrace,
+  phase: string,
+  options: {
+    status?: AgentRequestTraceStatus;
+    message?: string;
+    detail?: Record<string, unknown>;
+    provider?: AgentRequestTrace["provider"];
+    model?: string | null;
+    usedVision?: boolean | null;
+    error?: string;
+  } = {},
+): AgentRequestTrace => {
+  const at = new Date().toISOString();
+  const event: AgentRequestTraceEvent = {
+    phase,
+    at,
+    elapsedMs: traceElapsedMs(trace.startedAt, at),
+    ...(options.message ? { message: options.message } : {}),
+    ...(options.detail ? { detail: normalizeTraceDetail(options.detail) } : {}),
+  };
+  const nextTrace: AgentRequestTrace = {
+    ...trace,
+    status: options.status ?? trace.status,
+    provider: options.provider !== undefined ? options.provider : trace.provider,
+    model: options.model !== undefined ? options.model : trace.model,
+    usedVision: options.usedVision !== undefined ? options.usedVision : trace.usedVision,
+    updatedAt: at,
+    durationMs: traceElapsedMs(trace.startedAt, at),
+    events: [...trace.events, event],
+    ...(options.error ? { error: options.error } : {}),
+  };
+  upsertAgentRequestTrace(nextTrace);
+  return nextTrace;
+};
+
+const attachTraceToResponse = (value: unknown, trace: AgentRequestTrace) => ({
+  ...(value && typeof value === "object" ? value as Record<string, unknown> : {
+    message: "Agent request completed.",
+    pendingCommandPlan: null,
+  }),
+  requestTrace: trace,
+});
+
+const agentRunStates = new Map<string, AgentRunState>();
+const agentRunSubscribers = new Map<string, Set<ServerResponse>>();
+const agentRunPersistQueues = new Map<string, Promise<void>>();
+
+const createAgentRunId = () => `agent-run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const createAgentRunStepId = () => `agent-step-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const toPublicAgentRun = (run: AgentRunState): AgentRunPublic => ({
+  id: run.id,
+  projectId: run.projectId,
+  roleId: run.roleId,
+  status: run.status,
+  createdAt: run.createdAt,
+  updatedAt: run.updatedAt,
+  modelTurnIndex: run.modelTurnIndex,
+  steps: run.steps,
+  trace: run.trace,
+  pendingToolCalls: run.pendingToolCalls,
+  latestResponse: run.latestResponse,
+  ...(run.error ? { error: run.error } : {}),
+});
+
+const getAgentRunProjectDir = async (projectId: string) => {
+  const projectDir = await resolveProjectDirById(projectId, true);
+  const runsDir = resolvePathInsideProjectDir(projectDir, AGENT_RUNS_DIR);
+  await fsp.mkdir(runsDir, { recursive: true });
+  return runsDir;
+};
+
+const getAgentRunFilePath = async (projectId: string, runId: string) => {
+  const runsDir = await getAgentRunProjectDir(projectId);
+  const runDir = resolvePathInsideProjectDir(runsDir, sanitizePathComponent(runId, "run"));
+  await fsp.mkdir(runDir, { recursive: true });
+  return path.join(runDir, AGENT_RUN_FILE);
+};
+
+const persistAgentRunNow = async (run: AgentRunState) => {
+  const runFile = await getAgentRunFilePath(run.projectId, run.id);
+  await writeFileAtomically(runFile, `${JSON.stringify(run, null, 2)}\n`);
+};
+
+const persistAgentRun = async (run: AgentRunState) => {
+  const queueKey = `${run.projectId}:${run.id}`;
+  const previous = agentRunPersistQueues.get(queueKey)?.catch(() => undefined) ?? Promise.resolve();
+  const next = previous.then(() => persistAgentRunNow(run));
+  agentRunPersistQueues.set(queueKey, next);
+  try {
+    await next;
+  } finally {
+    if (agentRunPersistQueues.get(queueKey) === next) {
+      agentRunPersistQueues.delete(queueKey);
+    }
+  }
+};
+
+const readPersistedAgentRun = async (projectId: string, runId: string) => {
+  const runFile = await getAgentRunFilePath(projectId, runId);
+  const raw = await fsp.readFile(runFile, "utf8").catch(() => null);
+  if (!raw) {
+    return null;
+  }
+  return JSON.parse(raw) as AgentRunState;
+};
+
+const writeSseEvent = (res: ServerResponse, event: AgentRunEvent) => {
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+};
+
+const broadcastAgentRun = (run: AgentRunState, type: AgentRunEvent["type"] = "run_updated") => {
+  const subscribers = agentRunSubscribers.get(run.id);
+  if (!subscribers) {
+    return;
+  }
+  const event = { type, run: toPublicAgentRun(run) } as AgentRunEvent;
+  for (const res of subscribers) {
+    writeSseEvent(res, event);
+  }
+};
+
+const saveAndBroadcastAgentRun = async (run: AgentRunState, type: AgentRunEvent["type"] = "run_updated") => {
+  run.updatedAt = new Date().toISOString();
+  agentRunStates.set(run.id, run);
+  await persistAgentRun(run);
+  broadcastAgentRun(run, type);
+};
+
+const getAgentRunState = async (runId: string, projectId?: string | null) => {
+  const memoryRun = agentRunStates.get(runId);
+  if (memoryRun) {
+    return memoryRun;
+  }
+  if (!projectId) {
+    return null;
+  }
+  const persistedRun = await readPersistedAgentRun(projectId, runId);
+  if (persistedRun) {
+    agentRunStates.set(runId, persistedRun);
+  }
+  return persistedRun;
+};
+
+const createAgentRunStep = (
+  runId: string,
+  kind: AgentRunStepKind,
+  summary: string,
+  status: AgentRunStepStatus = "running",
+  input?: unknown,
+): AgentRunStep => {
+  const now = new Date().toISOString();
+  return {
+    id: createAgentRunStepId(),
+    runId,
+    kind,
+    status,
+    operationId: `${kind}:${createAgentRunStepId()}`,
+    summary,
+    createdAt: now,
+    startedAt: now,
+    ...(input !== undefined ? { input } : {}),
+  };
+};
+
+const summarizeModelResponseForRun = (response: unknown) => {
+  const record = response && typeof response === "object" ? response as Record<string, unknown> : {};
+  const requestedToolCalls = Array.isArray(record.requestedToolCalls)
+    ? record.requestedToolCalls as Array<{ toolName?: unknown }>
+    : [];
+  const plan = record.pendingCommandPlan && typeof record.pendingCommandPlan === "object"
+    ? record.pendingCommandPlan as { commands?: unknown[]; requiresConfirmation?: unknown; summary?: unknown }
+    : null;
+  return {
+    messageLength: typeof record.message === "string" ? record.message.length : 0,
+    requestedToolCalls: requestedToolCalls.map((call) => String(call.toolName ?? "unknown")),
+    commandPlan: plan
+      ? {
+          summary: typeof plan.summary === "string" ? plan.summary : "",
+          commandCount: Array.isArray(plan.commands) ? plan.commands.length : 0,
+          requiresConfirmation: plan.requiresConfirmation === true,
+        }
+      : null,
+    warning: typeof record.warning === "string" ? record.warning : null,
+    usedVision: typeof record.usedVision === "boolean" ? record.usedVision : null,
+  };
+};
+
+const summarizeToolResultsForRun = (
+  toolResults: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>,
+) =>
+  toolResults.map((result) => {
+    const resultRecord =
+      result.result && typeof result.result === "object" && !Array.isArray(result.result)
+        ? result.result as Record<string, unknown>
+        : {};
+    return {
+      toolName: result.toolName ?? "unknown",
+      createdAt: result.createdAt ?? null,
+      resultKeys: Object.keys(resultRecord).slice(0, 20),
+      contentLength:
+        typeof resultRecord.content === "string"
+          ? resultRecord.content.length
+          : typeof (resultRecord.document as { contentLength?: unknown } | undefined)?.contentLength === "number"
+            ? (resultRecord.document as { contentLength: number }).contentLength
+      : null,
+    };
+  });
+
+const createRetryStepsFromTrace = (runId: string, trace: AgentRequestTrace): AgentRunStep[] =>
+  trace.events
+    .filter((event) => event.phase === "openrouter_retry_started")
+    .map((event) => ({
+      ...createAgentRunStep(
+        runId,
+        "retry",
+        event.message ?? "Retrying model request",
+        "success",
+        event.detail ?? {},
+      ),
+      createdAt: event.at,
+      startedAt: event.at,
+      finishedAt: event.at,
+    }));
 
 const fetchAllowedAgentModels = async (): Promise<AgentAvailableModel[]> => {
   const now = Date.now();
@@ -712,31 +1850,6 @@ const AGENT_PREVIEW_RENDER_MAX_EDGE = 768;
 const AGENT_DETAIL_RENDER_MAX_EDGE = 1280;
 const MAX_AGENT_IMAGE_ATTACHMENTS = 8;
 
-const AGENT_SYSTEM_PROMPT = [
-  "You are MangaMaker's built-in creator assistance agent.",
-  "Manga creation is the human creator's work; you assist with inspection, suggestions, and bounded editor operations.",
-  "You operate through a coding-agent-style harness. The initial context is intentionally lightweight: project summary, page index, current-page marker, current selection summary, and tool catalog.",
-  "Do not assume all resources were included up front. Decide which project details you need, then request tools such as searchProject, readPage, readPages, listImageAssets, renderPage, renderPages, or listCommandManifest.",
-  "All project pages are readable on demand through the harness. The page the creator is currently viewing is marked isCurrent=true.",
-  "Do not pretend to have seen a page, asset, or render unless it is present in tool results or attached as vision input.",
-  "For broad questions, search first. For page-specific questions, read that page. For several pages, prefer readPages or renderPages in one request instead of one page per round. For visual judgment, render the relevant page or a bounded sample of pages. For edits, read listCommandManifest before returning a command plan.",
-  "Visual budget rule: do not request screenshots unless structured tool results are insufficient for the user's question.",
-  "Use the cheapest visual path that can answer the question: readPage/readPages first; renderPages with detail=\"preview\" for small page samples; renderPage with crop for local inspection; detail=\"detail\" only for small text, faces, or fine line art.",
-  "Do not request high-detail full-page renders for every page. Prefer one bounded sample or a cropped region, and ask the creator to narrow scope when the project is too large.",
-  "Image format alone is not a reliable token reducer. Reduce pixels, crop to the relevant region, and avoid sending images that are not needed.",
-  "Do not request the same toolName and input again if that tool result is already present in the harness.",
-  "If the harness reports toolBudget.exhausted=true or remainingToolCalls=0, stop requesting tools and answer from the gathered evidence. State the limitation if the evidence is incomplete.",
-  "If you need to judge a page's composed visual result, request a tool call first: {\"message\":\"I need to inspect the rendered page.\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\",\"detail\":\"preview\"},\"reason\":\"Inspect the composed page render\"}],\"pendingCommandPlan\":null}.",
-  "After renderPage returns, compare the screenshot with that page's structured resources and then answer or propose a command plan.",
-  "You can modify the project only by returning command plans that use command ids and payloads from the command manifest.",
-  "Never claim an edit is complete unless it has been executed by the app.",
-  "Do not present yourself as the author, director, artist, or end-to-end creator of the comic.",
-  "Destructive or batch operations must be returned as a pending plan that requires confirmation.",
-  "Command payloads must match the manifest schema.",
-  "Keep natural-language responses concise.",
-  "Return JSON only: {\"message\":\"...\",\"requestedToolCalls\":[{\"toolName\":\"renderPage\",\"input\":{\"pageId\":\"...\",\"detail\":\"preview\"},\"reason\":\"...\"}],\"pendingCommandPlan\":null|{\"summary\":\"...\",\"commands\":[{\"commandId\":\"...\",\"payload\":{},\"reason\":\"...\"}],\"requiresConfirmation\":true|false}}.",
-].join("\n");
-
 const TEST_AGENT_MODELS: AgentAvailableModel[] = [
   {
     id: "moonshotai/kimi-k2.6",
@@ -768,6 +1881,55 @@ const redactPromptValue = (value: unknown): unknown => {
     );
   }
   return value;
+};
+
+const truncatePromptString = (value: string, maxLength: number) =>
+  value.length > maxLength
+    ? `${value.slice(0, maxLength)}\n[truncated ${value.length - maxLength} characters]`
+    : value;
+
+const compactPromptValue = (value: unknown, depth = 0): unknown => {
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/")) {
+      return "[redacted inline image data; attached separately only when vision is enabled]";
+    }
+    return truncatePromptString(value, depth <= 2 ? 8000 : 3000);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => compactPromptValue(entry, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => {
+        if (key === "dataUrl" && typeof entry === "string" && entry) {
+          return [key, "[attached image redacted from prompt text]"];
+        }
+        if (key === "content" && typeof entry === "string") {
+          return [key, truncatePromptString(entry, 6000)];
+        }
+        return [key, compactPromptValue(entry, depth + 1)];
+      }),
+    );
+  }
+  return value;
+};
+
+const compactHarnessForPrompt = (harness: AgentChatPayload["harness"] | undefined) => {
+  if (!harness) {
+    return null;
+  }
+  const initialToolResults = harness.initialToolResults ?? [];
+  const dynamicToolResults = harness.dynamicToolResults ?? [];
+  return compactPromptValue({
+    ...harness,
+    initialToolResults: initialToolResults.map((entry) => compactPromptValue(entry)),
+    dynamicToolResults: dynamicToolResults.slice(-12).map((entry) => compactPromptValue(entry)),
+    compactedForPrompt: {
+      dynamicToolResultsIncluded: Math.min(dynamicToolResults.length, 12),
+      dynamicToolResultsTotal: dynamicToolResults.length,
+      policy: "Full data stays in the persisted run and browser harness. Prompt text includes only compacted recent tool results; request tools again only when needed.",
+    },
+  });
 };
 
 const compactPageForPrompt = (page: NonNullable<AgentContextPayload["pages"]>[number]) => ({
@@ -815,6 +1977,9 @@ const compactAgentContextForPrompt = (context: AgentContextPayload | undefined) 
       imageAssetsAvailableVia: "listImageAssets",
       pageRendersAvailableVia: "renderPage",
       multiplePageRendersAvailableVia: "renderPages",
+      rolesAvailableVia: "listRoles",
+      documentsAvailableVia: "listDocuments/readDocument/searchDocuments",
+      documentsWritableVia: "writeDocument",
       commandManifestAvailableVia: "listCommandManifest",
       currentCanvasSnapshotAttachedInitially: false,
       visionTokenPolicy: {
@@ -872,14 +2037,6 @@ const getRenderedPageToolResults = (payload: AgentChatPayload) =>
     (entry) => entry.toolName === "renderPage" || entry.toolName === "renderPages",
   );
 
-const hasExhaustedToolBudget = (payload: AgentChatPayload) =>
-  getHarnessToolResults(payload.harness).some((entry) => {
-    if (entry.toolName !== "toolBudget" || !entry.result || typeof entry.result !== "object") {
-      return false;
-    }
-    return (entry.result as { exhausted?: unknown }).exhausted === true;
-  });
-
 const getCurrentPageId = (context: AgentContextPayload) =>
   context.pages?.find((page) => page.isCurrent || page.viewing)?.id ??
   context.selectedPageId ??
@@ -915,15 +2072,10 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   const normalized = latest.toLowerCase();
   const hasVisionInput = getHarnessImageDataUrls(payload.harness).length > 0;
   const renderedPageResults = getRenderedPageToolResults(payload);
-
-  if (hasExhaustedToolBudget(payload)) {
-    return {
-      message: "I reached the harness tool budget, so I am answering from the pages and resources already inspected.",
-      pendingCommandPlan: null,
-      usedVision: hasVisionInput,
-      warning: "Tool budget reached; answer is based on gathered context only.",
-    };
-  }
+  const harnessResults = getHarnessToolResults(payload.harness);
+  const hasDocumentList = harnessResults.some((entry) => entry.toolName === "listDocuments");
+  const hasDocumentRead = harnessResults.some((entry) => entry.toolName === "readDocument");
+  const hasDocumentWrite = harnessResults.some((entry) => entry.toolName === "writeDocument");
 
   if (normalized.includes("tool budget loop")) {
     return {
@@ -935,6 +2087,70 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
           reason: "Simulate a model that keeps requesting tools.",
         },
       ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if ((normalized.includes("document") || normalized.includes("docs") || normalized.includes("production plan")) && !hasDocumentList) {
+    return {
+      message: "I need to list the durable project documents before answering.",
+      requestedToolCalls: [
+        {
+          toolName: "listDocuments",
+          input: {},
+          reason: "Inspect available Markdown production documents.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (normalized.includes("production plan") && hasDocumentList && !hasDocumentRead) {
+    return {
+      message: "I need to read the production plan document.",
+      requestedToolCalls: [
+        {
+          toolName: "readDocument",
+          input: { documentId: "production-plan" },
+          reason: "Read durable producer-owned project direction.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (normalized.includes("write document") && !hasDocumentWrite) {
+    return {
+      message: "I will update the production plan document.",
+      requestedToolCalls: [
+        {
+          toolName: "writeDocument",
+          input: {
+            operationId: "test-agent-write-production-plan",
+            id: "production-plan",
+            title: "Production Plan",
+            role: "producer",
+            status: "draft",
+            path: "docs/production/production-plan.md",
+            summary: "Updated by the test Agent.",
+            content: "# Production Plan\n\n## Test Update\n\nThe test Agent can write durable Markdown documents.\n",
+          },
+          reason: "Persist role output into a project Markdown document.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (hasDocumentRead || hasDocumentWrite) {
+    return {
+      message: hasDocumentWrite
+        ? "I updated the durable Markdown document."
+        : "I read the durable Markdown document and can use it as production context.",
       pendingCommandPlan: null,
       usedVision: hasVisionInput,
     };
@@ -1197,10 +2413,24 @@ const parseModelJson = (content: string) => {
 };
 
 const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolean) => {
+  const systemPrompt = [
+    normalizeAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT),
+    AGENT_PROTOCOL_SYSTEM_PROMPT,
+  ].join("\n\n");
   const harnessText = payload.harness
-    ? `\n\nAgent harness JSON:\n${JSON.stringify(redactPromptValue(payload.harness), null, 2)}`
+    ? `\n\nAgent harness JSON:\n${JSON.stringify(compactHarnessForPrompt(payload.harness), null, 2)}`
     : "";
-  const contextText = `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext), null, 2)}${harnessText}`;
+  const activeRole = payload.activeRole
+    ? agentRoleDefinitionSchema.parse(payload.activeRole)
+    : getAgentRole(payload.activeRoleId);
+  const contextText = [
+    `Active Agent role: ${activeRole.name} (${activeRole.title})`,
+    `Active role metadoc id: ${activeRole.metadocId}`,
+    `Role default autonomy: ${activeRole.defaultAutonomy}`,
+    `Role instruction: ${activeRole.prompt}`,
+    `Active document id: ${payload.activeDocumentId ?? "none"}`,
+    `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext), null, 2)}${harnessText}`,
+  ].join("\n\n");
   const imageUrls = getHarnessImageDataUrls(payload.harness);
   const contextContent =
     includeImage && imageUrls.length > 0
@@ -1210,7 +2440,7 @@ const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolea
         ]
       : contextText;
   return [
-    { role: "system", content: AGENT_SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     { role: "user", content: contextContent },
     ...(payload.messages ?? []).map((message) => ({
       role: message.role,
@@ -1219,48 +2449,248 @@ const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolea
   ];
 };
 
-const callOpenRouter = async (payload: AgentChatPayload, includeImage: boolean) => {
+class OpenRouterRetryableError extends Error {
+  readonly statusCode?: number;
+
+  constructor(message: string, statusCode?: number) {
+    super(message);
+    this.name = "OpenRouterRetryableError";
+    this.statusCode = statusCode;
+  }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableOpenRouterError = (error: unknown) => {
+  if (error instanceof OpenRouterRetryableError || error instanceof OpenRouterNonJsonResponseError) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("terminated") ||
+    message.includes("timeout") ||
+    message.includes("fetch failed") ||
+    message.includes("econnreset") ||
+    message.includes("socket") ||
+    message.includes("network")
+  );
+};
+
+const callOpenRouter = async (
+  payload: AgentChatPayload,
+  includeImage: boolean,
+  requestTrace: AgentRequestTrace,
+): Promise<{ response: unknown; requestTrace: AgentRequestTrace }> => {
+  let trace = requestTrace;
   const config = await getCurrentAgentConfig();
   if (!config.enabled || config.provider !== "openrouter" || !config.model) {
     throw new Error(config.reason ?? "Agent is not configured.");
   }
-  const response = await fetch(OPENROUTER_CHAT_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY?.trim() ?? ""}`,
-      "HTTP-Referer": "http://localhost",
-      "X-Title": "MangaMaker Agent",
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: buildOpenRouterMessages(payload, includeImage),
-    }),
-  });
-  const raw = await response.text();
-  if (!response.ok) {
-    throw new Error(`OpenRouter request failed (${response.status}): ${raw.slice(0, 500)}`);
-  }
-  let parsed: { choices?: Array<{ message?: { content?: string } }> };
-  try {
-    parsed = JSON.parse(raw) as typeof parsed;
-  } catch {
-    throw new Error("OpenRouter returned invalid JSON.");
-  }
-  const content = parsed.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("OpenRouter response did not include assistant content.");
-  }
-  return {
-    ...(parseModelJson(content) as Record<string, unknown>),
+  trace = recordAgentTraceEvent(trace, "agent_config_checked", {
+    provider: "openrouter",
+    model: config.model,
     usedVision: includeImage,
-  } as {
-    message?: unknown;
-    pendingCommandPlan?: unknown;
-    usedVision?: boolean;
+    detail: {
+      visionEnabled: config.visionEnabled,
+      includeImage,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+    },
+  });
+  const sendRequest = async (provider: OpenRouterProviderRouting, retryWarning?: string) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, OPENROUTER_REQUEST_TIMEOUT_MS);
+    let response: Awaited<ReturnType<typeof fetch>>;
+    let raw = "";
+    try {
+      trace = recordAgentTraceEvent(trace, "openrouter_request_started", {
+        detail: {
+          model: config.model,
+          providerRouting: provider,
+          includeImage,
+          imageAttachmentCount: getHarnessImageDataUrls(payload.harness).length,
+          messageCount: payload.messages?.length ?? 0,
+          initialToolResults: payload.harness?.initialToolResults?.length ?? 0,
+          dynamicToolResults: payload.harness?.dynamicToolResults?.length ?? 0,
+        },
+      });
+      response = await fetch(OPENROUTER_CHAT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY?.trim() ?? ""}`,
+          "HTTP-Referer": "http://localhost",
+          "X-Title": "MangaMaker Agent",
+        },
+        body: JSON.stringify({
+          model: config.model,
+          provider,
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+          messages: buildOpenRouterMessages(payload, includeImage),
+        }),
+        signal: controller.signal,
+      });
+      trace = recordAgentTraceEvent(trace, "openrouter_headers_received", {
+        detail: {
+          status: response.status,
+          ok: response.ok,
+          contentType: response.headers.get("content-type"),
+          requestId:
+            response.headers.get("x-request-id") ??
+            response.headers.get("x-openrouter-request-id") ??
+            response.headers.get("cf-ray"),
+        },
+      });
+      raw = await response.text();
+      trace = recordAgentTraceEvent(trace, "openrouter_body_received", {
+        detail: {
+          status: response.status,
+          ok: response.ok,
+          bodyLength: raw.length,
+        },
+      });
+    } catch (error) {
+      if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+        trace = recordAgentTraceEvent(trace, "openrouter_timeout", {
+          status: "timeout",
+          message: `OpenRouter request timed out after ${Math.round(OPENROUTER_REQUEST_TIMEOUT_MS / 1000)} seconds.`,
+          error: `OpenRouter request timed out after ${Math.round(OPENROUTER_REQUEST_TIMEOUT_MS / 1000)} seconds.`,
+        });
+        throw new OpenRouterRetryableError(`OpenRouter request timed out after ${Math.round(OPENROUTER_REQUEST_TIMEOUT_MS / 1000)} seconds.`);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      trace = recordAgentTraceEvent(trace, "openrouter_request_failed", {
+        status: "error",
+        message,
+        error: message,
+      });
+      if (isRetryableOpenRouterError(error)) {
+        throw new OpenRouterRetryableError(message);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!response.ok) {
+      const errorMessage = `OpenRouter request failed (${response.status}): ${raw.slice(0, 500)}`;
+      trace = recordAgentTraceEvent(trace, "openrouter_http_error", {
+        status: "error",
+        message: `OpenRouter request failed (${response.status}).`,
+        error: errorMessage,
+      });
+      if (response.status === 408 || response.status === 429 || response.status >= 500) {
+        throw new OpenRouterRetryableError(errorMessage, response.status);
+      }
+      throw new Error(errorMessage);
+    }
+    let parsed: unknown;
+    try {
+      parsed = parseOpenRouterResponseJson(raw, {
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+      });
+      trace = recordAgentTraceEvent(trace, "openrouter_json_parsed");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      trace = recordAgentTraceEvent(trace, "openrouter_json_parse_failed", {
+        status: "error",
+        message,
+        error: message,
+      });
+      throw error;
+    }
+    const content = extractOpenRouterAssistantContent(parsed);
+    trace = recordAgentTraceEvent(trace, "openrouter_assistant_content_extracted", {
+      detail: {
+        contentLength: content.length,
+      },
+    });
+    let parsedModelJson: Record<string, unknown>;
+    try {
+      parsedModelJson = parseModelJson(content) as Record<string, unknown>;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      trace = recordAgentTraceEvent(trace, "model_json_parse_failed", {
+        status: "error",
+        message,
+        error: message,
+        detail: {
+          contentPreview: content.slice(0, 400),
+        },
+      });
+      throw new OpenRouterRetryableError(`OpenRouter returned invalid Agent JSON: ${message}`);
+    }
+    const modelResponse = {
+      ...parsedModelJson,
+      usedVision: includeImage,
+      ...(retryWarning ? { warning: retryWarning } : {}),
+    } as {
+      message?: unknown;
+      pendingCommandPlan?: unknown;
+      usedVision?: boolean;
+      warning?: unknown;
+    };
+    trace = recordAgentTraceEvent(trace, "model_json_parsed", {
+      detail: {
+        hasRequestedToolCalls: Array.isArray((modelResponse as { requestedToolCalls?: unknown }).requestedToolCalls),
+        hasPendingCommandPlan: Boolean((modelResponse as { pendingCommandPlan?: unknown }).pendingCommandPlan),
+      },
+    });
+    return modelResponse;
   };
+
+  const preferredProvider = getOpenRouterProviderRouting(config.model);
+  const fallbackProvider = getOpenRouterFallbackProviderRouting(config.model);
+  const attempts: Array<{ provider: OpenRouterProviderRouting; warning?: string }> = [
+    { provider: preferredProvider },
+    {
+      provider: fallbackProvider,
+      warning: "MangaMaker retried the request with fallback OpenRouter provider routing after a transient provider failure.",
+    },
+    {
+      provider: fallbackProvider,
+      warning: "MangaMaker retried the request with fallback OpenRouter provider routing after repeated transient provider failures.",
+    },
+  ];
+  let lastError: unknown = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
+    if (index > 0) {
+      trace = recordAgentTraceEvent(trace, "openrouter_retry_started", {
+        status: "pending",
+        message: attempt.warning,
+        detail: {
+          attempt: index + 1,
+          maxAttempts: attempts.length,
+          providerRouting: attempt.provider,
+        },
+      });
+    }
+    try {
+      return {
+        response: await sendRequest(attempt.provider, attempt.warning),
+        requestTrace: trace,
+      };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableOpenRouterError(error) || index === attempts.length - 1) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      trace = recordAgentTraceEvent(trace, "openrouter_retry_scheduled", {
+        status: "pending",
+        message,
+        detail: {
+          attempt: index + 1,
+          nextAttempt: index + 2,
+        },
+      });
+      await sleep(1000 * (index + 1));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "OpenRouter request failed."));
 };
 
 type AgentSchemaLoader = () => Promise<{
@@ -1277,6 +2707,200 @@ const createDynamicAgentSchemaLoader = (): AgentSchemaLoader => async () => {
 const normalizeAgentModelResponse = async (value: unknown, loadAgentSchema: AgentSchemaLoader) => {
   const module = await loadAgentSchema();
   return module.validateAgentChatResponse(value);
+};
+
+const executeAgentModelRequest = async (
+  payload: AgentChatPayload,
+  requestTrace: AgentRequestTrace,
+  loadAgentSchema: AgentSchemaLoader,
+): Promise<{ response: unknown; requestTrace: AgentRequestTrace }> => {
+  let trace = requestTrace;
+  if (AGENT_TEST_MODE) {
+    trace = recordAgentTraceEvent(trace, "test_agent_response_started", {
+      provider: "test",
+      model: "mangamaker-test-agent",
+      usedVision: getHarnessImageDataUrls(payload.harness).length > 0,
+    });
+    const normalized = await normalizeAgentModelResponse(createTestAgentResponse(payload), loadAgentSchema);
+    trace = recordAgentTraceEvent(trace, "server_response_ready", {
+      status: "success",
+    });
+    return {
+      response: attachTraceToResponse(normalized, trace),
+      requestTrace: trace,
+    };
+  }
+
+  const config = await getCurrentAgentConfig();
+  if (!config.enabled) {
+    const message = config.reason ?? "Agent is not configured.";
+    trace = recordAgentTraceEvent(trace, "agent_config_unavailable", {
+      status: "error",
+      provider: "unavailable",
+      model: config.model,
+      message,
+      error: message,
+    });
+    return {
+      response: attachTraceToResponse(
+        { message: "Agent unavailable.", error: message, pendingCommandPlan: null },
+        trace,
+      ),
+      requestTrace: trace,
+    };
+  }
+
+  const hasHarnessImage = getHarnessImageDataUrls(payload.harness).length > 0;
+  const openRouterResult = await callOpenRouter(
+    payload,
+    hasHarnessImage && config.visionEnabled,
+    trace,
+  );
+  trace = openRouterResult.requestTrace;
+  const normalized = await normalizeAgentModelResponse(openRouterResult.response, loadAgentSchema);
+  trace = recordAgentTraceEvent(trace, "response_schema_validated");
+  trace = recordAgentTraceEvent(trace, "server_response_ready", {
+    status: "success",
+  });
+  return {
+    response: attachTraceToResponse(normalized, trace),
+    requestTrace: trace,
+  };
+};
+
+const startAgentRunModelStep = (
+  runId: string,
+  kind: "model_request" | "model_resume",
+  loadAgentSchema: AgentSchemaLoader,
+) => {
+  void (async () => {
+    const run = await getAgentRunState(runId);
+    if (!run || run.status === "cancelled") {
+      return;
+    }
+    const step = createAgentRunStep(
+      run.id,
+      kind,
+      kind === "model_request" ? "Sending model request" : "Resuming model after tool result",
+      "running",
+      {
+        messageCount: run.payload.messages?.length ?? 0,
+        initialToolResults: run.payload.harness?.initialToolResults?.length ?? 0,
+        dynamicToolResults: run.payload.harness?.dynamicToolResults?.length ?? 0,
+      },
+    );
+    run.steps.push(step);
+    run.status = "running";
+    run.pendingToolCalls = [];
+    await saveAndBroadcastAgentRun(run);
+
+    let trace = recordAgentTraceEvent(
+      createAgentRequestTrace({
+        requestId: `${run.id}:${step.id}`,
+        stage: kind,
+        createdAt: step.startedAt ?? new Date().toISOString(),
+      }),
+      "server_received",
+      {
+        detail: {
+          route: `${AGENT_API_BASE}/runs`,
+          runId: run.id,
+          stepId: step.id,
+          kind,
+          messageCount: run.payload.messages?.length ?? 0,
+          hasHarness: Boolean(run.payload.harness),
+        },
+      },
+    );
+    trace = recordAgentTraceEvent(
+      trace,
+      "server_run_model_step_started",
+      {
+        detail: {
+          runId: run.id,
+          stepId: step.id,
+          kind,
+        },
+      },
+    );
+
+    try {
+      const result = await executeAgentModelRequest(run.payload, trace, loadAgentSchema);
+      trace = result.requestTrace;
+      const response = result.response as {
+        requestedToolCalls?: Array<{ toolName: string; input: unknown; reason?: string }>;
+        pendingCommandPlan?: { summary?: string; commands?: unknown[]; requiresConfirmation?: boolean } | null;
+        requestTrace?: AgentRequestTrace;
+      };
+      step.status = "success";
+      step.finishedAt = new Date().toISOString();
+      step.output = summarizeModelResponseForRun(response);
+      step.trace = trace;
+      run.steps.push(...createRetryStepsFromTrace(run.id, trace));
+      run.trace = [trace, ...run.trace.filter((entry) => entry.requestId !== trace.requestId)].slice(0, 80);
+      run.latestResponse = response;
+      run.modelTurnIndex += 1;
+
+      const requestedToolCalls = Array.isArray(response.requestedToolCalls)
+        ? response.requestedToolCalls
+        : [];
+      if (requestedToolCalls.length > 0) {
+        run.pendingToolCalls = requestedToolCalls;
+        run.status = "waiting_for_tool";
+        run.steps.push({
+          ...createAgentRunStep(
+            run.id,
+            "tool_call",
+            `Waiting for ${requestedToolCalls.length} tool call(s)`,
+            "waiting",
+            {
+              toolCalls: requestedToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
+            },
+          ),
+          finishedAt: new Date().toISOString(),
+        });
+      } else if (response.pendingCommandPlan) {
+        const requiresConfirmation = response.pendingCommandPlan.requiresConfirmation === true;
+        run.pendingToolCalls = [];
+        run.status = requiresConfirmation ? "waiting_for_confirmation" : "completed";
+        run.steps.push({
+          ...createAgentRunStep(
+            run.id,
+            "command_plan",
+            response.pendingCommandPlan.summary || "Command plan ready",
+            requiresConfirmation ? "waiting" : "success",
+            {
+              commandCount: Array.isArray(response.pendingCommandPlan.commands)
+                ? response.pendingCommandPlan.commands.length
+                : 0,
+              requiresConfirmation,
+            },
+          ),
+          finishedAt: new Date().toISOString(),
+        });
+      } else {
+        run.pendingToolCalls = [];
+        run.status = "completed";
+      }
+      await saveAndBroadcastAgentRun(run);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      step.status = "error";
+      step.error = message;
+      step.finishedAt = new Date().toISOString();
+      step.trace = trace;
+      run.steps.push(...createRetryStepsFromTrace(run.id, trace));
+      run.trace = [trace, ...run.trace.filter((entry) => entry.requestId !== trace.requestId)].slice(0, 80);
+      run.status = "failed";
+      run.error = message;
+      run.steps.push({
+        ...createAgentRunStep(run.id, "error", message, "error"),
+        finishedAt: new Date().toISOString(),
+        error: message,
+      });
+      await saveAndBroadcastAgentRun(run);
+    }
+  })();
 };
 
 const attachWebAgentMiddleware = (
@@ -1307,23 +2931,115 @@ const attachWebAgentMiddleware = (
         json(res, 200, latestAgentDebugSnapshot ?? { mounted: false, updatedAt: null });
         return;
       }
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/traces`) {
+        const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") ?? "40") || 40));
+        json(res, 200, {
+          updatedAt: new Date().toISOString(),
+          traces: agentRequestTraces.slice(0, limit),
+        });
+        return;
+      }
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/trace`) {
+        const requestId = url.searchParams.get("requestId")?.trim();
+        const trace = requestId
+          ? agentRequestTraces.find((entry) => entry.requestId === requestId) ?? null
+          : agentRequestTraces[0] ?? null;
+        json(res, trace ? 200 : 404, trace ?? { error: "Agent request trace not found." });
+        return;
+      }
       if (method === "POST" && pathname === `${AGENT_API_BASE}/debug`) {
         latestAgentDebugSnapshot = await readJsonBody<unknown>(req);
         json(res, 200, { ok: true });
         return;
       }
-      if (pathname === `${AGENT_API_BASE}/history`) {
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/documents`) {
         const projectId = url.searchParams.get("projectId")?.trim();
+        if (!projectId) {
+          json(res, 400, { error: "projectId query parameter is required." });
+          return;
+        }
+        json(res, 200, await ensureProjectDocuments(projectId));
+        return;
+      }
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/document`) {
+        const projectId = url.searchParams.get("projectId")?.trim();
+        const documentId = url.searchParams.get("documentId")?.trim();
+        if (!projectId || !documentId) {
+          json(res, 400, { error: "projectId and documentId query parameters are required." });
+          return;
+        }
+        json(res, 200, await readAgentDocumentFile(projectId, documentId));
+        return;
+      }
+      if (method === "POST" && pathname === `${AGENT_API_BASE}/document`) {
+        const body = await readJsonBody<{ projectId?: unknown; document?: unknown }>(req);
+        if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
+          json(res, 400, { error: "projectId is required." });
+          return;
+        }
+        if (!body.document || typeof body.document !== "object") {
+          json(res, 400, { error: "document object is required." });
+          return;
+        }
+        json(
+          res,
+          200,
+          await writeAgentDocumentFile(
+            body.projectId.trim(),
+            body.document as Partial<AgentDocumentMeta> & { content: string; operationId?: string },
+          ),
+        );
+        return;
+      }
+      if (method === "DELETE" && pathname === `${AGENT_API_BASE}/document`) {
+        const projectId = url.searchParams.get("projectId")?.trim();
+        const documentId = url.searchParams.get("documentId")?.trim();
+        if (!projectId || !documentId) {
+          json(res, 400, { error: "projectId and documentId query parameters are required." });
+          return;
+        }
+        json(res, 200, await deleteAgentDocumentFile(projectId, documentId));
+        return;
+      }
+      if (method === "POST" && pathname === `${AGENT_API_BASE}/role`) {
+        const body = await readJsonBody<{ projectId?: unknown; role?: unknown }>(req);
+        if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
+          json(res, 400, { error: "projectId is required." });
+          return;
+        }
+        if (!body.role || typeof body.role !== "object") {
+          json(res, 400, { error: "role object is required." });
+          return;
+        }
+        json(res, 200, await createAgentRoleWithMetadocFile(body.projectId.trim(), body.role as AgentRoleInput));
+        return;
+      }
+      if (method === "DELETE" && pathname === `${AGENT_API_BASE}/role`) {
+        const projectId = url.searchParams.get("projectId")?.trim();
+        const roleId = url.searchParams.get("roleId")?.trim();
+        if (!projectId || !roleId) {
+          json(res, 400, { error: "projectId and roleId query parameters are required." });
+          return;
+        }
+        json(res, 200, await deleteAgentRoleBinding(projectId, roleId));
+        return;
+      }
+      if (
+        pathname === `${AGENT_API_BASE}/conversation-context` ||
+        pathname === `${AGENT_API_BASE}/history`
+      ) {
+        const projectId = url.searchParams.get("projectId")?.trim();
+        const roleId = url.searchParams.get("roleId")?.trim() || DEFAULT_AGENT_CONVERSATION_ROLE_ID;
         if (method === "GET") {
           if (!projectId) {
             json(res, 400, { error: "projectId query parameter is required." });
             return;
           }
-          json(res, 200, await readAgentChatHistoryFile(projectId));
+          json(res, 200, await readAgentConversationContextFile(projectId, roleId));
           return;
         }
         if (method === "POST") {
-          json(res, 200, await writeAgentChatHistoryFile(await readJsonBody<AgentChatHistory>(req)));
+          json(res, 200, await writeAgentConversationContextFile(await readJsonBody<AgentConversationContext>(req)));
           return;
         }
         if (method === "DELETE") {
@@ -1331,8 +3047,144 @@ const attachWebAgentMiddleware = (
             json(res, 400, { error: "projectId query parameter is required." });
             return;
           }
-          await deleteAgentChatHistoryFile(projectId);
+          await deleteAgentConversationContextFile(projectId, roleId);
           json(res, 200, { ok: true });
+          return;
+        }
+      }
+      if (method === "POST" && pathname === `${AGENT_API_BASE}/runs`) {
+        const payload = await readJsonBody<AgentChatPayload>(req);
+        const now = new Date().toISOString();
+        const projectId =
+          typeof payload.agentContext?.project?.id === "string" && payload.agentContext.project.id.trim().length > 0
+            ? payload.agentContext.project.id.trim()
+            : "unknown-project";
+        const roleId =
+          typeof payload.activeRoleId === "string" && payload.activeRoleId.trim().length > 0
+            ? payload.activeRoleId.trim()
+            : DEFAULT_AGENT_CONVERSATION_ROLE_ID;
+        const run: AgentRunState = {
+          id: createAgentRunId(),
+          projectId,
+          roleId,
+          status: "queued",
+          createdAt: now,
+          updatedAt: now,
+          modelTurnIndex: 0,
+          steps: [],
+          trace: [],
+          pendingToolCalls: [],
+          payload,
+          dynamicToolResults: (payload.harness?.dynamicToolResults ?? []).map((entry) => ({
+            toolName: String(entry.toolName ?? "unknown"),
+            input: entry.input,
+            result: entry.result,
+            createdAt: entry.createdAt ?? now,
+          })),
+        };
+        await saveAndBroadcastAgentRun(run, "run_snapshot");
+        startAgentRunModelStep(run.id, "model_request", loadAgentSchema);
+        json(res, 202, toPublicAgentRun(run));
+        return;
+      }
+      const runMatch = pathname.match(new RegExp(`^${AGENT_API_BASE.replace(/\//g, "\\/")}\\/runs\\/([^/]+)(?:\\/([^/]+))?$`));
+      if (runMatch) {
+        const runId = decodeURIComponent(runMatch[1] ?? "");
+        const runAction = runMatch[2] ? decodeURIComponent(runMatch[2]) : "";
+        const projectId = url.searchParams.get("projectId")?.trim() || null;
+        if (method === "GET" && !runAction) {
+          const run = await getAgentRunState(runId, projectId);
+          json(res, run ? 200 : 404, run ? toPublicAgentRun(run) : { error: "Agent run not found." });
+          return;
+        }
+        if (method === "GET" && runAction === "events") {
+          const run = await getAgentRunState(runId, projectId);
+          if (!run) {
+            json(res, 404, { error: "Agent run not found." });
+            return;
+          }
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache, no-transform");
+          res.setHeader("Connection", "keep-alive");
+          res.write(": connected\n\n");
+          writeSseEvent(res, { type: "run_snapshot", run: toPublicAgentRun(run) });
+          const subscribers = agentRunSubscribers.get(run.id) ?? new Set<ServerResponse>();
+          subscribers.add(res);
+          agentRunSubscribers.set(run.id, subscribers);
+          const keepAlive = setInterval(() => {
+            res.write(": keepalive\n\n");
+          }, 25000);
+          const cleanup = () => {
+            clearInterval(keepAlive);
+            const current = agentRunSubscribers.get(run.id);
+            current?.delete(res);
+            if (current && current.size === 0) {
+              agentRunSubscribers.delete(run.id);
+            }
+          };
+          req.on("close", cleanup);
+          res.on("close", cleanup);
+          return;
+        }
+        if (method === "POST" && runAction === "tool-results") {
+          const run = await getAgentRunState(runId, projectId);
+          if (!run) {
+            json(res, 404, { error: "Agent run not found." });
+            return;
+          }
+          if (run.status === "cancelled") {
+            json(res, 409, { error: "Agent run has been cancelled." });
+            return;
+          }
+          const body = await readJsonBody<{
+            harness?: AgentChatPayload["harness"];
+            toolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
+            dynamicToolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
+          }>(req);
+          const now = new Date().toISOString();
+          const toolResults = (body.toolResults ?? []).map((entry) => ({
+            toolName: String(entry.toolName ?? "unknown"),
+            input: entry.input,
+            result: entry.result,
+            createdAt: entry.createdAt ?? now,
+          }));
+          run.steps.push({
+            ...createAgentRunStep(
+              run.id,
+              "tool_result",
+              `${toolResults.length} tool result(s) received`,
+              "success",
+              summarizeToolResultsForRun(toolResults),
+            ),
+            finishedAt: now,
+          });
+          run.payload = {
+            ...run.payload,
+            harness: body.harness ?? run.payload.harness,
+          };
+          run.dynamicToolResults = (body.dynamicToolResults ?? toolResults).map((entry) => ({
+            toolName: String(entry.toolName ?? "unknown"),
+            input: entry.input,
+            result: entry.result,
+            createdAt: entry.createdAt ?? now,
+          }));
+          run.pendingToolCalls = [];
+          await saveAndBroadcastAgentRun(run);
+          startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);
+          json(res, 202, toPublicAgentRun(run));
+          return;
+        }
+        if (method === "POST" && runAction === "cancel") {
+          const run = await getAgentRunState(runId, projectId);
+          if (!run) {
+            json(res, 404, { error: "Agent run not found." });
+            return;
+          }
+          run.status = "cancelled";
+          run.error = "Cancelled by user.";
+          await saveAndBroadcastAgentRun(run);
+          json(res, 200, toPublicAgentRun(run));
           return;
         }
       }
@@ -1341,17 +3193,20 @@ const attachWebAgentMiddleware = (
         return;
       }
       const payload = await readJsonBody<AgentChatPayload>(req);
-      if (AGENT_TEST_MODE) {
-        json(res, 200, await normalizeAgentModelResponse(createTestAgentResponse(payload), loadAgentSchema));
-        return;
-      }
-      const config = await getCurrentAgentConfig();
-      if (!config.enabled) {
-        json(res, 503, { message: "Agent unavailable.", error: config.reason ?? "Agent is not configured.", pendingCommandPlan: null });
-        return;
-      }
-      const hasHarnessImage = getHarnessImageDataUrls(payload.harness).length > 0;
-      json(res, 200, await normalizeAgentModelResponse(await callOpenRouter(payload, hasHarnessImage && config.visionEnabled), loadAgentSchema));
+      let requestTrace = recordAgentTraceEvent(
+        createAgentRequestTrace(readTraceMetadata(payload.requestTrace)),
+        "server_received",
+        {
+          detail: {
+            route: `${AGENT_API_BASE}/chat`,
+            messageCount: payload.messages?.length ?? 0,
+            hasHarness: Boolean(payload.harness),
+          },
+        },
+      );
+      const result = await executeAgentModelRequest(payload, requestTrace, loadAgentSchema);
+      const response = result.response as { error?: unknown };
+      json(res, response.error ? 503 : 200, result.response);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       json(res, 500, { message: "Agent request failed.", error: message, pendingCommandPlan: null });

@@ -3603,7 +3603,7 @@ const commands = {
       };
       const tailTip = input.tailTip
         ? clampPointToWorkspace(page, input.tailTip)
-        : shouldApplyGroupedMove && moveMembers.length > 1
+        : shouldApplyGroupedMove
           ? {
               x: bubble.tailTip.x + clampedDelta.deltaX,
               y: bubble.tailTip.y + clampedDelta.deltaY,

@@ -1,5 +1,7 @@
 import type { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useRef, useState } from "react";
+import { listProjectDocuments } from "../agent/documents";
+import type { AgentDocumentManifest } from "../agent/documentSchema";
 import { installAutomationApi } from "../automation/api";
 import type { ClipboardEnvelope, ClipboardItem } from "../domain/clipboard";
 import {
@@ -20,6 +22,7 @@ import { useEditorStore } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
 import { AgentSidebar } from "./AgentSidebar";
 import { CanvasView } from "./CanvasView";
+import { DocumentWorkspace } from "./DocumentWorkspace";
 import { Inspector } from "./Inspector";
 import { FirstRunGuide } from "./Onboarding";
 import { RibbonBar } from "./RibbonBar";
@@ -185,6 +188,9 @@ export const App = () => {
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(220);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(300);
   const [rightSidebarMode, setRightSidebarMode] = useState<"inspector" | "agent">("inspector");
+  const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "docs">("canvas");
+  const [documentManifest, setDocumentManifest] = useState<AgentDocumentManifest | null>(null);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [isLayoutResizing, setIsLayoutResizing] = useState(false);
   const leftSidebarWidthRef = useRef(leftSidebarWidth);
   const rightSidebarWidthRef = useRef(rightSidebarWidth);
@@ -315,6 +321,31 @@ export const App = () => {
     void loadCatalog();
   }, [appView, executeCommand]);
 
+  const refreshProjectDocuments = async () => {
+    if (appView !== "editor" || !project.id) {
+      setDocumentManifest(null);
+      setSelectedDocumentId(null);
+      return;
+    }
+    try {
+      const manifest = await listProjectDocuments(project.id);
+      setDocumentManifest(manifest);
+      setSelectedDocumentId((current) =>
+        current && manifest.documents.some((document) => document.id === current)
+          ? current
+          : null,
+      );
+    } catch (error) {
+      console.warn("Failed to load project documents:", error);
+      setDocumentManifest(null);
+      setSelectedDocumentId(null);
+    }
+  };
+
+  useEffect(() => {
+    void refreshProjectDocuments();
+  }, [appView, project.id]);
+
   const refreshProjectCatalog = async () => {
     setProjectsLoading(true);
     try {
@@ -435,6 +466,10 @@ export const App = () => {
       return;
     }
     await handleSaveProject();
+  };
+
+  const handleSetWorkspaceMode = (mode: "canvas" | "docs") => {
+    setWorkspaceMode(mode);
   };
 
   const handleReturnHome = async () => {
@@ -853,7 +888,7 @@ export const App = () => {
           canUndo={pastCount > 0}
           canRedo={futureCount > 0}
           canExport={Boolean(selectedPage)}
-          agentActive={rightSidebarMode === "agent"}
+          workspaceMode={workspaceMode}
           pageFormat={
             selectedPage
               ? {
@@ -868,7 +903,6 @@ export const App = () => {
               : undefined
           }
           onSetTool={(tool: ToolMode) => void executeCommand("setTool", { tool })}
-          onInsertElement={handleInsertElement}
           onSave={() => void handleSaveProject()}
           onGoHome={() => void handleReturnHome()}
           onExport={() => void handleExportPage()}
@@ -878,9 +912,7 @@ export const App = () => {
           onSetLocale={(nextLocale) =>
             void executeCommand("setLocale", { locale: nextLocale })
           }
-          onToggleAgent={() =>
-            setRightSidebarMode((mode) => (mode === "agent" ? "inspector" : "agent"))
-          }
+          onSetWorkspaceMode={handleSetWorkspaceMode}
         />
         {project.pages.length === 0 ? (
           <FirstRunGuide
@@ -898,13 +930,34 @@ export const App = () => {
           />
         ) : (
           <>
-            {selectedPage ? (
-              <CanvasView
-                page={selectedPage}
-                onRequestImportImage={(pageId, panelId) => handleImportImageForPanel(pageId, panelId)}
-                isLayoutResizing={isLayoutResizing}
-              />
-            ) : null}
+            <div className="workspace-stack">
+              <div
+                className={`workspace-pane${workspaceMode === "canvas" ? " active" : ""}`}
+                aria-hidden={workspaceMode !== "canvas"}
+              >
+                {selectedPage ? (
+                  <CanvasView
+                    page={selectedPage}
+                    onRequestImportImage={(pageId, panelId) => handleImportImageForPanel(pageId, panelId)}
+                    isLayoutResizing={isLayoutResizing}
+                    isActive={workspaceMode === "canvas"}
+                  />
+                ) : null}
+              </div>
+              <div
+                className={`workspace-pane${workspaceMode === "docs" ? " active" : ""}`}
+                aria-hidden={workspaceMode !== "docs"}
+              >
+                <DocumentWorkspace
+                  projectId={project.id}
+                  documents={documentManifest?.documents ?? []}
+                  roles={documentManifest?.roles ?? []}
+                  documentId={selectedDocumentId}
+                  onSelectDocument={setSelectedDocumentId}
+                  onDocumentSaved={refreshProjectDocuments}
+                />
+              </div>
+            </div>
             <div className="status-bar">
               <span>{statusMessage?.text ?? t("status.ready")}</span>
               <span>
@@ -926,8 +979,31 @@ export const App = () => {
         aria-orientation="vertical"
         onPointerDown={handleSidebarResizeStart("right")}
       />
+      <div className="right-sidebar-mode-toggle" aria-label="Right sidebar mode">
+        <button
+          type="button"
+          className={rightSidebarMode === "inspector" ? "active" : ""}
+          aria-pressed={rightSidebarMode === "inspector"}
+          onClick={() => setRightSidebarMode("inspector")}
+        >
+          Inspector
+        </button>
+        <button
+          type="button"
+          className={rightSidebarMode === "agent" ? "active" : ""}
+          aria-pressed={rightSidebarMode === "agent"}
+          onClick={() => setRightSidebarMode("agent")}
+        >
+          Agent
+        </button>
+      </div>
       {rightSidebarMode === "agent" ? (
-        <AgentSidebar onClose={() => setRightSidebarMode("inspector")} />
+        <AgentSidebar
+          selectedDocumentId={selectedDocumentId}
+          documentManifest={documentManifest}
+          onSelectDocument={setSelectedDocumentId}
+          onDocumentsChanged={() => void refreshProjectDocuments()}
+        />
       ) : (
         <Inspector
           page={selectedPage}
@@ -939,6 +1015,7 @@ export const App = () => {
             selectedPage ? void executeCommand("setTool", { tool: "panel" }) : undefined
           }
           onInsertBubble={(bubbleType) => handleInsertBubble(bubbleType)}
+          onInsertElement={handleInsertElement}
         />
       )}
       <input

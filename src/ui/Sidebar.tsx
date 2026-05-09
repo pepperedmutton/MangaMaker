@@ -204,7 +204,6 @@ export const Sidebar = ({
         ]
       : []),
   ];
-
   return (
     <aside
       ref={sidebarRef}

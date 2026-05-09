@@ -6,6 +6,15 @@ import {
   getCommandDangerLevel,
 } from "../../src/agent/commandManifest";
 import { parseAgentModelJson, validateAgentChatResponse } from "../../src/agent/agentResponseSchema";
+import {
+  describeOpenRouterResponse,
+  extractOpenRouterAssistantContent,
+  parseOpenRouterResponseJson,
+} from "../../src/agent/openRouterResponse";
+import {
+  getOpenRouterFallbackProviderRouting,
+  getOpenRouterProviderRouting,
+} from "../../src/agent/openRouterProviderRouting";
 import { executeCommandPlan, previewCommandPlan } from "../../src/agent/tools";
 import { useEditorStore } from "../../src/state/editorStore";
 
@@ -114,11 +123,131 @@ describe("agent config", () => {
       "moonshotai/kimi-k2.6",
     ]);
   });
+
+  it("prioritizes Venice for Kimi K2.6 OpenRouter routing", () => {
+    expect(getOpenRouterProviderRouting("moonshotai/kimi-k2.6")).toEqual({
+      order: [
+        "venice/int4",
+        "moonshotai/int4",
+        "fireworks",
+        "siliconflow/fp8",
+        "deepinfra/fp4",
+        "atlas-cloud/int4",
+      ],
+      ignore: ["phala"],
+      allow_fallbacks: true,
+      require_parameters: true,
+    });
+
+    expect(getOpenRouterProviderRouting("deepseek/deepseek-vl")).toEqual({
+      require_parameters: true,
+    });
+
+    expect(getOpenRouterFallbackProviderRouting("moonshotai/kimi-k2.6")).toEqual({
+      order: [
+        "moonshotai/int4",
+        "fireworks",
+        "siliconflow/fp8",
+        "deepinfra/fp4",
+        "atlas-cloud/int4",
+      ],
+      ignore: ["venice/int4", "phala"],
+      allow_fallbacks: true,
+      require_parameters: true,
+    });
+  });
 });
 
 describe("agent response validation", () => {
   it("rejects invalid JSON model content", () => {
     expect(() => parseAgentModelJson("not json")).toThrow(/valid JSON/);
+  });
+
+  it("accepts oversized page batch tool requests as bounded harness work", () => {
+    const pageIds = Array.from({ length: 13 }, (_, index) => `page-${index + 1}`);
+    const response = validateAgentChatResponse({
+      message: "Need a broad read",
+      requestedToolCalls: [
+        {
+          toolName: "readPages",
+          input: { pageIds },
+          reason: "Inspect the project",
+        },
+      ],
+      pendingCommandPlan: null,
+    });
+
+    expect(response.requestedToolCalls).toEqual([
+      {
+        toolName: "readPages",
+        input: { pageIds },
+        reason: expect.stringContaining("first 12"),
+      },
+    ]);
+  });
+
+  it("extracts OpenRouter assistant content from string or part-array messages", () => {
+    expect(
+      extractOpenRouterAssistantContent({
+        choices: [{ message: { content: "{\"message\":\"ok\",\"pendingCommandPlan\":null}" } }],
+      }),
+    ).toBe("{\"message\":\"ok\",\"pendingCommandPlan\":null}");
+
+    expect(
+      extractOpenRouterAssistantContent({
+        choices: [
+          {
+            message: {
+              content: [
+                { type: "text", text: "{\"message\":\"ok\"," },
+                { type: "text", text: "\"pendingCommandPlan\":null}" },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toBe("{\"message\":\"ok\",\n\"pendingCommandPlan\":null}");
+  });
+
+  it("reports actionable OpenRouter empty-content details", () => {
+    expect(() =>
+      extractOpenRouterAssistantContent({
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              content: null,
+              tool_calls: [{ id: "call_1" }],
+            },
+          },
+        ],
+      }),
+    ).toThrow(/toolCallCount=1/);
+
+    expect(() =>
+      extractOpenRouterAssistantContent({
+        choices: [
+          {
+            finish_reason: "content_filter",
+            message: {
+              content: "",
+              refusal: "The provider refused the request.",
+            },
+          },
+        ],
+      }),
+    ).toThrow(/finishReason=content_filter/);
+
+    expect(describeOpenRouterResponse({ choices: [{ message: { content: null } }] })).toContain("contentType=object");
+  });
+
+  it("reports actionable OpenRouter non-JSON response details", () => {
+    expect(() =>
+      parseOpenRouterResponseJson("<html>Gateway timeout</html>", {
+        status: 200,
+        contentType: "text/html",
+      }),
+    ).toThrow(/non-JSON response.*text\/html.*Gateway timeout/);
   });
 
   it("rejects unknown command ids", () => {
@@ -153,6 +282,9 @@ describe("agent response validation", () => {
           { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
           { toolName: "readPages", input: { pageIds: ["p1", "p2"] }, reason: "Read a sample" },
           { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
+          { toolName: "listDocuments", input: {}, reason: "Inspect durable docs" },
+          { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
+          { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
           { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
           {
             toolName: "renderPage",
@@ -166,6 +298,9 @@ describe("agent response validation", () => {
       { toolName: "searchProject", input: { query: "hero", limit: 5 }, reason: "Find relevant pages" },
       { toolName: "readPages", input: { pageIds: ["p1", "p2"] }, reason: "Read a sample" },
       { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
+      { toolName: "listDocuments", input: {}, reason: "Inspect durable docs" },
+      { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
+      { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
       { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
       {
         toolName: "renderPage",
@@ -188,7 +323,67 @@ describe("agent response validation", () => {
         requestedToolCalls: [{ toolName: "renderPage", input: { pageId: "p1", detail: "high" } }],
         pendingCommandPlan: null,
       }),
-    ).toThrow();
+    ).toThrow(/requestedToolCalls\[0\] renderPage: detail/);
+
+    expect(
+      validateAgentChatResponse({
+        message: "Custom document role tag",
+        requestedToolCalls: [
+          {
+            toolName: "writeDocument",
+            input: { operationId: "op-doc", id: "doc", title: "Doc", role: "customRole", content: "" },
+          },
+        ],
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      {
+        toolName: "writeDocument",
+        input: { operationId: "op-doc", id: "doc", title: "Doc", role: "customRole", content: "" },
+        reason: undefined,
+      },
+    ]);
+
+    expect(() =>
+      validateAgentChatResponse({
+        message: "Bad document write",
+        requestedToolCalls: [{ toolName: "writeDocument", input: { id: "doc", title: "Doc", content: "" } }],
+        pendingCommandPlan: null,
+      }),
+    ).toThrow(/operationId/);
+  });
+
+  it("preserves request trace metadata from the Agent backend", () => {
+    const response = validateAgentChatResponse({
+      message: "ok",
+      pendingCommandPlan: null,
+      requestTrace: {
+        requestId: "agent-request-test",
+        stage: "initial-model-response",
+        status: "success",
+        provider: "test",
+        model: "mangamaker-test-agent",
+        usedVision: false,
+        startedAt: "2026-05-07T00:00:00.000Z",
+        updatedAt: "2026-05-07T00:00:00.010Z",
+        durationMs: 10,
+        events: [
+          {
+            phase: "server_received",
+            at: "2026-05-07T00:00:00.001Z",
+            elapsedMs: 1,
+            detail: { messageCount: 1 },
+          },
+        ],
+      },
+    });
+
+    expect(response.requestTrace).toMatchObject({
+      requestId: "agent-request-test",
+      status: "success",
+      provider: "test",
+      events: [{ phase: "server_received" }],
+    });
   });
 
   it("does not trust model-provided dangerLevel", () => {

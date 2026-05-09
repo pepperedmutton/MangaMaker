@@ -1,4 +1,6 @@
 import type {
+  AgentDocument,
+  AgentDocumentMeta,
   AgentContextSnapshot,
   AgentHarnessSnapshot,
   AgentHarnessToolDefinition,
@@ -8,12 +10,20 @@ import type {
   AgentToolCallRequest,
 } from "./types";
 import { renderPageSnapshot } from "./context";
+import {
+  listProjectDocuments,
+  readProjectDocument,
+  writeProjectDocument,
+} from "./documents";
+import {
+  AGENT_MAX_BATCH_READ_PAGES,
+  AGENT_MAX_BATCH_RENDER_PAGES,
+} from "./toolLimits";
 
 const now = () => new Date().toISOString();
 const DEFAULT_SEARCH_LIMIT = 20;
 const DEFAULT_ASSET_LIMIT = 40;
-const MAX_BATCH_READ_PAGES = 12;
-const MAX_BATCH_RENDER_PAGES = 6;
+const DEFAULT_DOCUMENT_SEARCH_LIMIT = 20;
 
 const renderDetailSchema = { type: "string", enum: ["preview", "detail"] };
 const renderCropSchema = {
@@ -53,6 +63,29 @@ const pageIndexEntry = (page: AgentContextSnapshot["pages"][number]) => ({
   hasImages: page.objects.some((object) => object.objectType === "panel" && object.hasImage),
   hasText: page.textCount > 0,
   isCurrent: page.isCurrent,
+});
+
+const documentIndexEntry = (document: AgentDocumentMeta) => ({
+  id: document.id,
+  title: document.title,
+  role: document.role ?? null,
+  status: document.status,
+  path: document.path,
+  relatedPageIds: document.relatedPageIds,
+  updatedAt: document.updatedAt,
+  summary: document.summary ?? "",
+});
+
+const documentResultSummary = (document: AgentDocument) => ({
+  id: document.id,
+  title: document.title,
+  role: document.role ?? null,
+  status: document.status,
+  path: document.path,
+  relatedPageIds: document.relatedPageIds,
+  updatedAt: document.updatedAt,
+  summary: document.summary ?? "",
+  contentLength: document.content.length,
 });
 
 const searchProject = (
@@ -163,6 +196,113 @@ const searchProject = (
   };
 };
 
+const searchDocuments = async (
+  context: AgentContextSnapshot,
+  input: { query?: string; role?: string; limit?: number },
+) => {
+  const query = normalized(input.query).trim();
+  const limit = clampLimit(input.limit, DEFAULT_DOCUMENT_SEARCH_LIMIT, 100);
+  const manifest = await listProjectDocuments(context.project.id);
+  const candidateDocs = manifest.documents.filter((document) => {
+    if (input.role && document.role !== input.role) {
+      return false;
+    }
+    return true;
+  });
+  const matches: Array<{
+    documentId: string;
+    title: string;
+    role: string | null;
+    path: string;
+    field: string;
+    snippet: string;
+  }> = [];
+  let totalMatches = 0;
+  const addMatch = (entry: (typeof matches)[number]) => {
+    totalMatches += 1;
+    if (matches.length < limit) {
+      matches.push(entry);
+    }
+  };
+  const matchesQuery = (value: unknown) => {
+    const text = normalized(value);
+    return !query || text.includes(query);
+  };
+
+  for (const meta of candidateDocs) {
+    const fields = [
+      ["title", meta.title],
+      ["summary", meta.summary],
+      ["path", meta.path],
+      ["role", meta.role],
+    ] as const;
+    for (const [field, value] of fields) {
+      if (!value || !matchesQuery(value)) {
+        continue;
+      }
+      addMatch({
+        documentId: meta.id,
+        title: meta.title,
+        role: meta.role ?? null,
+        path: meta.path,
+        field,
+        snippet: String(value).slice(0, 240),
+      });
+    }
+    if (query) {
+      const document = await readProjectDocument(context.project.id, meta.id);
+      const lowerContent = normalized(document.content);
+      const matchIndex = lowerContent.indexOf(query);
+      if (matchIndex >= 0) {
+        const start = Math.max(0, matchIndex - 120);
+        const end = Math.min(document.content.length, matchIndex + query.length + 120);
+        addMatch({
+          documentId: meta.id,
+          title: meta.title,
+          role: meta.role ?? null,
+          path: meta.path,
+          field: "content",
+          snippet: document.content.slice(start, end),
+        });
+      }
+    }
+  }
+
+  return {
+    query: input.query ?? "",
+    role: input.role ?? null,
+    limit,
+    totalMatches,
+    returned: matches.length,
+    truncated: totalMatches > matches.length,
+    matches,
+  };
+};
+
+const validateDocumentAgainstProject = async (
+  context: AgentContextSnapshot,
+  input: { documentId?: string },
+) => {
+  const documentId = input.documentId ?? "";
+  const document = await readProjectDocument(context.project.id, documentId);
+  const existingPageIds = new Set(context.pages.map((page) => page.id));
+  const referencedPageIds = new Set<string>();
+  const pageIdPattern = /\bpage[-_A-Za-z0-9]+\b/g;
+  for (const match of document.content.matchAll(pageIdPattern)) {
+    referencedPageIds.add(match[0]);
+  }
+  for (const pageId of document.relatedPageIds) {
+    referencedPageIds.add(pageId);
+  }
+  const missingPageIds = Array.from(referencedPageIds).filter((pageId) => !existingPageIds.has(pageId));
+  return {
+    document: documentResultSummary(document),
+    referencedPageIds: Array.from(referencedPageIds),
+    missingPageIds,
+    ok: missingPageIds.length === 0,
+  };
+};
+
 const listFilteredImageAssets = (
   context: AgentContextSnapshot,
   input: { pageId?: string; query?: string; limit?: number },
@@ -249,7 +389,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
         pageIds: {
           type: "array",
           minItems: 1,
-          maxItems: MAX_BATCH_READ_PAGES,
+          maxItems: AGENT_MAX_BATCH_READ_PAGES,
           items: { type: "string" },
         },
       },
@@ -325,7 +465,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
         pageIds: {
           type: "array",
           minItems: 1,
-          maxItems: MAX_BATCH_RENDER_PAGES,
+          maxItems: AGENT_MAX_BATCH_RENDER_PAGES,
           items: { type: "string" },
         },
         detail: renderDetailSchema,
@@ -340,6 +480,100 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     description: "Read the command registry manifest and command payload schemas. Project mutations must use these command ids and schemas.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     outputDescription: "Command manifest entries derived from the local command registry.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "listDocuments",
+    description: "List durable Markdown production documents in this project. Use this before reading or writing role-owned production state.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputDescription: "Document ids, titles, optional role tags, status, paths, related pages, update times, summaries, and role metadoc bindings.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "listRoles",
+    description: "List project Agent roles and their required metadoc document ids. Every active role has one metadoc; documents without a matching role are ordinary docs.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputDescription: "Role ids, names, titles, metadoc ids, autonomy defaults, preferred tools, and role prompts.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "readDocument",
+    description: "Read one project Markdown document by manifest id. The backend also accepts path, filename, or exact title as a fallback. Use this instead of relying on conversation context for production state.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["documentId"],
+      properties: {
+        documentId: {
+          type: "string",
+          description: "Prefer the stable manifest document id from listDocuments/searchDocuments; path, filename, or exact title are accepted only as fallback.",
+        },
+      },
+    },
+    outputDescription: "Full document metadata and Markdown content.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "searchDocuments",
+    description: "Search durable Markdown production documents by title, summary, path, role, and content.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: { type: "string" },
+        role: { type: "string" },
+        limit: { type: "number", minimum: 1, maximum: 100 },
+      },
+    },
+    outputDescription: "Bounded document match list with document ids, roles, fields, and snippets.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "writeDocument",
+    description: "Create or update one durable Markdown production document. Use this for role output that must survive beyond chat.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "id", "title", "content"],
+      properties: {
+        operationId: {
+          type: "string",
+          description: "Stable idempotency key for this exact write operation. Reuse only when retrying the same content.",
+        },
+        id: { type: "string" },
+        title: { type: "string" },
+        role: { type: "string" },
+        status: { type: "string", enum: ["draft", "ready", "applied", "obsolete"] },
+        path: { type: "string" },
+        relatedPageIds: { type: "array", items: { type: "string" } },
+        summary: { type: "string" },
+        content: { type: "string" },
+      },
+    },
+    outputDescription: "Saved document metadata and content length.",
+    mutatesProject: true,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "validateDocumentAgainstProject",
+    description: "Check whether page ids referenced by one Markdown document exist in the current project context. Prefer manifest id; path, filename, or exact title are accepted as fallback.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["documentId"],
+      properties: {
+        documentId: {
+          type: "string",
+          description: "Prefer the stable manifest document id from listDocuments/searchDocuments; path, filename, or exact title are accepted only as fallback.",
+        },
+      },
+    },
+    outputDescription: "Referenced page ids, missing ids, and validation status.",
     mutatesProject: false,
     requiresConfirmation: false,
   }),
@@ -376,6 +610,7 @@ export const buildAgentHarness = (
 ): AgentHarnessSnapshot => ({
   mode: "tool-harness",
   currentPageId: context.currentPage?.id ?? context.selectedPageId,
+  projectId: context.project.id,
   currentPageMarkedBy: "isCurrent",
   tools: AGENT_HARNESS_TOOLS,
   initialToolResults: [
@@ -406,6 +641,8 @@ export const buildAgentHarness = (
   resourcePolicy: {
     allPagesReadable: true,
     assetsReadableOnDemand: true,
+    documentsReadableOnDemand: true,
+    documentsWritableOnDemand: true,
     inlineDataUrlsRedactedFromPrompt: true,
     projectMutationPath: "commandPlanOnly",
   },
@@ -415,12 +652,20 @@ const getPageById = (context: AgentContextSnapshot, pageId: string) =>
   context.pages.find((page) => page.id === pageId) ?? null;
 
 const getPageIdsInput = (input: unknown, maxItems: number) => {
-  const pageIds = Array.isArray((input as { pageIds?: unknown }).pageIds)
+  const requestedPageIds = Array.isArray((input as { pageIds?: unknown }).pageIds)
     ? (input as { pageIds: unknown[] }).pageIds
     : [];
-  return pageIds
+  const validPageIds = requestedPageIds
     .filter((pageId): pageId is string => typeof pageId === "string" && pageId.trim().length > 0)
-    .slice(0, maxItems);
+    .map((pageId) => pageId.trim());
+  const pageIds = validPageIds.slice(0, maxItems);
+  return {
+    pageIds,
+    requestedPageIdCount: validPageIds.length,
+    maxPageIds: maxItems,
+    truncated: validPageIds.length > pageIds.length,
+    skippedPageIds: validPageIds.slice(maxItems),
+  };
 };
 
 const getRenderDetailInput = (input: unknown): AgentRenderDetail => {
@@ -492,10 +737,14 @@ export const executeAgentHarnessToolCall = async (
     return result(call.toolName, call.input, getPageById(context, pageId));
   }
   if (call.toolName === "readPages") {
-    const pageIds = getPageIdsInput(call.input, MAX_BATCH_READ_PAGES);
+    const pageIdInput = getPageIdsInput(call.input, AGENT_MAX_BATCH_READ_PAGES);
     return result(call.toolName, call.input, {
-      pageIds,
-      pages: pageIds.map((pageId) => getPageById(context, pageId)),
+      pageIds: pageIdInput.pageIds,
+      requestedPageIdCount: pageIdInput.requestedPageIdCount,
+      maxPageIds: pageIdInput.maxPageIds,
+      truncated: pageIdInput.truncated,
+      skippedPageIds: pageIdInput.skippedPageIds,
+      pages: pageIdInput.pageIds.map((pageId) => getPageById(context, pageId)),
     });
   }
   if (call.toolName === "inspectSelection") {
@@ -543,10 +792,10 @@ export const executeAgentHarnessToolCall = async (
     });
   }
   if (call.toolName === "renderPages") {
-    const pageIds = getPageIdsInput(call.input, MAX_BATCH_RENDER_PAGES);
+    const pageIdInput = getPageIdsInput(call.input, AGENT_MAX_BATCH_RENDER_PAGES);
     const detail = getRenderDetailInput(call.input);
     const results = [];
-    for (const pageId of pageIds) {
+    for (const pageId of pageIdInput.pageIds) {
       const page = getPageById(context, pageId);
       const canvasSnapshot = await renderPageSnapshot(pageId, { detail });
       results.push({
@@ -565,13 +814,71 @@ export const executeAgentHarnessToolCall = async (
       });
     }
     return result(call.toolName, call.input, {
-      pageIds,
+      pageIds: pageIdInput.pageIds,
+      requestedPageIdCount: pageIdInput.requestedPageIdCount,
+      maxPageIds: pageIdInput.maxPageIds,
+      truncated: pageIdInput.truncated,
+      skippedPageIds: pageIdInput.skippedPageIds,
       detail,
       results,
     });
   }
   if (call.toolName === "listCommandManifest") {
     return result(call.toolName, call.input, context.commandManifest);
+  }
+  if (call.toolName === "listDocuments") {
+    const manifest = await listProjectDocuments(context.project.id);
+    return result(call.toolName, call.input, {
+      projectId: manifest.projectId,
+      updatedAt: manifest.updatedAt,
+      roles: manifest.roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        title: role.title,
+        metadocId: role.metadocId,
+        defaultAutonomy: role.defaultAutonomy,
+        preferredTools: role.preferredTools,
+      })),
+      documents: manifest.documents.map(documentIndexEntry),
+    });
+  }
+  if (call.toolName === "listRoles") {
+    const manifest = await listProjectDocuments(context.project.id);
+    return result(call.toolName, call.input, {
+      projectId: manifest.projectId,
+      updatedAt: manifest.updatedAt,
+      roles: manifest.roles,
+    });
+  }
+  if (call.toolName === "readDocument") {
+    const documentId = (call.input as { documentId?: string }).documentId ?? "";
+    return result(call.toolName, call.input, await readProjectDocument(context.project.id, documentId));
+  }
+  if (call.toolName === "searchDocuments") {
+    return result(call.toolName, call.input, await searchDocuments(context, call.input as {
+      query?: string;
+      role?: string;
+      limit?: number;
+    }));
+  }
+  if (call.toolName === "writeDocument") {
+    const input = call.input as Partial<AgentDocumentMeta> & { content: string; operationId: string };
+    const saved = await writeProjectDocument(context.project.id, input);
+    return result(call.toolName, call.input, {
+      saved: true,
+      operationId: input.operationId,
+      document: documentResultSummary(saved),
+    });
+  }
+  if (call.toolName === "validateDocumentAgainstProject") {
+    return result(call.toolName, call.input, await validateDocumentAgainstProject(context, call.input as { documentId?: string }));
+  }
+  if (call.toolName === "proposeCommandPlan") {
+    return result(call.toolName, call.input, {
+      accepted: false,
+      reason:
+        "Return this plan as pendingCommandPlan in the final JSON response so MangaMaker can validate schemas and apply confirmation policy.",
+    });
   }
   throw new Error(`Unsupported Agent harness tool: ${call.toolName}`);
 };

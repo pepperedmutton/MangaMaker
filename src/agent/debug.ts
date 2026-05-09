@@ -3,12 +3,15 @@ import type {
   AgentConfig,
   AgentContextSnapshot,
   AgentDebugSnapshot,
+  AgentRequestTrace,
   AgentToolLogEntry,
   AgentCommandPlan,
+  AgentRun,
 } from "./types";
 
 const MAX_DEBUG_MESSAGES = 20;
 const MAX_DEBUG_LOGS = 80;
+const MAX_DEBUG_TRACES = 30;
 
 let latestAgentDebugSnapshot: AgentDebugSnapshot | null = null;
 
@@ -75,6 +78,20 @@ const computePendingDurationMs = (toolCall: AgentToolLogEntry | null, now: strin
   return Math.max(0, current - startedAt);
 };
 
+const summarizeRun = (run: AgentRun | null): AgentDebugSnapshot["activeRun"] =>
+  run
+    ? {
+        id: run.id,
+        projectId: run.projectId,
+        roleId: run.roleId,
+        status: run.status,
+        modelTurnIndex: run.modelTurnIndex,
+        stepCount: run.steps.length,
+        updatedAt: run.updatedAt,
+        ...(run.error ? { error: run.error } : {}),
+      }
+    : null;
+
 export const createAgentDebugSnapshot = ({
   mounted,
   busy,
@@ -85,16 +102,24 @@ export const createAgentDebugSnapshot = ({
   lastWarning,
   pendingPlan,
   contextSnapshot,
+  activeRoleId,
+  activeDocumentId,
+  activeRun,
+  requestTraces,
 }: {
   mounted: boolean;
   busy: boolean;
   messages: AgentChatMessage[];
   toolLogs: AgentToolLogEntry[];
+  requestTraces: AgentRequestTrace[];
   config: AgentConfig | null;
   configError: string | null;
   lastWarning: string | null;
   pendingPlan: AgentCommandPlan | null;
   contextSnapshot: AgentContextSnapshot | null;
+  activeRoleId?: AgentDebugSnapshot["activeRoleId"];
+  activeDocumentId?: AgentDebugSnapshot["activeDocumentId"];
+  activeRun?: AgentRun | null;
 }): AgentDebugSnapshot => {
   const updatedAt = new Date().toISOString();
   const activeToolCall = getActiveToolCall(toolLogs);
@@ -102,11 +127,15 @@ export const createAgentDebugSnapshot = ({
     mounted,
     busy,
     updatedAt,
+    activeRoleId,
+    activeDocumentId,
+    activeRun: summarizeRun(activeRun ?? null),
     activeToolCall,
     pendingDurationMs: computePendingDurationMs(activeToolCall, updatedAt),
     messageCount: messages.length,
     messages: messages.slice(-MAX_DEBUG_MESSAGES),
     toolLogs: toolLogs.slice(0, MAX_DEBUG_LOGS),
+    requestTraces: requestTraces.slice(0, MAX_DEBUG_TRACES),
     config,
     configError,
     lastWarning,

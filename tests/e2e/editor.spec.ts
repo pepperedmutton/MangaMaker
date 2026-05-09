@@ -120,6 +120,36 @@ const readCanvasLayout = () => {
 const getRenderedPageMetrics = async (page: Page) =>
   page.evaluate(readCanvasLayout);
 
+const getComicWorkspaceMetrics = async (page: Page) => {
+  const [layout, container] = await Promise.all([
+    getRenderedPageMetrics(page),
+    page.evaluate(() => {
+      const zone = document.querySelector(".canvas-zone") as HTMLElement | null;
+      const wrap = document.querySelector(".canvas-wrap") as HTMLDivElement | null;
+      const stage = document.querySelector(".canvas-wrap .konvajs-content") as HTMLDivElement | null;
+      if (!zone || !wrap || !stage) {
+        return null;
+      }
+      return {
+        windowInnerHeight: window.innerHeight,
+        zoneClientHeight: zone.clientHeight,
+        wrapClientHeight: wrap.clientHeight,
+        wrapScrollHeight: wrap.scrollHeight,
+        stageClientHeight: stage.getBoundingClientRect().height,
+      };
+    }),
+  ]);
+
+  if (!layout || !container) {
+    return null;
+  }
+
+  return {
+    ...layout,
+    ...container,
+  };
+};
+
 const installCanvasContextMenuProbe = async (page: Page) => {
   await page.evaluate(() => {
     const wrap = document.querySelector(".canvas-wrap");
@@ -998,6 +1028,49 @@ test("bubble creation and page/project export stay available from the GUI", asyn
     .toBe("pdf");
 });
 
+test("dragging a preset bubble returns to select mode after one insertion", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "One Shot Bubble Insert");
+
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Bubble" }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.session.get().activeTool))
+    .toBe("bubble");
+
+  const canvasBox = await getCanvasBox(page);
+  const layout = await getRenderedPageMetrics(page);
+  if (!layout) {
+    throw new Error("Canvas layout not available");
+  }
+  const toScreenPoint = (point: { x: number; y: number }) => ({
+    x: canvasBox.x + layout.pageX + point.x * layout.scale,
+    y: canvasBox.y + layout.pageY + point.y * layout.scale,
+  });
+  const start = toScreenPoint({ x: 260, y: 260 });
+  const end = toScreenPoint({ x: 560, y: 410 });
+
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps: 8 });
+  await page.mouse.up();
+
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.bubbles.length ?? 0))
+    .toBe(1);
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.session.get().activeTool))
+    .toBe("select");
+  await waitForSelection(page, "bubble");
+
+  await page.mouse.click(
+    canvasBox.x + layout.pageX + 700 * layout.scale,
+    canvasBox.y + layout.pageY + 520 * layout.scale,
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.bubbles.length ?? 0))
+    .toBe(1);
+});
+
 test("canvas defaults to a fit-to-view display and major GUI actions keep command parity", async ({
   page,
 }) => {
@@ -1104,6 +1177,69 @@ test("canvas defaults to a fit-to-view display and major GUI actions keep comman
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages.length))
     .toBe(2);
+});
+
+test("canvas zoom remains bounded after switching between comic and docs", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Canvas Docs Zoom Switch");
+
+  await page.evaluate(() => window.mangaMaker?.commands.execute("setZoom", { zoom: 2.2 }));
+  await expect
+    .poll(() => page.evaluate(() => window.mangaMaker?.session.get().zoom))
+    .toBe(2.2);
+  await expect.poll(async () => (await getComicWorkspaceMetrics(page))?.pageWidth ?? 0).toBeGreaterThan(0);
+
+  const beforeSwitch = await getComicWorkspaceMetrics(page);
+  expect(beforeSwitch).not.toBeNull();
+  expect(beforeSwitch?.wrapClientHeight ?? Infinity).toBeLessThanOrEqual(
+    beforeSwitch?.windowInnerHeight ?? 0,
+  );
+  const beforeScroll = await page.evaluate(() => {
+    const wrap = document.querySelector(".canvas-wrap") as HTMLDivElement | null;
+    if (!wrap) {
+      return null;
+    }
+    wrap.scrollLeft = Math.min(120, Math.max(0, wrap.scrollWidth - wrap.clientWidth));
+    wrap.scrollTop = Math.min(90, Math.max(0, wrap.scrollHeight - wrap.clientHeight));
+    return { left: wrap.scrollLeft, top: wrap.scrollTop };
+  });
+  expect(beforeScroll).not.toBeNull();
+  expect((beforeScroll?.left ?? 0) + (beforeScroll?.top ?? 0)).toBeGreaterThan(0);
+
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
+  await expect(page.getByLabel("Project document workspace")).toBeVisible();
+  await page.getByLabel("Project document files").getByRole("button", { name: /production-plan\.md/i }).click();
+  await expect(page.getByLabel("Rendered Markdown document")).toContainText("Production Plan");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Comic" }).click();
+  await expect(page.locator(".canvas-wrap .konvajs-content")).toBeVisible();
+  await expect
+    .poll(async () => {
+      const metrics = await getComicWorkspaceMetrics(page);
+      return metrics ? metrics.wrapClientHeight <= metrics.windowInnerHeight : false;
+    })
+    .toBe(true);
+
+  const afterSwitch = await getComicWorkspaceMetrics(page);
+  expect(afterSwitch).not.toBeNull();
+  expect(
+    Math.abs((afterSwitch?.wrapClientHeight ?? 0) - (beforeSwitch?.wrapClientHeight ?? 0)),
+  ).toBeLessThanOrEqual(4);
+  expect(Math.abs((afterSwitch?.pageWidth ?? 0) - (beforeSwitch?.pageWidth ?? 0))).toBeLessThanOrEqual(
+    4,
+  );
+  const afterScroll = await page.evaluate(() => {
+    const wrap = document.querySelector(".canvas-wrap") as HTMLDivElement | null;
+    return wrap ? { left: wrap.scrollLeft, top: wrap.scrollTop } : null;
+  });
+  expect(afterScroll).toEqual(beforeScroll);
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
+  await expect(page.getByLabel("Rendered Markdown document")).toContainText("Production Plan");
+
+  await page.evaluate(() => window.mangaMaker?.commands.execute("setZoom", { zoom: 0.5 }));
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Comic" }).click();
+  await expect
+    .poll(async () => (await getComicWorkspaceMetrics(page))?.pageWidth ?? 0)
+    .toBeLessThan((afterSwitch?.pageWidth ?? 0) * 0.5);
 });
 
 test("local draft recovery restores the saved project after reset", async ({ page }) => {

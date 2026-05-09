@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   getPageWorkspace,
   getSelectedObject,
@@ -6,6 +7,11 @@ import {
   createDefaultBubble,
   MIN_PANEL_SIZE,
 } from "../domain/defaults";
+import {
+  ELEMENT_LIBRARY,
+  ELEMENT_LIBRARY_CATEGORIES,
+  type ElementLibraryItem,
+} from "../domain/elementLibrary";
 import type { Bubble, ElementItem, Page, Panel, TextItem } from "../domain/schema";
 import { formatLocaleTime } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
@@ -59,6 +65,7 @@ type InspectorProps = {
   onImportImage: () => void;
   onCreatePanel?: () => void;
   onInsertBubble?: (bubbleType: Exclude<Bubble["bubbleType"], "custom">) => void;
+  onInsertElement?: (item: ElementLibraryItem) => void;
 };
 
 const DeleteButton = ({
@@ -751,6 +758,64 @@ const BUBBLE_TYPES: Array<{ type: Bubble["bubbleType"]; labelKey: string }> = [
   { type: "custom", labelKey: "inspector.bubbleType.custom" },
 ];
 
+const ElementInsertLibrary = ({
+  onInsertElement,
+}: {
+  onInsertElement?: (item: ElementLibraryItem) => void;
+}) => {
+  const { t } = useI18n();
+  const [activeElementCategory, setActiveElementCategory] = useState(
+    ELEMENT_LIBRARY_CATEGORIES[0]?.id ?? "artWords",
+  );
+  const visibleElements = ELEMENT_LIBRARY.filter(
+    (item) => item.category === activeElementCategory,
+  );
+
+  return (
+    <>
+      <section>
+        <p className="eyebrow">{t("inspector.insertElement")}</p>
+        <h3>{t("inspector.insertElement")}</h3>
+        <p>{t("inspector.elementInsertHint")}</p>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.elementCategory")}</p>
+        <div className="element-category-tabs element-category-tabs-sidebar">
+          {ELEMENT_LIBRARY_CATEGORIES.map((category) => (
+            <button
+              key={category.id}
+              type="button"
+              className={category.id === activeElementCategory ? "active" : ""}
+              onClick={() => setActiveElementCategory(category.id)}
+            >
+              {t(category.titleKey)}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <p className="eyebrow">{t("inspector.elementLibrary")}</p>
+        <div className="element-library-grid element-library-grid-sidebar">
+          {visibleElements.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="element-library-item"
+              title={`${item.title} - ${item.license}`}
+              onClick={() => onInsertElement?.(item)}
+            >
+              <img src={item.src} alt="" />
+              <span>{item.title}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+};
+
 const BubbleInsertLibrary = ({
   onInsertBubble,
 }: {
@@ -1192,6 +1257,7 @@ export const Inspector = ({
   onImportImage,
   onCreatePanel,
   onInsertBubble,
+  onInsertElement,
 }: InspectorProps) => {
   const selection = useEditorStore((state) => state.selection);
   const lastExport = useEditorStore((state) => state.lastExport);
@@ -1218,11 +1284,19 @@ export const Inspector = ({
     !("style" in selectedObject) &&
     !("content" in selectedObject);
   const isBubbleInsertState = activeTool === "bubble" && !bubbleIsExplicitlySelected;
+  const elementIsExplicitlySelected =
+    selection?.pageId === page.id &&
+    selection.objectType === "element" &&
+    selectedObject !== null &&
+    "src" in selectedObject;
+  const isElementInsertState = activeTool === "element" && !elementIsExplicitlySelected;
 
   return (
     <aside className="right-sidebar">
       {isBubbleInsertState ? (
         <BubbleInsertLibrary onInsertBubble={onInsertBubble} />
+      ) : isElementInsertState ? (
+        <ElementInsertLibrary onInsertElement={onInsertElement} />
       ) : !selectedObject ? (
         <>
           <section>

@@ -472,15 +472,30 @@ describe("commandRegistry coverage", () => {
       customSpikePositions,
     );
 
-    const movedBubbleWithoutTailUpdate = await runCommand(harness, "updateBubble", {
+    const movedBubble = await runCommand(harness, "updateBubble", {
       pageId: page.id,
       bubbleId: bubble.id,
       x: 360,
       y: 380,
     });
-    expect(
-      (movedBubbleWithoutTailUpdate as { tailTip: { x: number; y: number } }).tailTip,
-    ).toEqual((updatedBubble as { tailTip: { x: number; y: number } }).tailTip);
+    const movedBubbleShape = movedBubble as {
+      x: number;
+      y: number;
+      tailTip: { x: number; y: number };
+    };
+    const updatedBubbleShape = updatedBubble as {
+      x: number;
+      y: number;
+      tailTip: { x: number; y: number };
+    };
+    expect(movedBubbleShape.tailTip.x - updatedBubbleShape.tailTip.x).toBeCloseTo(
+      movedBubbleShape.x - updatedBubbleShape.x,
+      6,
+    );
+    expect(movedBubbleShape.tailTip.y - updatedBubbleShape.tailTip.y).toBeCloseTo(
+      movedBubbleShape.y - updatedBubbleShape.y,
+      6,
+    );
 
     const layerOrderBefore = [...harness.readSession().project.pages[0].layers];
     const movedLayer = await runCommand(harness, "moveLayer", {

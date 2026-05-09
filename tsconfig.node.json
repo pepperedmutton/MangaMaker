@@ -6,7 +6,17 @@
     "lib": ["ES2021"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "noEmit": true
   },
-  "include": ["vite.config.ts", "playwright.config.ts"]
+  "include": [
+    "vite.config.ts",
+    "playwright.config.ts",
+    "src/agent/documentSchema.ts",
+    "src/agent/openRouterProviderRouting.ts",
+    "src/agent/openRouterResponse.ts",
+    "src/agent/roles.ts",
+    "src/agent/systemPrompt.ts",
+    "src/agent/toolLimits.ts"
+  ]
 }

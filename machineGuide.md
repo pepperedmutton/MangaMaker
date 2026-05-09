@@ -56,9 +56,10 @@ agent 必须把以下层面视为一个系统：
 - `src/commands`: public command surface
 - `src/state`: session state and history behavior
 - `src/storage`: persistence, `projects/` integration, and local draft behavior
+- `src/agent`: built-in creator assistance Agent config, harness, tools, roles, documents, and response validation
 - `src/ui`: human-facing behavior
 - `src/automation/api.ts`: browser automation bridge
-- `vite.config.ts` and `vite.config.js`: web persistence middleware, `/projects` serving, and allowed share hosts
+- `vite.config.ts`: web persistence middleware, `/projects` serving, and allowed share hosts
 - `scripts/launch.mjs`: web launcher, share-mode defaults, and terminal logging
 - `scripts/gradio_share_tunnel.py`: Gradio tunnel integration and retry behavior
 - `src-tauri/src/lib.rs`: desktop persistence bridge
@@ -282,6 +283,22 @@ Role rules:
 - The Agent should use language such as "suggest", "prepare", "inspect", and "help adjust" rather than language that implies autonomous authorship.
 - Human creative intent takes precedence over model suggestions.
 
+Durable document rules:
+
+- Chat is not the durable production source of truth. Project Markdown documents are the durable carrier for plans, storyboards, script, art direction, continuity, and image prompts.
+- The editor must expose a center workspace mode that can switch between comic editing and project Markdown documents while keeping the Agent sidebar available on the right.
+- The left overview/sidebar is reserved for comic page thumbnails and page operations. It must not show document overviews.
+- Entering the `Docs` workspace must show a file-viewer list of Markdown file names first. A document body is shown only after the user selects a file, and the default document view is rendered Markdown rather than a raw editor.
+- The Docs workspace must let the creator right-click to create Markdown documents and right-click any document to rename or delete it. Default role metadocs are starter files only; once a manifest exists, user deletion must be respected and missing defaults must not be silently recreated.
+- A new project must start with role metadocs under `docs/`: assistant metadoc, production plan, story architecture, storyboard overview, script/dialogue, art supervision, continuity check, and image prompts.
+- Every active Agent role must be represented in the project document manifest and must bind exactly one `metadocId`. That metadoc defines the role and records the role's durable output.
+- Within one project, each role must have at most one active Conversation Context session and exactly one metadoc. Switching roles must switch the visible conversation to that role's session.
+- A document may be ordinary and unbound to any role. A role may read and write documents beyond its own metadoc.
+- Creating a role must either create its metadoc automatically or bind an existing ordinary document as the role metadoc. Deleting a metadoc must remove the role. Deleting a role must keep its metadoc as an ordinary document.
+- The Agent harness must expose roles and documents as tools: it may preload only the active role metadoc, and it must expose list roles, list documents, read one document, search documents, and write one document on demand. It must not preload all document bodies into the initial prompt.
+- Role prompts must describe the Agent as a producer, director, storyboard designer, script designer, art supervisor, continuity supervisor, prompt engineer, or custom assisting production role. These roles read and write documents and may prepare bounded command plans, but they do not become the human creator or claim final authorship.
+- Other local agents should be able to inspect project documents by reading `projects/<project-folder>/docs/` and the document API without scraping chat messages.
+
 Configuration rules:
 
 - `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode for tests and demos.
@@ -305,22 +322,36 @@ Context rules:
 - The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information when those details are requested.
 - The initial model prompt must not include every page's full resources, every asset metadata record, or a screenshot by default. It should include a lightweight project summary, page index, current-page marker, selection summary, and tool catalog.
 - The Agent must be able to read all project pages on demand, not only the currently selected page. The creator's current page must be marked with `isCurrent=true` in the page index and detailed page reads.
-- The Agent harness should present project reading as local tools such as project summary, page listing, project search, single-page and batch page reading, selection inspection, filtered image asset listing, single-page and batch page rendering, and command manifest reading.
+- The Agent harness should present project reading as local tools such as project summary, page listing, project search, single-page and batch page reading, selection inspection, filtered image asset listing, single-page and batch page rendering, role listing, Markdown document listing/reading/searching/writing, and command manifest reading.
 - The Agent must be able to close the multimodal loop for a page: request a screenshot/render tool for a specific page, receive the composed visual result as a vision attachment, and receive the same page's structured resources so it can compare resource-level state with rendered outcome.
 - The Agent must follow a structured-first visual budget policy. It should search/read resources before screenshots, use preview renders by default, request cropped page renders for local details, and reserve high-detail renders for small text, faces, or fine line art. Token savings must come from reducing image count, pixels, and crop area rather than relying on PNG/JPG format differences.
-- The Agent UI must enforce a finite per-turn tool budget, skip repeated identical tool calls, and request a final answer from gathered evidence instead of surfacing a generic tool-loop failure to the creator.
+- The Agent UI must enforce a finite per-turn tool budget, skip repeated identical tool calls, and pause with Continue/Stop when more tools are needed instead of forcing a final answer from incomplete evidence.
 - Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
 - Large base64 assets must not be sent without bounds.
-- The Agent sidebar must publish a sanitized debug snapshot for local automation and web debugging. The snapshot may include current busy state, pending tool call, recent messages, tool logs, config status, and summarized context, but it must not expose API keys or raw base64 screenshots.
+- `writeDocument` must be idempotent: model tool input must include an `operationId`, retries with the same id and identical document content must be safe, and conflicting reuse of an id must be rejected.
+- The Agent sidebar must publish a sanitized debug snapshot for local automation and web debugging. The snapshot may include current busy state, pending tool call, recent messages, tool logs, config status, summarized context, and active run id/status, but it must not expose API keys or raw base64 screenshots.
+- The Agent UI must show tool call status inline in the conversation flow rather than maintaining a standalone Tool Log panel. Clearing Conversation Context must clear visible tool status entries without recording a synthetic delete event.
+- The Agent sidebar must expose a front-end configuration interface for manual steering and debugging. The creator must be able to edit the system prompt used for future turns and edit the conversation context sent to the model, including both user messages and Agent replies. Backend protocol constraints for JSON responses, command-plan validation, and local command execution remain mandatory even when the creator edits the prompt.
 
-Chat history rules:
+Agent run rules:
 
-- Agent chat history must be scoped by project id and persisted by default.
-- Opening the Agent for a project should restore that project's prior conversation.
-- Chat history must remain until the creator explicitly deletes that project's Agent chat history.
-- Deleting Agent chat history must not delete project pages, resources, or editor undo history.
-- Chat history must use a stable project-local record, `agent-chat.json` inside the project folder, rather than relying only on browser `localStorage`.
-- Other local agents and debugging scripts should be able to read the same session from that file or from the Agent history endpoint without decoding browser profile databases.
+- A model turn must be represented as a persistent `agentRun`, not only as a single blocking chat request.
+- Each run should be split into durable steps such as `model_request`, `tool_call`, `tool_result`, `model_resume`, `retry`, and `command_plan`.
+- The web/Vite runtime must expose run inspection with `GET /__mangamaker__/agent/runs/:runId?projectId=...` and live updates with `GET /__mangamaker__/agent/runs/:runId/events`.
+- The UI should subscribe to run status with SSE or an equivalent realtime channel rather than waiting for a long `/chat` fetch.
+- Provider timeouts, terminated upstream connections, HTTP 429, HTTP 5xx, non-JSON responses, and invalid Agent JSON must be recorded in the run trace and retried or surfaced as clear run failures.
+- Tool results included in model resumes should be compacted or summarized when large; the model should request details on demand rather than receiving large context repeatedly.
+
+Conversation Context rules:
+
+- Agent Conversation Context must be scoped by project id and role id, and persisted by default.
+- Opening the Agent for a project should restore the active role's editable Conversation Context.
+- Switching the active role must load that role's single Conversation Context and must not show or save another role's messages under the new role.
+- Conversation Context must remain until the creator explicitly uses `Clear context`.
+- Clearing Conversation Context must clear only the active role's session and must not delete project pages, resources, Markdown documents, other role sessions, or editor undo history.
+- Conversation Context must use a stable project-local role-indexed record, `agent-conversation-context.json` inside the project folder, rather than relying only on browser `localStorage`.
+- Other local agents and debugging scripts should be able to read role sessions from that file or from `GET /__mangamaker__/agent/conversation-context?projectId=...&roleId=...` without decoding browser profile databases.
+- Existing single-session `agent-conversation-context.json` and `agent-chat.json` records may be read only as migration fallbacks; new writes should use the role-indexed Conversation Context store.
 
 Desktop rule:
 

@@ -218,7 +218,22 @@ describe("commandRegistry", () => {
       y: 280,
       width: 260,
       height: 150,
-    })) as { id: string };
+    })) as Bubble;
+
+    const movedBubble = (await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: bubble.id,
+      x: bubble.x + 40,
+      y: bubble.y + 30,
+    })) as Bubble;
+    expect(movedBubble.tailTip.x - bubble.tailTip.x).toBeCloseTo(
+      movedBubble.x - bubble.x,
+      6,
+    );
+    expect(movedBubble.tailTip.y - bubble.tailTip.y).toBeCloseTo(
+      movedBubble.y - bubble.y,
+      6,
+    );
 
     const tailHiddenBubble = (await runCommand(harness, "updateBubble", {
       pageId: page.id,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KonvaEventObject } from "konva/lib/Node";
 import {
   Circle,
@@ -20,6 +20,8 @@ import {
 import {
   clampBubbleTailBaseLocalPoint,
   clampBubbleRectToWorkspace,
+  clampElementRectToWorkspace,
+  clampTextBoxToWorkspace,
   getBubbleBasePoints,
   getPageWorkspace,
   getPanelAbsolutePoints,
@@ -129,6 +131,20 @@ type SmartGuideState = {
   y: number;
 } | null;
 
+type CanvasMoveObjectType = "panel" | "text" | "bubble" | "element";
+
+type CanvasObjectRef = {
+  objectType: CanvasMoveObjectType;
+  objectId: string;
+};
+
+type CanvasObjectRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 type ResizeHandle =
   | "top-left"
   | "top-right"
@@ -166,6 +182,29 @@ type CanvasLayoutSnapshot = {
   workspaceCanvasOrigin: { x: number; y: number };
   contentCanvasOrigin: { x: number; y: number };
   pageCanvasOrigin: { x: number; y: number };
+};
+
+type CanvasViewport = {
+  width: number;
+  height: number;
+};
+
+const readCssPixelValue = (value: string) => {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const measureCanvasViewport = (element: HTMLDivElement): CanvasViewport => {
+  const styles = window.getComputedStyle(element);
+  const horizontalPadding =
+    readCssPixelValue(styles.paddingLeft) + readCssPixelValue(styles.paddingRight);
+  const verticalPadding =
+    readCssPixelValue(styles.paddingTop) + readCssPixelValue(styles.paddingBottom);
+
+  return {
+    width: Math.max(0, element.clientWidth - horizontalPadding),
+    height: Math.max(0, element.clientHeight - verticalPadding),
+  };
 };
 
 const inferClipboardImageExtension = (mimeType: string | null) => {
@@ -295,6 +334,108 @@ const doRectsIntersect = (
   left.x + left.width >= right.x &&
   left.y <= right.y + right.height &&
   left.y + left.height >= right.y;
+
+const getCanvasObjectRefKey = (ref: CanvasObjectRef) =>
+  `${ref.objectType}:${ref.objectId}`;
+
+const getCanvasObjectRect = (page: Page, ref: CanvasObjectRef): CanvasObjectRect | null => {
+  if (ref.objectType === "panel") {
+    const panel = page.panels.find((entry) => entry.id === ref.objectId);
+    return panel ? { x: panel.x, y: panel.y, width: panel.width, height: panel.height } : null;
+  }
+  if (ref.objectType === "text") {
+    const text = page.texts.find((entry) => entry.id === ref.objectId);
+    return text ? { x: text.x, y: text.y, width: text.width, height: text.height } : null;
+  }
+  if (ref.objectType === "element") {
+    const element = (page.elements ?? []).find((entry) => entry.id === ref.objectId);
+    return element ? { x: element.x, y: element.y, width: element.width, height: element.height } : null;
+  }
+  const bubble = page.bubbles.find((entry) => entry.id === ref.objectId);
+  return bubble ? { x: bubble.x, y: bubble.y, width: bubble.width, height: bubble.height } : null;
+};
+
+const getCanvasMoveMembersForObject = (
+  page: Page,
+  objectType: CanvasMoveObjectType,
+  objectId: string,
+): CanvasObjectRef[] => {
+  const group = page.groups.find((entry) =>
+    entry.members.some((member) => member.objectType === objectType && member.objectId === objectId),
+  );
+  const refs = group?.members.map((member) => ({ ...member })) ?? [{ objectType, objectId }];
+  const seen = new Set<string>();
+  const deduped: CanvasObjectRef[] = [];
+  for (const ref of refs) {
+    const key = getCanvasObjectRefKey(ref);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(ref);
+  }
+  return deduped;
+};
+
+const clampCanvasGroupMoveDelta = (
+  page: Page,
+  members: CanvasObjectRef[],
+  requestedDeltaX: number,
+  requestedDeltaY: number,
+) => {
+  const workspace = getPageWorkspace(page);
+  let minAllowedDeltaX = Number.NEGATIVE_INFINITY;
+  let maxAllowedDeltaX = Number.POSITIVE_INFINITY;
+  let minAllowedDeltaY = Number.NEGATIVE_INFINITY;
+  let maxAllowedDeltaY = Number.POSITIVE_INFINITY;
+
+  for (const member of members) {
+    const rect = getCanvasObjectRect(page, member);
+    if (!rect) {
+      continue;
+    }
+    minAllowedDeltaX = Math.max(minAllowedDeltaX, workspace.x - rect.x);
+    maxAllowedDeltaX = Math.min(
+      maxAllowedDeltaX,
+      workspace.x + workspace.width - rect.width - rect.x,
+    );
+    minAllowedDeltaY = Math.max(minAllowedDeltaY, workspace.y - rect.y);
+    maxAllowedDeltaY = Math.min(
+      maxAllowedDeltaY,
+      workspace.y + workspace.height - rect.height - rect.y,
+    );
+  }
+
+  if (!Number.isFinite(minAllowedDeltaX) || !Number.isFinite(maxAllowedDeltaX)) {
+    return { deltaX: 0, deltaY: 0 };
+  }
+
+  return {
+    deltaX: Math.min(Math.max(requestedDeltaX, minAllowedDeltaX), maxAllowedDeltaX),
+    deltaY: Math.min(Math.max(requestedDeltaY, minAllowedDeltaY), maxAllowedDeltaY),
+  };
+};
+
+const resolveCanvasMoveRect = (
+  page: Page,
+  objectType: CanvasMoveObjectType,
+  objectId: string,
+  currentRect: CanvasObjectRect,
+  snappedRect: CanvasObjectRect,
+) => {
+  const members = getCanvasMoveMembersForObject(page, objectType, objectId);
+  const clampedDelta = clampCanvasGroupMoveDelta(
+    page,
+    members,
+    snappedRect.x - currentRect.x,
+    snappedRect.y - currentRect.y,
+  );
+  return {
+    ...snappedRect,
+    x: currentRect.x + clampedDelta.deltaX,
+    y: currentRect.y + clampedDelta.deltaY,
+  };
+};
 
 const buildCustomBubblePreview = (
   points: Point[],
@@ -1807,6 +1948,19 @@ const TextNode = ({
       objectId: item.id,
     });
   };
+  const resolveTextDragRect = (x: number, y: number) =>
+    resolveCanvasMoveRect(
+      page,
+      "text",
+      item.id,
+      item,
+      clampTextBoxToWorkspace(page, {
+        x,
+        y,
+        width: item.width,
+        height: item.height,
+      }),
+    );
 
   return (
     <>
@@ -1887,27 +2041,26 @@ const TextNode = ({
             }
           }
 
+          const nextRect = resolveTextDragRect(nextX, nextY);
+          event.target.position({
+            x: nextRect.x * scale,
+            y: nextRect.y * scale,
+          });
           onSmartGuideChange(nextGuide);
           onBoundaryPreviewChange({
             objectType: "text",
             objectId: item.id,
-            rect: {
-              x: nextX,
-              y: nextY,
-              width: item.width,
-              height: item.height,
-            },
+            rect: nextRect,
           });
         }}
         onClick={handleSelect}
         onDragEnd={(event) => {
           onSmartGuideChange(null);
-          const nextRect = {
-            x: event.target.x() / scale,
-            y: event.target.y() / scale,
-            width: item.width,
-            height: item.height,
-          };
+          const nextRect = resolveTextDragRect(event.target.x() / scale, event.target.y() / scale);
+          event.target.position({
+            x: nextRect.x * scale,
+            y: nextRect.y * scale,
+          });
           onBoundaryPreviewChange({
             objectType: "text",
             objectId: item.id,
@@ -2134,6 +2287,19 @@ const ElementNode = ({
     const angle = (Math.atan2(pointer.y - centerY, pointer.x - centerX) * 180) / Math.PI + 90;
     return Math.round(angle);
   };
+  const resolveElementDragRect = (x: number, y: number) =>
+    resolveCanvasMoveRect(
+      page,
+      "element",
+      item.id,
+      item,
+      clampElementRectToWorkspace(page, {
+        x,
+        y,
+        width: item.width,
+        height: item.height,
+      }),
+    );
 
   return (
     <>
@@ -2178,12 +2344,14 @@ const ElementNode = ({
           });
         }}
         onDragMove={(event) => {
-          const nextRect = {
-            x: event.target.x() / scale - item.width * 0.5,
-            y: event.target.y() / scale - item.height * 0.5,
-            width: item.width,
-            height: item.height,
-          };
+          const nextRect = resolveElementDragRect(
+            event.target.x() / scale - item.width * 0.5,
+            event.target.y() / scale - item.height * 0.5,
+          );
+          event.target.position({
+            x: (nextRect.x + item.width * 0.5) * scale,
+            y: (nextRect.y + item.height * 0.5) * scale,
+          });
           onBoundaryPreviewChange({
             objectType: "element",
             objectId: item.id,
@@ -2192,12 +2360,14 @@ const ElementNode = ({
         }}
         onClick={handleSelect}
         onDragEnd={(event) => {
-          const nextRect = {
-            x: event.target.x() / scale - item.width * 0.5,
-            y: event.target.y() / scale - item.height * 0.5,
-            width: item.width,
-            height: item.height,
-          };
+          const nextRect = resolveElementDragRect(
+            event.target.x() / scale - item.width * 0.5,
+            event.target.y() / scale - item.height * 0.5,
+          );
+          event.target.position({
+            x: (nextRect.x + item.width * 0.5) * scale,
+            y: (nextRect.y + item.height * 0.5) * scale,
+          });
           void executeCommand("updateElement", {
             pageId: page.id,
             elementId: item.id,
@@ -2528,6 +2698,19 @@ const BubbleNode = ({
       localPoints: nextLocalPoints,
     };
   };
+  const resolveBubbleDragRect = (x: number, y: number) =>
+    resolveCanvasMoveRect(
+      page,
+      "bubble",
+      bubble.id,
+      bubble,
+      clampBubbleRectToWorkspace(page, {
+        x,
+        y,
+        width: bubble.width,
+        height: bubble.height,
+      }),
+    );
 
   return (
     <>
@@ -2561,12 +2744,30 @@ const BubbleNode = ({
             });
           }
         }}
+        onDragMove={(event) => {
+          const nextRect = resolveBubbleDragRect(
+            event.target.x() / scale,
+            event.target.y() / scale,
+          );
+          event.target.position({
+            x: nextRect.x * scale,
+            y: nextRect.y * scale,
+          });
+        }}
         onDragEnd={(event) => {
+          const nextRect = resolveBubbleDragRect(
+            event.target.x() / scale,
+            event.target.y() / scale,
+          );
+          event.target.position({
+            x: nextRect.x * scale,
+            y: nextRect.y * scale,
+          });
           void executeCommand("updateBubble", {
             pageId: page.id,
             bubbleId: bubble.id,
-            x: event.target.x() / scale,
-            y: event.target.y() / scale,
+            x: nextRect.x,
+            y: nextRect.y,
           });
         }}
       >
@@ -3103,10 +3304,12 @@ export const CanvasView = ({
   page,
   onRequestImportImage,
   isLayoutResizing = false,
+  isActive = true,
 }: {
   page: Page;
   onRequestImportImage: (pageId: string, panelId: string) => void;
   isLayoutResizing?: boolean;
+  isActive?: boolean;
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const projectId = useEditorStore((state) => state.project.id);
@@ -3138,27 +3341,58 @@ export const CanvasView = ({
     activeTool === "bubble" && bubbleInsert.mode === "customClickDraw";
   const { t } = useI18n();
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = wrapperRef.current;
     if (!element) {
       return;
     }
 
     const updateSize = () => {
-      const styles = window.getComputedStyle(element);
-      const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-      const verticalPadding = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
-      setViewport({
-        width: Math.max(0, element.clientWidth - horizontalPadding),
-        height: Math.max(0, element.clientHeight - verticalPadding),
+      const nextViewport = measureCanvasViewport(element);
+      setViewport((currentViewport) =>
+        currentViewport.width === nextViewport.width &&
+        currentViewport.height === nextViewport.height
+          ? currentViewport
+          : nextViewport,
+      );
+    };
+    let resizeFrame: number | null = null;
+    let settleFrame: number | null = null;
+    let secondSettleFrame: number | null = null;
+
+    const scheduleUpdateSize = () => {
+      if (resizeFrame !== null) {
+        window.cancelAnimationFrame(resizeFrame);
+      }
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = null;
+        updateSize();
       });
     };
 
     updateSize();
-    const observer = new ResizeObserver(updateSize);
+    const observer = new ResizeObserver(scheduleUpdateSize);
     observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
+    window.addEventListener("resize", scheduleUpdateSize);
+    settleFrame = window.requestAnimationFrame(() => {
+      updateSize();
+      secondSettleFrame = window.requestAnimationFrame(updateSize);
+    });
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", scheduleUpdateSize);
+      if (resizeFrame !== null) {
+        window.cancelAnimationFrame(resizeFrame);
+      }
+      if (settleFrame !== null) {
+        window.cancelAnimationFrame(settleFrame);
+      }
+      if (secondSettleFrame !== null) {
+        window.cancelAnimationFrame(secondSettleFrame);
+      }
+    };
+  }, [page.id]);
 
   useEffect(() => {
     setBoundaryOverlayPreview(null);
@@ -3216,7 +3450,7 @@ export const CanvasView = ({
   }, [isCustomBubbleInsertMode]);
 
   useEffect(() => {
-    if (!isCustomBubbleInsertMode) {
+    if (!isActive || !isCustomBubbleInsertMode) {
       return;
     }
 
@@ -3234,25 +3468,30 @@ export const CanvasView = ({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isCustomBubbleInsertMode]);
+  }, [isActive, isCustomBubbleInsertMode]);
 
   const workspace = getPageWorkspace(page);
+  const hasMeasuredViewport = viewport.width > 0 && viewport.height > 0;
   const fitScale =
-    viewport.width > 0 && viewport.height > 0
+    hasMeasuredViewport
       ? Math.min(viewport.width / workspace.width, viewport.height / workspace.height, 1)
       : 1;
   const coverWorkspaceScale =
-    viewport.width > 0 && viewport.height > 0
+    hasMeasuredViewport
       ? Math.max(viewport.width / workspace.width, viewport.height / workspace.height)
       : 1;
-  const computedScale = Math.max(0.1, fitScale * zoom);
-  const computedWorkspaceScale =
-    zoom > 1 ? Math.max(coverWorkspaceScale, computedScale) : coverWorkspaceScale;
+  const computedScale = hasMeasuredViewport ? Math.max(0.1, fitScale * zoom) : 1;
+  const computedWorkspaceScale = hasMeasuredViewport
+    ? zoom > 1
+      ? Math.max(coverWorkspaceScale, computedScale)
+      : coverWorkspaceScale
+    : 1;
   const computedWorkspaceCanvasWidth = workspace.width * computedWorkspaceScale;
   const computedWorkspaceCanvasHeight = workspace.height * computedWorkspaceScale;
   const baseStageWidth = Math.max(1, viewport.width);
   const baseStageHeight = Math.max(1, viewport.height);
   const shouldUseScrollableStage =
+    hasMeasuredViewport &&
     zoom > 1 &&
     (computedWorkspaceCanvasWidth > baseStageWidth ||
       computedWorkspaceCanvasHeight > baseStageHeight);
@@ -3391,6 +3630,10 @@ export const CanvasView = ({
   }, [shouldUseScrollableStage, stageWidth, stageHeight, viewport.width, viewport.height, page.id]);
 
   useEffect(() => {
+    if (!isActive) {
+      return;
+    }
+
     const handlePointerMove = (event: PointerEvent) => {
       lastPointerRef.current = { clientX: event.clientX, clientY: event.clientY };
     };
@@ -3530,7 +3773,7 @@ export const CanvasView = ({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("paste", handlePaste);
     };
-  }, [page, scale, pageCanvasOrigin, executeCommand, projectId, projectTitle, projectType, selection]);
+  }, [isActive, page, scale, pageCanvasOrigin, executeCommand, projectId, projectTitle, projectType, selection]);
 
   const selectedObject = getSelectedObject(page, selection);
   const pageMultiSelection = useMemo(
@@ -4334,7 +4577,6 @@ export const CanvasView = ({
               width,
               height,
               bubbleType: bubbleInsert.presetBubbleType,
-              keepTool: true,
             });
           }
 

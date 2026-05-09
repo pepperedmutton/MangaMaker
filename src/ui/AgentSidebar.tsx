@@ -1,21 +1,50 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { chatWithAgent, getAgentConfig, publishAgentDebugSnapshot } from "../agent/client";
-import { deleteAgentChatHistory, loadAgentChatHistory, saveAgentChatHistory } from "../agent/chatHistory";
+import {
+  createAgentRequestTraceMetadata,
+  AgentRunError,
+  getAgentConfig,
+  getAgentRequestTraceFromError,
+  publishAgentDebugSnapshot,
+  resumeAgentRunTurn,
+  startAgentRunTurn,
+} from "../agent/client";
+import {
+  deleteAgentConversationContext,
+  loadAgentConversationContext,
+  saveAgentConversationContext,
+} from "../agent/conversationContext";
 import { getAgentContext } from "../agent/context";
 import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
+import { createProjectRole, deleteProjectRole, readProjectDocument } from "../agent/documents";
 import { buildAgentHarness, createAgentHarnessToolResult, executeAgentHarnessToolCall } from "../agent/harness";
+import type { AgentDocumentManifest } from "../agent/documentSchema";
+import {
+  AGENT_ROLES,
+  DEFAULT_AGENT_ROLE_ID,
+  createAgentRoleId,
+  getAgentRole,
+  type AgentRoleDefinition,
+  type AgentRoleId,
+} from "../agent/roles";
+import { DEFAULT_AGENT_SYSTEM_PROMPT } from "../agent/systemPrompt";
 import { executeCommandPlan, previewCommandPlan } from "../agent/tools";
 import type {
   AgentChatMessage,
+  AgentChatRequest,
+  AgentChatResponse,
   AgentConfig,
   AgentCommandPlan,
+  AgentConversationEntry,
   AgentContextSnapshot,
   AgentHarnessToolResult,
+  AgentRun,
+  AgentRunEvent,
+  AgentRequestTrace,
+  AgentToolCallRequest,
   AgentToolLogEntry,
 } from "../agent/types";
 import { AgentCommandPlan as AgentCommandPlanView } from "./AgentCommandPlan";
 import { AgentMessageList } from "./AgentMessageList";
-import { AgentToolLog } from "./AgentToolLog";
 
 const createId = (prefix: string) => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -43,12 +72,19 @@ const createLog = (
   createdAt: new Date().toISOString(),
 });
 
-const summarizeSelection = (context: AgentContextSnapshot | null) => {
-  if (!context?.selection) {
-    return "None";
-  }
-  return `${context.selection.objectType}:${context.selection.objectId}`;
-};
+const createMessageEntry = (message: AgentChatMessage): AgentConversationEntry => ({
+  id: message.id,
+  kind: "message",
+  message,
+  createdAt: message.createdAt,
+});
+
+const createToolEntry = (log: AgentToolLogEntry): AgentConversationEntry => ({
+  id: log.id,
+  kind: "tool",
+  log,
+  createdAt: log.createdAt,
+});
 
 const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPlan | null => {
   if (!plan || !Array.isArray(plan.commands) || plan.commands.length === 0) {
@@ -71,6 +107,8 @@ const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer 
 const createDefaultAgentMessages = () => [
   createMessage("assistant", DEFAULT_AGENT_GREETING),
 ];
+const createDefaultConversationEntries = () =>
+  createDefaultAgentMessages().map(createMessageEntry);
 
 const isOnlyDefaultAgentGreeting = (messages: AgentChatMessage[]) =>
   messages.length === 1 &&
@@ -88,18 +126,193 @@ const toAgentWireMessages = (
 const createToolCallKey = (call: { toolName: string; input: unknown }) =>
   `${call.toolName}:${JSON.stringify(call.input ?? {})}`;
 
-export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
-  const [messages, setMessages] = useState<AgentChatMessage[]>(createDefaultAgentMessages);
+type AgentContinuationState = {
+  id: string;
+  run: AgentRun | null;
+  messages: AgentChatMessage[];
+  systemPrompt: string;
+  context: AgentContextSnapshot;
+  activeRole: AgentRoleDefinition;
+  activeDocumentId: string | null;
+  dynamicToolResults: AgentHarnessToolResult[];
+  completedToolCallKeys: string[];
+  requestedToolCalls: AgentToolCallRequest[];
+  totalExecutedToolCallCount: number;
+  pauseReason: string;
+  createdAt: string;
+};
+
+type ConversationContextScope = {
+  projectId: string;
+  roleId: string;
+};
+
+const readRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+const describeToolCallForLog = (call: { toolName: string; input: unknown }) => {
+  const input = readRecord(call.input);
+  if (call.toolName === "writeDocument") {
+    const content = typeof input.content === "string" ? input.content : "";
+    return `documentId=${String(input.id ?? "unknown")}; title=${String(input.title ?? "untitled")}; contentLength=${content.length}`;
+  }
+  if (call.toolName === "readDocument" || call.toolName === "validateDocumentAgainstProject") {
+    return `documentId=${String(input.documentId ?? "unknown")}`;
+  }
+  if (call.toolName === "readPages" || call.toolName === "renderPages") {
+    const pageIds = Array.isArray(input.pageIds) ? input.pageIds : [];
+    return `pageIds=${pageIds.length}`;
+  }
+  if (call.toolName === "readPage" || call.toolName === "renderPage") {
+    return `pageId=${String(input.pageId ?? "unknown")}`;
+  }
+  if (call.toolName === "searchProject" || call.toolName === "searchDocuments" || call.toolName === "listImageAssets") {
+    return `queryLength=${typeof input.query === "string" ? input.query.length : 0}; limit=${String(input.limit ?? "default")}`;
+  }
+  return "Completed";
+};
+
+const RUNTIME_CONFIG_KEY_PREFIX = "mangamaker:agent:runtimeConfig:v1:";
+
+const runtimeConfigKeyForProject = (projectId: string) => `${RUNTIME_CONFIG_KEY_PREFIX}${projectId}`;
+
+const loadRuntimeSystemPrompt = (projectId: string) => {
+  try {
+    const raw = window.localStorage.getItem(runtimeConfigKeyForProject(projectId));
+    if (!raw) {
+      return DEFAULT_AGENT_SYSTEM_PROMPT;
+    }
+    const parsed = JSON.parse(raw) as { systemPrompt?: unknown };
+    return typeof parsed.systemPrompt === "string" && parsed.systemPrompt.trim().length > 0
+      ? parsed.systemPrompt
+      : DEFAULT_AGENT_SYSTEM_PROMPT;
+  } catch {
+    return DEFAULT_AGENT_SYSTEM_PROMPT;
+  }
+};
+
+const saveRuntimeSystemPrompt = (projectId: string, systemPrompt: string) => {
+  try {
+    window.localStorage.setItem(
+      runtimeConfigKeyForProject(projectId),
+      JSON.stringify({
+        systemPrompt,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+  } catch {
+    // Runtime config is a front-end override. Failing to persist it must not block chat.
+  }
+};
+
+export const AgentSidebar = ({
+  selectedDocumentId = null,
+  documentManifest = null,
+  onSelectDocument,
+  onDocumentsChanged,
+}: {
+  selectedDocumentId?: string | null;
+  documentManifest?: AgentDocumentManifest | null;
+  onSelectDocument?: (documentId: string | null) => void;
+  onDocumentsChanged?: () => void;
+}) => {
+  const [conversationEntries, setConversationEntries] = useState<AgentConversationEntry[]>(
+    createDefaultConversationEntries,
+  );
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<AgentCommandPlan | null>(null);
   const [contextSnapshot, setContextSnapshot] = useState<AgentContextSnapshot | null>(null);
-  const [toolLogs, setToolLogs] = useState<AgentToolLogEntry[]>([]);
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [lastWarning, setLastWarning] = useState<string | null>(null);
-  const [chatHistoryProjectId, setChatHistoryProjectId] = useState<string | null>(null);
-  const [chatHistoryLoaded, setChatHistoryLoaded] = useState(false);
+  const [conversationContextScope, setConversationContextScope] = useState<ConversationContextScope | null>(null);
+  const [conversationContextLoaded, setConversationContextLoaded] = useState(false);
+  const [activeRoleId, setActiveRoleId] = useState<AgentRoleId>(DEFAULT_AGENT_ROLE_ID);
+  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_AGENT_SYSTEM_PROMPT);
+  const [configPanelOpen, setConfigPanelOpen] = useState(false);
+  const [roleDialogOpen, setRoleDialogOpen] = useState(false);
+  const [roleSaving, setRoleSaving] = useState(false);
+  const [roleError, setRoleError] = useState<string | null>(null);
+  const [pendingContinuation, setPendingContinuation] = useState<AgentContinuationState | null>(null);
+  const [localDocumentManifest, setLocalDocumentManifest] = useState<AgentDocumentManifest | null>(null);
+  const [requestTraces, setRequestTraces] = useState<AgentRequestTrace[]>([]);
+  const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [newRole, setNewRole] = useState({
+    name: "",
+    title: "",
+    prompt: "",
+    metadocMode: "new" as "new" | "existing",
+    metadocId: "",
+    metadocTitle: "",
+    metadocPath: "",
+  });
+  const messages = useMemo(
+    () =>
+      conversationEntries
+        .filter((entry): entry is Extract<AgentConversationEntry, { kind: "message" }> =>
+          entry.kind === "message",
+        )
+        .map((entry) => entry.message),
+    [conversationEntries],
+  );
+  const effectiveDocumentManifest = localDocumentManifest ?? documentManifest;
+
+  useEffect(() => {
+    setLocalDocumentManifest(null);
+  }, [documentManifest?.updatedAt]);
+  const toolLogs = useMemo(
+    () =>
+      conversationEntries
+        .filter((entry): entry is Extract<AgentConversationEntry, { kind: "tool" }> =>
+          entry.kind === "tool",
+        )
+        .map((entry) => entry.log)
+        .reverse(),
+    [conversationEntries],
+  );
+
+  const recordRequestTrace = (trace: AgentRequestTrace | null | undefined) => {
+    if (!trace) {
+      return;
+    }
+    setRequestTraces((current) => [
+      trace,
+      ...current.filter((entry) => entry.requestId !== trace.requestId),
+    ].slice(0, 30));
+  };
+
+  const recordAgentRunUpdate = (run: AgentRun, _event?: AgentRunEvent) => {
+    setActiveRun(run);
+    setRequestTraces((current) => {
+      const byId = new Map(current.map((trace) => [trace.requestId, trace]));
+      for (const trace of run.trace) {
+        byId.set(trace.requestId, trace);
+      }
+      return Array.from(byId.values())
+        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+        .slice(0, 30);
+    });
+  };
+
+  const recordAgentError = (error: unknown) => {
+    recordRequestTrace(getAgentRequestTraceFromError(error));
+    if (error instanceof AgentRunError && error.run) {
+      recordAgentRunUpdate(error.run);
+    }
+  };
+
+  const sendAgentRunRequest = async (
+    request: Omit<AgentChatRequest, "requestTrace">,
+    stage: string,
+  ) => {
+    const result = await startAgentRunTurn({
+      ...request,
+      requestTrace: createAgentRequestTraceMetadata(stage),
+    }, recordAgentRunUpdate);
+    recordRequestTrace(result.response.requestTrace);
+    return result;
+  };
 
   useEffect(() => {
     const snapshot = createAgentDebugSnapshot({
@@ -107,15 +320,19 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
       busy,
       messages,
       toolLogs,
+      requestTraces,
       config,
       configError,
       lastWarning,
       pendingPlan,
       contextSnapshot,
+      activeRoleId,
+      activeDocumentId: selectedDocumentId,
+      activeRun,
     });
     setLatestAgentDebugSnapshot(snapshot);
     void publishAgentDebugSnapshot(snapshot);
-  }, [busy, messages, toolLogs, config, configError, lastWarning, pendingPlan, contextSnapshot]);
+  }, [busy, messages, toolLogs, requestTraces, config, configError, lastWarning, pendingPlan, contextSnapshot, activeRoleId, selectedDocumentId, activeRun]);
 
   useEffect(() => {
     let active = true;
@@ -142,17 +359,7 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
       if (contextResult.status === "fulfilled") {
         setContextSnapshot(contextResult.value);
         const projectId = contextResult.value.project.id;
-        const storedHistory = await loadAgentChatHistory(projectId);
-        if (!active) {
-          return;
-        }
-        setMessages(
-          storedHistory && storedHistory.messages.length > 0
-            ? storedHistory.messages
-            : createDefaultAgentMessages(),
-        );
-        setChatHistoryProjectId(projectId);
-        setChatHistoryLoaded(true);
+        setSystemPrompt(loadRuntimeSystemPrompt(projectId));
       }
     });
     return () => {
@@ -162,11 +369,15 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
         busy: false,
         messages,
         toolLogs,
+        requestTraces,
         config,
         configError,
         lastWarning,
         pendingPlan,
         contextSnapshot,
+        activeRoleId,
+        activeDocumentId: selectedDocumentId,
+        activeRun,
       });
       setLatestAgentDebugSnapshot(snapshot);
       void publishAgentDebugSnapshot(snapshot);
@@ -174,21 +385,50 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
   }, []);
 
   useEffect(() => {
-    if (!chatHistoryLoaded || !chatHistoryProjectId) {
+    if (!conversationContextLoaded || !conversationContextScope) {
       return;
     }
-    if (isOnlyDefaultAgentGreeting(messages)) {
-      return;
-    }
-    void saveAgentChatHistory(chatHistoryProjectId, messages);
-  }, [chatHistoryLoaded, chatHistoryProjectId, messages]);
+    saveRuntimeSystemPrompt(conversationContextScope.projectId, systemPrompt);
+  }, [conversationContextLoaded, conversationContextScope, systemPrompt]);
 
-  const contextSummary = useMemo(() => {
-    if (!contextSnapshot) {
-      return "Loading context...";
+  useEffect(() => {
+    if (busy) {
+      return;
     }
-    return `${contextSnapshot.project.title || "Untitled"} · ${contextSnapshot.project.pageCount} pages · ${contextSnapshot.imageAssets.length} images`;
-  }, [contextSnapshot]);
+    setConversationEntries((current) => {
+      let changed = false;
+      const next = current.map((entry) => {
+        if (entry.kind !== "tool" || entry.log.status !== "pending") {
+          return entry;
+        }
+        changed = true;
+        return {
+          ...entry,
+          log: {
+            ...entry.log,
+            status: "error" as const,
+            detail: entry.log.detail
+              ? `${entry.log.detail}; operation ended before this tool reported a result`
+              : "Operation ended before this tool reported a result.",
+          },
+        };
+      });
+      return changed ? next : current;
+    });
+  }, [busy]);
+
+  const availableRoles = useMemo(
+    () => (effectiveDocumentManifest ? effectiveDocumentManifest.roles : AGENT_ROLES),
+    [effectiveDocumentManifest],
+  );
+  const metadocRoleIds = useMemo(
+    () => new Set(availableRoles.map((role) => role.metadocId)),
+    [availableRoles],
+  );
+  const ordinaryDocuments = useMemo(
+    () => (effectiveDocumentManifest?.documents ?? []).filter((document) => !metadocRoleIds.has(document.id)),
+    [effectiveDocumentManifest, metadocRoleIds],
+  );
 
   const configSummary = useMemo(() => {
     if (!config) {
@@ -204,29 +444,251 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
       config.visionEnabled ? "vision enabled" : "vision unavailable"
     }`;
   }, [config]);
+  const activeRole = useMemo(
+    () => (availableRoles.length > 0 ? getAgentRole(activeRoleId, availableRoles) : null),
+    [activeRoleId, availableRoles],
+  );
+  const activeRoleMetadoc = useMemo(
+    () =>
+      activeRole
+        ? effectiveDocumentManifest?.documents.find((document) => document.id === activeRole.metadocId) ?? null
+        : null,
+    [activeRole, effectiveDocumentManifest],
+  );
+
+  useEffect(() => {
+    if (availableRoles.length === 0) {
+      if (activeRoleId) {
+        setActiveRoleId("");
+      }
+      return;
+    }
+    if (!availableRoles.some((role) => role.id === activeRoleId)) {
+      setActiveRoleId(availableRoles[0].id);
+    }
+  }, [activeRoleId, availableRoles]);
+
+  useEffect(() => {
+    const projectId = contextSnapshot?.project.id;
+    const roleId = activeRole?.id;
+    if (!projectId || !roleId) {
+      setConversationContextLoaded(false);
+      setConversationContextScope(null);
+      return;
+    }
+
+    let active = true;
+    setConversationContextLoaded(false);
+    setConversationEntries(createDefaultConversationEntries());
+    setPendingPlan(null);
+    setLastWarning(null);
+    setPendingContinuation(null);
+    void loadAgentConversationContext(projectId, roleId).then((storedContext) => {
+      if (!active) {
+        return;
+      }
+      setConversationEntries(
+        (storedContext && storedContext.messages.length > 0
+          ? storedContext.messages
+          : createDefaultAgentMessages()
+        ).map(createMessageEntry),
+      );
+      setConversationContextScope({ projectId, roleId });
+      setConversationContextLoaded(true);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [contextSnapshot?.project.id, activeRole?.id]);
+
+  useEffect(() => {
+    if (!conversationContextLoaded || !conversationContextScope || !activeRole) {
+      return;
+    }
+    if (conversationContextScope.roleId !== activeRole.id) {
+      return;
+    }
+    if (isOnlyDefaultAgentGreeting(messages)) {
+      return;
+    }
+    void saveAgentConversationContext(
+      conversationContextScope.projectId,
+      conversationContextScope.roleId,
+      messages,
+    );
+  }, [activeRole, conversationContextLoaded, conversationContextScope, messages]);
 
   const appendLog = (log: AgentToolLogEntry) => {
-    setToolLogs((current) => {
+    setConversationEntries((current) => {
       const withoutSupersededPending = current.filter(
-        (entry) => !(entry.label === log.label && entry.status === "pending"),
+        (entry) =>
+          !(
+            entry.kind === "tool" &&
+            entry.log.label === log.label &&
+            entry.log.status === "pending"
+          ),
       );
-      return [log, ...withoutSupersededPending].slice(0, 40);
+      const next = [...withoutSupersededPending, createToolEntry(log)];
+      const toolEntries = next.filter((entry) => entry.kind === "tool");
+      if (toolEntries.length <= 80) {
+        return next;
+      }
+      const toolIdsToDrop = new Set(
+        toolEntries.slice(0, toolEntries.length - 80).map((entry) => entry.id),
+      );
+      return next.filter((entry) => entry.kind !== "tool" || !toolIdsToDrop.has(entry.id));
     });
   };
 
-  const appendMessage = (message: AgentChatMessage) => {
-    setMessages((current) => [...current, message]);
+  const markPendingLogsAsError = (detail: string) => {
+    setConversationEntries((current) =>
+      current.map((entry) => {
+        if (entry.kind !== "tool" || entry.log.status !== "pending") {
+          return entry;
+        }
+        return {
+          ...entry,
+          log: {
+            ...entry.log,
+            status: "error",
+            detail: entry.log.detail ? `${entry.log.detail}; ${detail}` : detail,
+          },
+        };
+      }),
+    );
   };
 
-  const deleteCurrentChatHistory = () => {
-    const projectId = contextSnapshot?.project.id ?? chatHistoryProjectId;
-    if (projectId) {
-      void deleteAgentChatHistory(projectId);
+  const appendMessage = (message: AgentChatMessage) => {
+    setConversationEntries((current) => [...current, createMessageEntry(message)]);
+  };
+
+  const clearConversationContext = () => {
+    const projectId = contextSnapshot?.project.id ?? conversationContextScope?.projectId;
+    const roleId = activeRole?.id ?? conversationContextScope?.roleId;
+    if (projectId && roleId) {
+      void deleteAgentConversationContext(projectId, roleId);
     }
-    setMessages(createDefaultAgentMessages());
+    setConversationEntries(createDefaultConversationEntries());
+    if (projectId && roleId) {
+      setConversationContextScope({ projectId, roleId });
+    }
+    setConversationContextLoaded(Boolean(projectId && roleId));
     setPendingPlan(null);
     setLastWarning(null);
-    appendLog(createLog("chatHistory", "success", "Deleted current project chat history"));
+    setPendingContinuation(null);
+  };
+
+  const openRoleDialog = (metadocId?: string) => {
+    setRoleError(null);
+    setNewRole({
+      name: "",
+      title: "",
+      prompt: "",
+      metadocMode: metadocId ? "existing" : "new",
+      metadocId: metadocId ?? ordinaryDocuments[0]?.id ?? "",
+      metadocTitle: "",
+      metadocPath: "",
+    });
+    setRoleDialogOpen(true);
+  };
+
+  const createRole = async (event: FormEvent) => {
+    event.preventDefault();
+    const projectId = effectiveDocumentManifest?.projectId ?? contextSnapshot?.project.id ?? conversationContextScope?.projectId;
+    const name = newRole.name.trim();
+    if (!projectId) {
+      setRoleError("Project context is not loaded yet.");
+      return;
+    }
+    if (!name) {
+      setRoleError("Role name is required.");
+      return;
+    }
+    if (newRole.metadocMode === "existing" && !newRole.metadocId) {
+      setRoleError("Choose a metadoc document or create a new metadoc.");
+      return;
+    }
+    const roleId = createAgentRoleId(name, availableRoles);
+    setRoleSaving(true);
+    setRoleError(null);
+    try {
+      const manifest = await createProjectRole(projectId, {
+        id: roleId,
+        name,
+        title: newRole.title.trim() || name,
+        prompt: newRole.prompt.trim() || undefined,
+        ...(newRole.metadocMode === "existing"
+          ? { metadocId: newRole.metadocId }
+          : {
+              metadocTitle: newRole.metadocTitle.trim() || `${name} Metadoc`,
+              metadocPath: newRole.metadocPath.trim() || undefined,
+            }),
+      });
+      setLocalDocumentManifest(manifest);
+      setActiveRoleId(roleId);
+      setRoleDialogOpen(false);
+      onDocumentsChanged?.();
+    } catch (error) {
+      setRoleError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRoleSaving(false);
+    }
+  };
+
+  const deleteRole = async (role: AgentRoleDefinition) => {
+    const projectId = effectiveDocumentManifest?.projectId ?? contextSnapshot?.project.id ?? conversationContextScope?.projectId;
+    if (!projectId) {
+      setRoleError("Project context is not loaded yet.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete role "${role.name}"?\n\nIts metadoc will be kept as an ordinary Markdown document.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setRoleSaving(true);
+    setRoleError(null);
+    try {
+      const manifest = await deleteProjectRole(projectId, role.id);
+      setLocalDocumentManifest(manifest);
+      setActiveRoleId("");
+      onDocumentsChanged?.();
+    } catch (error) {
+      setRoleError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRoleSaving(false);
+    }
+  };
+
+  const updateMessage = (
+    messageId: string,
+    patch: Partial<Pick<AgentChatMessage, "role" | "content">>,
+  ) => {
+    setConversationEntries((current) =>
+      current.map((entry) =>
+        entry.kind === "message" && entry.message.id === messageId
+          ? {
+              ...entry,
+              message: {
+                ...entry.message,
+                ...patch,
+              },
+            }
+          : entry,
+      ),
+    );
+  };
+
+  const deleteMessage = (messageId: string) => {
+    setConversationEntries((current) =>
+      current.filter((entry) => entry.kind !== "message" || entry.message.id !== messageId),
+    );
+  };
+
+  const addContextMessage = (role: AgentChatMessage["role"]) => {
+    setConversationEntries((current) => [...current, createMessageEntry(createMessage(role, ""))]);
   };
 
   const runPlan = async (plan: AgentCommandPlan, approved: boolean) => {
@@ -254,6 +716,286 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
     }
   };
 
+  const finishAgentPayload = async (payload: AgentChatResponse) => {
+    if (payload.error) {
+      throw new Error(payload.error);
+    }
+    appendLog(createLog("agentChat", "success", payload.usedVision === false ? "Responded without visual input" : "Model response received"));
+    const warning = payload.warning ?? payload.visionUnavailableReason ?? null;
+    if (warning) {
+      setLastWarning(warning);
+      appendLog(createLog("agentWarning", "error", warning));
+    }
+    appendMessage(createMessage("assistant", payload.message));
+    for (const log of payload.toolLogs ?? []) {
+      appendLog(log);
+    }
+    const plan = sanitizePlan(payload.pendingCommandPlan);
+    if (!plan) {
+      return;
+    }
+    setPendingPlan(plan);
+    if (!plan.requiresConfirmation) {
+      await runPlan(plan, true);
+    }
+  };
+
+  const pauseForToolBudget = ({
+    messages,
+    systemPromptSnapshot,
+    context,
+    activeRoleSnapshot,
+    activeDocumentId,
+    run,
+    dynamicToolResults,
+    completedToolCallKeys,
+    requestedToolCalls,
+    totalExecutedToolCallCount,
+    segmentExecutedToolCallCount,
+    pauseReason,
+  }: {
+    messages: AgentChatMessage[];
+    systemPromptSnapshot: string;
+    context: AgentContextSnapshot;
+    activeRoleSnapshot: AgentRoleDefinition;
+    activeDocumentId: string | null;
+    run: AgentRun | null;
+    dynamicToolResults: AgentHarnessToolResult[];
+    completedToolCallKeys: string[];
+    requestedToolCalls: AgentToolCallRequest[];
+    totalExecutedToolCallCount: number;
+    segmentExecutedToolCallCount: number;
+    pauseReason: string;
+  }) => {
+    const nextTotalExecutedToolCallCount = totalExecutedToolCallCount + segmentExecutedToolCallCount;
+    const nextDynamicToolResults = [
+      ...dynamicToolResults,
+      createAgentHarnessToolResult("toolBudget", {}, {
+        exhausted: true,
+        remainingToolCalls: 0,
+        totalExecutedToolCallCount: nextTotalExecutedToolCallCount,
+        segmentExecutedToolCallCount,
+        maxToolCallsPerSegment: MAX_AGENT_TOOL_CALLS,
+        maxRoundsPerSegment: MAX_AGENT_TOOL_ROUNDS,
+        deniedToolCalls: requestedToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
+        reason: pauseReason,
+      }),
+    ];
+    setPendingContinuation({
+      id: createId("continuation"),
+      run,
+      messages,
+      systemPrompt: systemPromptSnapshot,
+      context,
+      activeRole: activeRoleSnapshot,
+      activeDocumentId,
+      dynamicToolResults: nextDynamicToolResults,
+      completedToolCallKeys,
+      requestedToolCalls,
+      totalExecutedToolCallCount: nextTotalExecutedToolCallCount,
+      pauseReason,
+      createdAt: new Date().toISOString(),
+    });
+    setLastWarning("Tool budget reached. Choose Continue or Stop.");
+    appendLog(createLog("agentToolBudget", "error", pauseReason));
+    appendLog(createLog("agentChat", "success", "Paused at tool budget; waiting for creator decision"));
+    appendMessage(
+      createMessage(
+        "assistant",
+        `Tool budget reached. I paused instead of answering from incomplete evidence.\n\nExecuted tool calls so far: ${nextTotalExecutedToolCallCount}\nPending tool requests: ${requestedToolCalls.length}\n\nChoose Continue to run another tool segment, or Stop to end this task.`,
+      ),
+    );
+  };
+
+  const runAgentToolLoop = async ({
+    initialPayload,
+    initialRun,
+    messages,
+    systemPromptSnapshot,
+    context,
+    activeRoleSnapshot,
+    activeDocumentId,
+    dynamicToolResults: initialDynamicToolResults,
+    completedToolCallKeys,
+    totalExecutedToolCallCount,
+  }: {
+    initialPayload: AgentChatResponse;
+    initialRun?: AgentRun | null;
+    messages: AgentChatMessage[];
+    systemPromptSnapshot: string;
+    context: AgentContextSnapshot;
+    activeRoleSnapshot: AgentRoleDefinition;
+    activeDocumentId: string | null;
+    dynamicToolResults: AgentHarnessToolResult[];
+    completedToolCallKeys?: string[];
+    totalExecutedToolCallCount?: number;
+  }) => {
+    let payload = initialPayload;
+    let currentRun = initialRun ?? null;
+    let dynamicToolResults = initialDynamicToolResults;
+    let segmentExecutedToolCallCount = 0;
+    const completedToolCalls = new Set(completedToolCallKeys ?? []);
+
+    for (let round = 0; round < MAX_AGENT_TOOL_ROUNDS && payload.requestedToolCalls?.length; round += 1) {
+      const requestedCalls = payload.requestedToolCalls;
+      const remainingToolCalls = Math.max(0, MAX_AGENT_TOOL_CALLS - segmentExecutedToolCallCount);
+      if (remainingToolCalls === 0) {
+        break;
+      }
+      const executableCalls = requestedCalls.slice(0, Math.min(remainingToolCalls, MAX_AGENT_TOOL_CALLS_PER_ROUND));
+      const deferredCalls = requestedCalls.slice(executableCalls.length);
+      if (deferredCalls.length > 0) {
+        dynamicToolResults = [
+          ...dynamicToolResults,
+          createAgentHarnessToolResult("toolBudget", {}, {
+            exhausted: false,
+            remainingToolCalls,
+            deferredToolCalls: deferredCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
+            reason: "Per-round tool call limit reached; request fewer or batch related reads.",
+          }),
+        ];
+        appendLog(createLog("agentToolBudget", "error", `${deferredCalls.length} tool call(s) deferred by per-round limit`));
+      }
+      appendLog(createLog("agentToolCalls", "pending", requestedCalls.map((call) => call.toolName).join(", ")));
+      const toolResults: AgentHarnessToolResult[] = [];
+      for (const call of executableCalls) {
+        const toolCallKey = createToolCallKey(call);
+        if (completedToolCalls.has(toolCallKey)) {
+          const skipped = createAgentHarnessToolResult("toolCallSkipped", {
+            toolName: call.toolName,
+            input: call.input,
+          }, {
+            reason: "Duplicate tool call skipped; the previous result is already present in the harness.",
+          });
+          toolResults.push(skipped);
+          appendLog(createLog(call.toolName, "success", "Skipped duplicate tool call"));
+          continue;
+        }
+        appendLog(createLog(call.toolName, "pending", call.reason));
+        const toolResult = await executeAgentHarnessToolCall(context, call);
+        toolResults.push(toolResult);
+        if (call.toolName === "writeDocument") {
+          onDocumentsChanged?.();
+        }
+        completedToolCalls.add(toolCallKey);
+        segmentExecutedToolCallCount += 1;
+        appendLog(createLog(call.toolName, "success", describeToolCallForLog(call)));
+      }
+      dynamicToolResults = [
+        ...dynamicToolResults,
+        ...toolResults,
+        createAgentHarnessToolResult("toolBudget", {}, {
+          exhausted: segmentExecutedToolCallCount >= MAX_AGENT_TOOL_CALLS,
+          remainingToolCalls: Math.max(0, MAX_AGENT_TOOL_CALLS - segmentExecutedToolCallCount),
+          segmentExecutedToolCallCount,
+          totalExecutedToolCallCount: (totalExecutedToolCallCount ?? 0) + segmentExecutedToolCallCount,
+          maxToolCallsPerSegment: MAX_AGENT_TOOL_CALLS,
+          maxRoundsPerSegment: MAX_AGENT_TOOL_ROUNDS,
+        }),
+      ];
+      appendLog(createLog("agentToolCalls", "success", `${toolResults.length} tool result(s)`));
+      appendLog(createLog("agentChat", "pending", `Waiting for model response after ${toolResults.length} tool result(s)`));
+      const harness = buildAgentHarness(context, dynamicToolResults);
+      const nextRequest = {
+        messages: toAgentWireMessages(messages),
+        systemPrompt: systemPromptSnapshot,
+        agentContext: context,
+        activeRoleId: activeRoleSnapshot.id,
+        activeRole: activeRoleSnapshot,
+        activeDocumentId,
+        harness,
+        canvasSnapshot: context.canvasSnapshot,
+      };
+      if (currentRun && !currentRun.id.startsWith("agent-run-tauri")) {
+        const result = await resumeAgentRunTurn(
+          currentRun.id,
+          currentRun.modelTurnIndex,
+          { harness, toolResults, dynamicToolResults },
+          recordAgentRunUpdate,
+        );
+        currentRun = result.run;
+        payload = result.response;
+      } else {
+        const result = await sendAgentRunRequest(nextRequest, "after-tool-results");
+        currentRun = result.run;
+        payload = result.response;
+      }
+    }
+
+    if (payload.error) {
+      throw new Error(payload.error);
+    }
+    if (payload.requestedToolCalls?.length) {
+      const pauseReason =
+        segmentExecutedToolCallCount >= MAX_AGENT_TOOL_CALLS
+          ? "Agent reached the current tool-call budget. It paused instead of answering from incomplete evidence."
+          : "Agent reached the current tool-round budget. It paused instead of answering from incomplete evidence.";
+      pauseForToolBudget({
+        messages,
+        systemPromptSnapshot,
+        context,
+        activeRoleSnapshot,
+        activeDocumentId,
+        run: currentRun,
+        dynamicToolResults,
+        completedToolCallKeys: Array.from(completedToolCalls),
+        requestedToolCalls: payload.requestedToolCalls,
+        totalExecutedToolCallCount: totalExecutedToolCallCount ?? 0,
+        segmentExecutedToolCallCount,
+        pauseReason,
+      });
+      return;
+    }
+
+    await finishAgentPayload(payload);
+  };
+
+  const continueAgentRun = async () => {
+    if (!pendingContinuation || busy) {
+      return;
+    }
+    const continuation = pendingContinuation;
+    setPendingContinuation(null);
+    setLastWarning(null);
+    setBusy(true);
+    appendLog(createLog("agentToolBudget", "success", "Continuing with a new tool budget segment"));
+    try {
+      await runAgentToolLoop({
+        initialPayload: {
+          message: "Continuing paused tool requests.",
+          pendingCommandPlan: null,
+          requestedToolCalls: continuation.requestedToolCalls,
+        },
+        messages: continuation.messages,
+        systemPromptSnapshot: continuation.systemPrompt,
+        context: continuation.context,
+        activeRoleSnapshot: continuation.activeRole,
+        activeDocumentId: continuation.activeDocumentId,
+        initialRun: continuation.run,
+        dynamicToolResults: continuation.dynamicToolResults,
+        completedToolCallKeys: continuation.completedToolCallKeys,
+        totalExecutedToolCallCount: continuation.totalExecutedToolCallCount,
+      });
+    } catch (error) {
+      recordAgentError(error);
+      const message = error instanceof Error ? error.message : String(error);
+      markPendingLogsAsError(message);
+      appendMessage(createMessage("assistant", message));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopAgentRun = () => {
+    if (!pendingContinuation || busy) {
+      return;
+    }
+    setPendingContinuation(null);
+    setLastWarning(null);
+    appendLog(createLog("agentToolBudget", "success", "Stopped paused Agent run"));
+    appendMessage(createMessage("assistant", "Stopped the paused Agent run. No final answer was generated from incomplete evidence."));
+  };
+
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = input.trim();
@@ -263,17 +1005,20 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
     setInput("");
     setPendingPlan(null);
     setLastWarning(null);
+    setPendingContinuation(null);
     const userMessage = createMessage("user", trimmed);
     const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
+    setConversationEntries((current) => [...current, createMessageEntry(userMessage)]);
     setBusy(true);
     appendLog(createLog("readContext", "pending"));
     try {
       if (!config?.enabled) {
         throw new Error(config?.reason ?? "Agent backend is not configured.");
       }
+      if (!activeRole) {
+        throw new Error("Create or restore an Agent role before chatting. Every role must have a metadoc.");
+      }
       const context = await getAgentContext();
-      const harness = buildAgentHarness(context);
       setContextSnapshot(context);
       appendLog(
         createLog(
@@ -285,145 +1030,65 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
           )} objects, viewing ${context.currentPage?.name ?? "no page"}`,
         ),
       );
+      appendLog(createLog("readMetadoc", "pending", activeRole.metadocId));
+      const activeMetadoc = await readProjectDocument(context.project.id, activeRole.metadocId);
+      const metadocContentLimit = 12000;
+      const metadocResult = createAgentHarnessToolResult("readActiveRoleMetadoc", {
+        documentId: activeRole.metadocId,
+        roleId: activeRole.id,
+      }, {
+        role: {
+          id: activeRole.id,
+          name: activeRole.name,
+          title: activeRole.title,
+          metadocId: activeRole.metadocId,
+        },
+        document: {
+          id: activeMetadoc.id,
+          title: activeMetadoc.title,
+          path: activeMetadoc.path,
+          status: activeMetadoc.status,
+          summary: activeMetadoc.summary ?? "",
+          content: activeMetadoc.content.slice(0, metadocContentLimit),
+          contentLength: activeMetadoc.content.length,
+          truncated: activeMetadoc.content.length > metadocContentLimit,
+        },
+      });
+      appendLog(createLog("readMetadoc", "success", activeMetadoc.path));
+      const dynamicToolResults: AgentHarnessToolResult[] = [metadocResult];
+      const harness = buildAgentHarness(context, dynamicToolResults);
       appendLog(
         createLog(
           "agentHarness",
           "success",
-          `${harness.tools.length} tools, ${harness.initialToolResults.length} initial reads`,
+          `${harness.tools.length} tools, ${harness.initialToolResults.length} initial reads, active metadoc loaded`,
         ),
       );
       appendLog(createLog("agentChat", "pending", "Waiting for model response"));
-      let dynamicToolResults: AgentHarnessToolResult[] = [];
-      let executedToolCallCount = 0;
-      const completedToolCalls = new Set<string>();
-      let payload = await chatWithAgent({
+      const initialRunResult = await sendAgentRunRequest({
         messages: toAgentWireMessages(nextMessages),
+        systemPrompt,
         agentContext: context,
+        activeRoleId: activeRole.id,
+        activeRole,
+        activeDocumentId: selectedDocumentId,
         harness,
         canvasSnapshot: context.canvasSnapshot,
+      }, "initial-model-response");
+      await runAgentToolLoop({
+        initialPayload: initialRunResult.response,
+        initialRun: initialRunResult.run,
+        messages: nextMessages,
+        systemPromptSnapshot: systemPrompt,
+        context,
+        activeRoleSnapshot: activeRole,
+        activeDocumentId: selectedDocumentId,
+        dynamicToolResults,
       });
-      for (let round = 0; round < MAX_AGENT_TOOL_ROUNDS && payload.requestedToolCalls?.length; round += 1) {
-        const requestedCalls = payload.requestedToolCalls;
-        const remainingToolCalls = Math.max(0, MAX_AGENT_TOOL_CALLS - executedToolCallCount);
-        if (remainingToolCalls === 0) {
-          break;
-        }
-        const executableCalls = requestedCalls.slice(0, Math.min(remainingToolCalls, MAX_AGENT_TOOL_CALLS_PER_ROUND));
-        const deferredCalls = requestedCalls.slice(executableCalls.length);
-        if (deferredCalls.length > 0) {
-          dynamicToolResults = [
-            ...dynamicToolResults,
-            createAgentHarnessToolResult("toolBudget", {}, {
-              exhausted: false,
-              remainingToolCalls,
-              deferredToolCalls: deferredCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
-              reason: "Per-round tool call limit reached; request fewer or batch related reads.",
-            }),
-          ];
-          appendLog(createLog("agentToolBudget", "error", `${deferredCalls.length} tool call(s) deferred by per-round limit`));
-        }
-        appendLog(createLog("agentToolCalls", "pending", requestedCalls.map((call) => call.toolName).join(", ")));
-        const toolResults: AgentHarnessToolResult[] = [];
-        for (const call of executableCalls) {
-          const toolCallKey = createToolCallKey(call);
-          if (completedToolCalls.has(toolCallKey)) {
-            const skipped = createAgentHarnessToolResult("toolCallSkipped", {
-              toolName: call.toolName,
-              input: call.input,
-            }, {
-              reason: "Duplicate tool call skipped; the previous result is already present in the harness.",
-            });
-            toolResults.push(skipped);
-            appendLog(createLog(call.toolName, "success", "Skipped duplicate tool call"));
-            continue;
-          }
-          appendLog(createLog(call.toolName, "pending", call.reason));
-          const toolResult = await executeAgentHarnessToolCall(context, call);
-          toolResults.push(toolResult);
-          completedToolCalls.add(toolCallKey);
-          executedToolCallCount += 1;
-          appendLog(createLog(call.toolName, "success", JSON.stringify(call.input)));
-        }
-        dynamicToolResults = [
-          ...dynamicToolResults,
-          ...toolResults,
-          createAgentHarnessToolResult("toolBudget", {}, {
-            exhausted: executedToolCallCount >= MAX_AGENT_TOOL_CALLS,
-            remainingToolCalls: Math.max(0, MAX_AGENT_TOOL_CALLS - executedToolCallCount),
-            executedToolCallCount,
-            maxToolCalls: MAX_AGENT_TOOL_CALLS,
-            maxRounds: MAX_AGENT_TOOL_ROUNDS,
-          }),
-        ];
-        appendLog(createLog("agentToolCalls", "success", `${toolResults.length} tool result(s)`));
-        payload = await chatWithAgent({
-          messages: toAgentWireMessages(nextMessages),
-          agentContext: context,
-          harness: buildAgentHarness(context, dynamicToolResults),
-          canvasSnapshot: context.canvasSnapshot,
-        });
-      }
-      if (payload.error) {
-        throw new Error(payload.error);
-      }
-      if (payload.requestedToolCalls?.length) {
-        const warning =
-          "Agent reached the current tool budget. It will answer from gathered context; narrow the page range if you need a deeper read.";
-        dynamicToolResults = [
-          ...dynamicToolResults,
-          createAgentHarnessToolResult("toolBudget", {}, {
-            exhausted: true,
-            remainingToolCalls: 0,
-            executedToolCallCount,
-            maxToolCalls: MAX_AGENT_TOOL_CALLS,
-            deniedToolCalls: payload.requestedToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
-            reason: warning,
-          }),
-        ];
-        appendLog(createLog("agentToolBudget", "error", warning));
-        payload = await chatWithAgent({
-          messages: toAgentWireMessages(
-            nextMessages,
-            "Agent harness notice: the tool budget for this turn is exhausted. Return a final answer from the gathered tool results now. Do not request more tools. If the evidence is incomplete, state that limitation and suggest a narrower follow-up.",
-          ),
-          agentContext: context,
-          harness: buildAgentHarness(context, dynamicToolResults),
-          canvasSnapshot: context.canvasSnapshot,
-        });
-        if (payload.error) {
-          throw new Error(payload.error);
-        }
-        if (payload.requestedToolCalls?.length) {
-          payload = {
-            ...payload,
-            requestedToolCalls: [],
-            pendingCommandPlan: null,
-            warning: payload.warning ?? warning,
-            message: payload.message || warning,
-          };
-        }
-      }
-      appendLog(createLog("agentChat", "success", payload.usedVision === false ? "Responded without visual input" : "Model response received"));
-      const warning = payload.warning ?? payload.visionUnavailableReason ?? null;
-      if (warning) {
-        setLastWarning(warning);
-        appendLog(createLog("agentWarning", "error", warning));
-      }
-      appendMessage(createMessage("assistant", payload.message));
-      for (const log of payload.toolLogs ?? []) {
-        appendLog(log);
-      }
-      const plan = sanitizePlan(payload.pendingCommandPlan);
-      if (!plan) {
-        return;
-      }
-      setPendingPlan(plan);
-      if (!plan.requiresConfirmation) {
-        await runPlan(plan, true);
-      }
     } catch (error) {
+      recordAgentError(error);
       const message = error instanceof Error ? error.message : String(error);
-      appendLog(createLog("agentChat", "error", message));
+      markPendingLogsAsError(message);
       appendMessage(createMessage("assistant", message));
     } finally {
       setBusy(false);
@@ -437,57 +1102,317 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
           <p className="eyebrow">Agent</p>
           <h3>MangaMaker Agent</h3>
         </div>
-        <button type="button" onClick={onClose} title="Close Agent">
-          Inspector
-        </button>
       </section>
 
       <section className="agent-config" aria-label="Agent configuration status">
         <h3>Configuration</h3>
         <p>{configSummary}</p>
+        {activeRun ? (
+          <p className="agent-run-status">
+            Run {activeRun.status.replace(/_/g, " ")} - {activeRun.steps.length} steps
+          </p>
+        ) : null}
         {configError ? <p className="agent-warning">{configError}</p> : null}
         {lastWarning ? <p className="agent-warning">{lastWarning}</p> : null}
       </section>
 
-      <section className="agent-context" aria-label="Agent context summary">
-        <h3>Context</h3>
-        <p>{contextSummary}</p>
-        <dl>
-          <div>
-            <dt>Selection</dt>
-            <dd>{summarizeSelection(contextSnapshot)}</dd>
+      <details
+        className="agent-manual-config"
+        aria-label="Agent manual config"
+        open={configPanelOpen}
+        onToggle={(event) => setConfigPanelOpen(event.currentTarget.open)}
+      >
+        <summary>Agent Config</summary>
+        <div className="agent-config-editor">
+          <label>
+            <span>System prompt</span>
+            <textarea
+              aria-label="Agent system prompt"
+              rows={10}
+              value={systemPrompt}
+              spellCheck={false}
+              disabled={busy}
+              onChange={(event) => setSystemPrompt(event.currentTarget.value)}
+            />
+          </label>
+          <div className="agent-config-actions">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setSystemPrompt(DEFAULT_AGENT_SYSTEM_PROMPT)}
+            >
+              Reset prompt
+            </button>
           </div>
-          <div>
-            <dt>Tool</dt>
-            <dd>{contextSnapshot?.activeTool ?? "unknown"}</dd>
+          <div className="agent-context-editor" aria-label="Agent conversation context editor">
+            <div className="agent-context-editor-header">
+              <h3>Conversation Context</h3>
+              <div>
+                <button type="button" disabled={busy || !conversationContextLoaded} onClick={() => addContextMessage("user")}>
+                  Add user
+                </button>
+                <button type="button" disabled={busy || !conversationContextLoaded} onClick={() => addContextMessage("assistant")}>
+                  Add agent
+                </button>
+                <button type="button" disabled={busy || !conversationContextLoaded} onClick={clearConversationContext}>
+                  Clear context
+                </button>
+              </div>
+            </div>
+            {messages.length === 0 ? (
+              <p className="hint">No context messages. Add a user or agent message before sending.</p>
+            ) : (
+              messages.map((message, index) => (
+                <div className="agent-context-message-editor" key={message.id}>
+                  <div className="agent-context-message-toolbar">
+                    <span>#{index + 1}</span>
+                    <select
+                      aria-label={`Context message ${index + 1} role`}
+                      value={message.role}
+                      disabled={busy || !conversationContextLoaded}
+                      onChange={(event) =>
+                        updateMessage(message.id, {
+                          role: event.currentTarget.value as AgentChatMessage["role"],
+                        })
+                      }
+                    >
+                      <option value="user">User</option>
+                      <option value="assistant">Agent</option>
+                    </select>
+                    <button type="button" disabled={busy || !conversationContextLoaded} onClick={() => deleteMessage(message.id)}>
+                      Delete
+                    </button>
+                  </div>
+                  <textarea
+                    aria-label={`Context message ${index + 1} content`}
+                    rows={3}
+                    value={message.content}
+                    disabled={busy || !conversationContextLoaded}
+                    onChange={(event) =>
+                      updateMessage(message.id, {
+                        content: event.currentTarget.value,
+                      })
+                    }
+                  />
+                </div>
+              ))
+            )}
           </div>
-          <div>
-            <dt>Canvas</dt>
-            <dd>
-              {contextSnapshot?.canvasSnapshot.dataUrl
-                ? `${contextSnapshot.canvasSnapshot.width}x${contextSnapshot.canvasSnapshot.height} (${contextSnapshot.canvasSnapshot.source ?? "unknown"})`
-                : contextSnapshot?.canvasSnapshot.reason ?? "No snapshot"}
-            </dd>
-          </div>
-        </dl>
-        {contextSnapshot?.canvasSnapshot.dataUrl ? (
-          <img
-            className="agent-canvas-preview"
-            src={contextSnapshot.canvasSnapshot.dataUrl}
-            alt="Current canvas snapshot"
-          />
-        ) : null}
+        </div>
+      </details>
+
+      <section className="agent-role" aria-label="Agent role">
+        <h3>Role</h3>
+        <label>
+          <span>Active role</span>
+          <select
+            value={activeRoleId}
+            onChange={(event) => {
+              setConversationContextLoaded(false);
+              setActiveRoleId(event.currentTarget.value as AgentRoleId);
+            }}
+            disabled={busy || availableRoles.length === 0}
+          >
+            {availableRoles.map((role) => (
+              <option key={role.id} value={role.id}>
+                {role.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {activeRole ? (
+          <>
+            <p>{activeRole.title}</p>
+            <p>
+              Metadoc: {activeRoleMetadoc?.path ?? activeRole.metadocId}
+            </p>
+          </>
+        ) : (
+          <p>No Agent role is active. Create a role with a metadoc before chatting.</p>
+        )}
+        <p>Active document: {selectedDocumentId ?? "none"}</p>
+        {roleError ? <p className="agent-warning">{roleError}</p> : null}
+        <div className="agent-role-actions">
+          <button type="button" disabled={busy || roleSaving} onClick={() => openRoleDialog()}>
+            New role
+          </button>
+          <button
+            type="button"
+            disabled={
+              busy ||
+              roleSaving ||
+              !selectedDocumentId ||
+              metadocRoleIds.has(selectedDocumentId)
+            }
+            onClick={() => selectedDocumentId ? openRoleDialog(selectedDocumentId) : undefined}
+          >
+            Role from active doc
+          </button>
+          <button
+            type="button"
+            disabled={busy || roleSaving || !activeRole}
+            onClick={() => activeRole ? void deleteRole(activeRole) : undefined}
+          >
+            Delete role
+          </button>
+          <button
+            type="button"
+            disabled={!activeRoleMetadoc}
+            onClick={() => activeRoleMetadoc ? onSelectDocument?.(activeRoleMetadoc.id) : undefined}
+          >
+            Open metadoc
+          </button>
+        </div>
       </section>
 
-      <section className="agent-history" aria-label="Agent chat history status">
-        <h3>Chat History</h3>
-        <p>Saved for this project until deleted.</p>
-        <button type="button" onClick={deleteCurrentChatHistory} disabled={busy || !chatHistoryLoaded}>
-          Delete chat
-        </button>
-      </section>
+      {roleDialogOpen ? (
+        <div className="document-dialog-backdrop">
+          <form
+            className="document-dialog"
+            role="dialog"
+            aria-label="New Agent role"
+            onSubmit={(event) => void createRole(event)}
+          >
+            <h3>New Agent role</h3>
+            <label>
+              <span>Name</span>
+              <input
+                aria-label="New role name"
+                value={newRole.name}
+                autoFocus
+                onChange={(event) => {
+                  const name = event.currentTarget.value;
+                  setNewRole((current) => ({ ...current, name }));
+                }}
+              />
+            </label>
+            <label>
+              <span>Title</span>
+              <input
+                aria-label="New role title"
+                value={newRole.title}
+                onChange={(event) => {
+                  const title = event.currentTarget.value;
+                  setNewRole((current) => ({ ...current, title }));
+                }}
+              />
+            </label>
+            <label>
+              <span>Metadoc</span>
+              <select
+                aria-label="New role metadoc mode"
+                value={newRole.metadocMode}
+                onChange={(event) => {
+                  const metadocMode = event.currentTarget.value as "new" | "existing";
+                  setNewRole((current) => ({
+                    ...current,
+                    metadocMode,
+                    metadocId: metadocMode === "existing" ? current.metadocId || ordinaryDocuments[0]?.id || "" : "",
+                  }));
+                }}
+              >
+                <option value="new">Create new metadoc</option>
+                <option value="existing" disabled={ordinaryDocuments.length === 0}>
+                  Use ordinary doc
+                </option>
+              </select>
+            </label>
+            {newRole.metadocMode === "existing" ? (
+              <label>
+                <span>Document</span>
+                <select
+                  aria-label="Existing metadoc document"
+                  value={newRole.metadocId}
+                  onChange={(event) => {
+                    const metadocId = event.currentTarget.value;
+                    setNewRole((current) => ({ ...current, metadocId }));
+                  }}
+                >
+                  {ordinaryDocuments.map((document) => (
+                    <option key={document.id} value={document.id}>
+                      {document.title} / {document.path}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <>
+                <label>
+                  <span>Metadoc title</span>
+                  <input
+                    aria-label="New role metadoc title"
+                    value={newRole.metadocTitle}
+                    onChange={(event) => {
+                      const metadocTitle = event.currentTarget.value;
+                      setNewRole((current) => ({ ...current, metadocTitle }));
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>Metadoc path</span>
+                  <input
+                    aria-label="New role metadoc path"
+                    value={newRole.metadocPath}
+                    placeholder="docs/roles/role-name.md"
+                    onChange={(event) => {
+                      const metadocPath = event.currentTarget.value;
+                      setNewRole((current) => ({ ...current, metadocPath }));
+                    }}
+                  />
+                </label>
+              </>
+            )}
+            <label>
+              <span>Role prompt</span>
+              <textarea
+                aria-label="New role prompt"
+                rows={4}
+                value={newRole.prompt}
+                onChange={(event) => {
+                  const prompt = event.currentTarget.value;
+                  setNewRole((current) => ({ ...current, prompt }));
+                }}
+              />
+            </label>
+            {roleError ? <p className="document-error">{roleError}</p> : null}
+            <div className="document-dialog-actions">
+              <button type="button" disabled={roleSaving} onClick={() => setRoleDialogOpen(false)}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={roleSaving || newRole.name.trim().length === 0}
+              >
+                {roleSaving ? "Creating..." : "Create role"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
 
-      <AgentMessageList messages={messages} />
+      {pendingContinuation ? (
+        <section className="agent-continuation" aria-label="Paused Agent run">
+          <div>
+            <h3>Tool Budget Reached</h3>
+            <p>{pendingContinuation.pauseReason}</p>
+            <p>
+              Executed tool calls: {pendingContinuation.totalExecutedToolCallCount}. Pending tool requests:{" "}
+              {pendingContinuation.requestedToolCalls.length}.
+            </p>
+          </div>
+          <div className="agent-plan-actions">
+            <button type="button" className="primary-button" onClick={() => void continueAgentRun()} disabled={busy}>
+              Continue
+            </button>
+            <button type="button" onClick={stopAgentRun} disabled={busy}>
+              Stop
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      <AgentMessageList entries={conversationEntries} />
 
       <AgentCommandPlanView
         plan={pendingPlan}
@@ -503,21 +1428,27 @@ export const AgentSidebar = ({ onClose }: { onClose: () => void }) => {
         }}
       />
 
-      <AgentToolLog logs={toolLogs} />
-
       <form className="agent-input-row" onSubmit={sendMessage}>
         <textarea
           aria-label="Agent prompt"
           value={input}
           rows={3}
-          placeholder={config?.enabled ? "Ask the agent..." : "Configure the Agent backend first."}
+          placeholder={
+            pendingContinuation
+              ? "Continue or stop the paused Agent run."
+              : config?.enabled
+              ? activeRole
+                ? "Ask the agent..."
+                : "Create an Agent role first."
+              : "Configure the Agent backend first."
+          }
           onChange={(event) => setInput(event.currentTarget.value)}
-          disabled={busy || config?.enabled !== true}
+          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation)}
         />
         <button
           type="submit"
           className="primary-button"
-          disabled={busy || config?.enabled !== true || input.trim().length === 0}
+          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation) || input.trim().length === 0}
         >
           Send
         </button>

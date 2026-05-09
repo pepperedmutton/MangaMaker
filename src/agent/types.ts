@@ -1,4 +1,10 @@
 import type { EditorMultiSelection, EditorSelection, SaveStatus, ToolMode } from "../state/types";
+import type {
+  AgentDocument,
+  AgentDocumentManifest,
+  AgentDocumentMeta,
+} from "./documentSchema";
+import type { AgentRoleDefinition, AgentRoleId } from "./roles";
 
 export type AgentDangerLevel = "safe" | "normal" | "destructive";
 
@@ -48,8 +54,9 @@ export type AgentChatMessage = {
   createdAt: string;
 };
 
-export type AgentChatHistory = {
+export type AgentConversationContext = {
   projectId: string;
+  roleId: string;
   updatedAt: string;
   messages: AgentChatMessage[];
   storagePath?: string;
@@ -62,6 +69,117 @@ export type AgentToolLogEntry = {
   detail?: string;
   createdAt: string;
 };
+
+export type AgentRequestTraceStatus = "pending" | "success" | "error" | "timeout";
+
+export type AgentRequestTraceDetailValue = string | number | boolean | null;
+
+export type AgentRequestTraceEvent = {
+  phase: string;
+  at: string;
+  elapsedMs: number;
+  message?: string;
+  detail?: Record<string, AgentRequestTraceDetailValue>;
+};
+
+export type AgentRequestTraceMetadata = {
+  requestId: string;
+  parentRequestId?: string;
+  stage: string;
+  createdAt: string;
+};
+
+export type AgentRequestTrace = {
+  requestId: string;
+  parentRequestId?: string;
+  stage: string;
+  status: AgentRequestTraceStatus;
+  provider: AgentConfig["provider"] | null;
+  model: string | null;
+  usedVision: boolean | null;
+  startedAt: string;
+  updatedAt: string;
+  durationMs: number;
+  events: AgentRequestTraceEvent[];
+  error?: string;
+};
+
+export type AgentRunStatus =
+  | "queued"
+  | "running"
+  | "waiting_for_tool"
+  | "waiting_for_confirmation"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AgentRunStepKind =
+  | "model_request"
+  | "model_resume"
+  | "tool_call"
+  | "tool_result"
+  | "command_plan"
+  | "command_result"
+  | "retry"
+  | "error";
+
+export type AgentRunStepStatus = "pending" | "running" | "success" | "error" | "waiting";
+
+export type AgentRunStep = {
+  id: string;
+  runId: string;
+  kind: AgentRunStepKind;
+  status: AgentRunStepStatus;
+  operationId: string;
+  summary: string;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  input?: unknown;
+  output?: unknown;
+  trace?: AgentRequestTrace;
+  error?: string;
+};
+
+export type AgentRun = {
+  id: string;
+  projectId: string;
+  roleId: string;
+  status: AgentRunStatus;
+  createdAt: string;
+  updatedAt: string;
+  modelTurnIndex: number;
+  steps: AgentRunStep[];
+  trace: AgentRequestTrace[];
+  pendingToolCalls: AgentToolCallRequest[];
+  latestResponse?: AgentChatResponse;
+  error?: string;
+};
+
+export type AgentRunEvent =
+  | {
+      type: "run_snapshot" | "run_updated";
+      run: AgentRun;
+    }
+  | {
+      type: "run_error";
+      run?: AgentRun;
+      error: string;
+    };
+
+export type AgentConversationEntry =
+  | {
+      id: string;
+      kind: "message";
+      message: AgentChatMessage;
+      createdAt: string;
+    }
+  | {
+      id: string;
+      kind: "tool";
+      log: AgentToolLogEntry;
+      createdAt: string;
+    };
 
 export type AgentCanvasSnapshot = {
   scope: "canvas" | "selection";
@@ -190,10 +308,15 @@ export type AgentAvailableModel = {
 
 export type AgentChatRequest = {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
+  systemPrompt?: string;
   agentContext: AgentContextSnapshot;
+  activeRoleId?: AgentRoleId;
+  activeRole?: AgentRoleDefinition;
+  activeDocumentId?: string | null;
   harness?: AgentHarnessSnapshot;
   canvasSnapshot?: AgentCanvasSnapshot | null;
   approvedCommandPlan?: AgentCommandPlan | null;
+  requestTrace?: AgentRequestTraceMetadata;
 };
 
 export type AgentChatResponse = {
@@ -205,6 +328,7 @@ export type AgentChatResponse = {
   usedVision?: boolean;
   warning?: string;
   visionUnavailableReason?: string;
+  requestTrace?: AgentRequestTrace;
 };
 
 export type AgentHarnessToolDefinition = {
@@ -232,6 +356,7 @@ export type AgentToolCallRequest = {
 export type AgentHarnessSnapshot = {
   mode: "tool-harness";
   currentPageId: string | null;
+  projectId: string;
   currentPageMarkedBy: "isCurrent";
   tools: AgentHarnessToolDefinition[];
   initialToolResults: AgentHarnessToolResult[];
@@ -239,20 +364,43 @@ export type AgentHarnessSnapshot = {
   resourcePolicy: {
     allPagesReadable: boolean;
     assetsReadableOnDemand: boolean;
+    documentsReadableOnDemand: boolean;
+    documentsWritableOnDemand: boolean;
     inlineDataUrlsRedactedFromPrompt: boolean;
     projectMutationPath: "commandPlanOnly";
   };
+};
+
+export type {
+  AgentDocument,
+  AgentDocumentManifest,
+  AgentDocumentMeta,
+  AgentRoleDefinition,
+  AgentRoleId,
 };
 
 export type AgentDebugSnapshot = {
   mounted: boolean;
   busy: boolean;
   updatedAt: string;
+  activeRoleId?: AgentRoleId;
+  activeDocumentId?: string | null;
+  activeRun?: {
+    id: string;
+    projectId: string;
+    roleId: string;
+    status: AgentRunStatus;
+    modelTurnIndex: number;
+    stepCount: number;
+    updatedAt: string;
+    error?: string;
+  } | null;
   activeToolCall: AgentToolLogEntry | null;
   pendingDurationMs: number | null;
   messageCount: number;
   messages: AgentChatMessage[];
   toolLogs: AgentToolLogEntry[];
+  requestTraces: AgentRequestTrace[];
   config: AgentConfig | null;
   configError: string | null;
   lastWarning: string | null;

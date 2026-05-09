@@ -105,6 +105,7 @@ describe("agent harness", () => {
 
     expect(harness.mode).toBe("tool-harness");
     expect(harness.currentPageId).toBe("page-2");
+    expect(harness.projectId).toBe("project-1");
     expect(harness.initialToolResults.map((entry) => entry.toolName)).toEqual([
       "readProjectSummary",
       "listPages",
@@ -143,10 +144,23 @@ describe("agent harness", () => {
     });
     expect(readPages.result).toMatchObject({
       pageIds: ["page-1", "page-2"],
+      truncated: false,
       pages: [
         expect.objectContaining({ id: "page-1" }),
         expect.objectContaining({ id: "page-2" }),
       ],
+    });
+
+    const oversizedRead = await executeAgentHarnessToolCall(context, {
+      toolName: "readPages",
+      input: { pageIds: Array.from({ length: 14 }, (_, index) => `page-${index + 1}`) },
+    });
+    expect(oversizedRead.result).toMatchObject({
+      requestedPageIdCount: 14,
+      maxPageIds: 12,
+      truncated: true,
+      pageIds: Array.from({ length: 12 }, (_, index) => `page-${index + 1}`),
+      skippedPageIds: ["page-13", "page-14"],
     });
   });
 
@@ -155,11 +169,24 @@ describe("agent harness", () => {
     expect(harness.resourcePolicy).toMatchObject({
       allPagesReadable: true,
       assetsReadableOnDemand: true,
+      documentsReadableOnDemand: true,
+      documentsWritableOnDemand: true,
       projectMutationPath: "commandPlanOnly",
     });
     expect(harness.tools.find((entry) => entry.name === "proposeCommandPlan")).toMatchObject({
       mutatesProject: true,
       requiresConfirmation: true,
+    });
+    expect(harness.tools.find((entry) => entry.name === "listDocuments")).toMatchObject({
+      mutatesProject: false,
+      requiresConfirmation: false,
+    });
+    expect(harness.tools.find((entry) => entry.name === "writeDocument")).toMatchObject({
+      mutatesProject: true,
+      requiresConfirmation: false,
+      inputSchema: expect.objectContaining({
+        required: expect.arrayContaining(["operationId"]),
+      }),
     });
   });
 

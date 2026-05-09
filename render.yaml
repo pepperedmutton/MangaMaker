@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: mangamaker
+    runtime: node
+    plan: free
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm start -- --host 0.0.0.0 --port $PORT --no-share
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: MANGAMAKER_AGENT_TEST_MODE
+        value: "0"
+      - key: MANGAMAKER_AGENT_MODEL
+        value: moonshotai/kimi-k2.6
+      - key: OPENROUTER_API_KEY
+        sync: false
