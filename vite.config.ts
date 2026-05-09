@@ -2698,7 +2698,12 @@ type AgentSchemaLoader = () => Promise<{
 }>;
 
 const createDynamicAgentSchemaLoader = (): AgentSchemaLoader => async () => {
-  const moduleName = pathToFileURL(path.resolve(process.cwd(), "src/agent/agentResponseSchema.ts")).href;
+  const runtimeModulePath = path.resolve(process.cwd(), "dist/agent-runtime/agentResponseSchema.mjs");
+  const runtimeModule = await fsp.stat(runtimeModulePath).catch(() => null);
+  if (!runtimeModule?.isFile()) {
+    throw new Error("Agent runtime validator is missing. Run pnpm build before starting preview.");
+  }
+  const moduleName = pathToFileURL(runtimeModulePath).href;
   return (await import(moduleName)) as {
     validateAgentChatResponse: (value: unknown) => unknown;
   };

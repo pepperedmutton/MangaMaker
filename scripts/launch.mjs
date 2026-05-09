@@ -244,7 +244,9 @@ const killChild = (child) => {
   child.kill("SIGTERM");
 };
 
-const distExists = () => fs.existsSync(path.join(rootDir, "dist", "index.html"));
+const distExists = () =>
+  fs.existsSync(path.join(rootDir, "dist", "index.html")) &&
+  fs.existsSync(path.join(rootDir, "dist", "agent-runtime", "agentResponseSchema.mjs"));
 
 const runBuild = async () => {
   await new Promise((resolve, reject) => {

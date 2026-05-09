@@ -10,7 +10,7 @@
     "predev": "pnpm sync:fonts",
     "prebuild": "pnpm sync:fonts",
     "dev": "node scripts/launch.mjs --dev-server",
-    "build": "tsc -b && vite build --config vite.config.ts",
+    "build": "tsc -b && vite build --config vite.config.ts && node scripts/buildAgentRuntime.mjs",
     "start": "node scripts/launch.mjs",
     "share": "node scripts/launch.mjs --share",
     "preview": "node scripts/launch.mjs",
