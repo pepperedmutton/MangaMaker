@@ -15,6 +15,11 @@ import {
   getOpenRouterFallbackProviderRouting,
   getOpenRouterProviderRouting,
 } from "../../src/agent/openRouterProviderRouting";
+import {
+  KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+  MIN_AGENT_CONTEXT_WINDOW_TOKENS,
+} from "../../src/agent/contextWindow";
+import { AGENT_MAX_BATCH_READ_PAGES } from "../../src/agent/toolLimits";
 import { executeCommandPlan, previewCommandPlan } from "../../src/agent/tools";
 import { useEditorStore } from "../../src/state/editorStore";
 
@@ -42,7 +47,7 @@ describe("agent config", () => {
       {
         id: "moonshotai/kimi-k2.6",
         name: "MoonshotAI: Kimi K2.6",
-        contextLength: 262142,
+        contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
         inputModalities: ["text", "image"],
         outputModalities: ["text"],
       },
@@ -61,6 +66,9 @@ describe("agent config", () => {
       model: "moonshotai/kimi-k2.6",
       apiKeyConfigured: true,
       visionEnabled: true,
+      contextWindowTokens: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+      contextWindowMaxTokens: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+      contextWindowSource: "model",
     });
 
     expect(
@@ -83,6 +91,56 @@ describe("agent config", () => {
     });
   });
 
+  it("lets the Agent context window be configured without exceeding the model limit", () => {
+    const availableModels = [
+      {
+        id: "moonshotai/kimi-k2.6",
+        name: "MoonshotAI: Kimi K2.6",
+        contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+        inputModalities: ["text", "image"],
+        outputModalities: ["text"],
+      },
+    ];
+
+    expect(
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+          MANGAMAKER_AGENT_MODEL: "moonshotai/kimi-k2.6",
+          MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS: "131072",
+        },
+        availableModels,
+      ),
+    ).toMatchObject({
+      contextWindowTokens: 131072,
+      contextWindowSource: "env",
+    });
+
+    expect(
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+          MANGAMAKER_AGENT_MODEL: "moonshotai/kimi-k2.6",
+          MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS: "999999",
+        },
+        availableModels,
+      ),
+    ).toMatchObject({
+      contextWindowTokens: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+      contextWindowSource: "env",
+    });
+
+    expect(
+      getAgentConfigFromEnv({
+        MANGAMAKER_AGENT_TEST_MODE: "1",
+        MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS: "1024",
+      }),
+    ).toMatchObject({
+      contextWindowTokens: MIN_AGENT_CONTEXT_WINDOW_TOKENS,
+      contextWindowSource: "env",
+    });
+  });
+
   it("filters available models to DeepSeek or Kimi multimodal JSON-capable models", () => {
     const models = filterAllowedAgentModels([
       {
@@ -90,7 +148,7 @@ describe("agent config", () => {
         name: "MoonshotAI: Kimi K2.6",
         architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
         supported_parameters: ["response_format"],
-        context_length: 262142,
+        context_length: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
       },
       {
         id: "deepseek/deepseek-vl",
@@ -164,7 +222,7 @@ describe("agent response validation", () => {
   });
 
   it("accepts oversized page batch tool requests as bounded harness work", () => {
-    const pageIds = Array.from({ length: 13 }, (_, index) => `page-${index + 1}`);
+    const pageIds = Array.from({ length: AGENT_MAX_BATCH_READ_PAGES + 1 }, (_, index) => `page-${index + 1}`);
     const response = validateAgentChatResponse({
       message: "Need a broad read",
       requestedToolCalls: [
@@ -181,7 +239,7 @@ describe("agent response validation", () => {
       {
         toolName: "readPages",
         input: { pageIds },
-        reason: expect.stringContaining("first 12"),
+        reason: expect.stringContaining(`first ${AGENT_MAX_BATCH_READ_PAGES}`),
       },
     ]);
   });
@@ -286,6 +344,7 @@ describe("agent response validation", () => {
           { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
           { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
           { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
+          { toolName: "renderPanel", input: { pageId: "p1", panelId: "panel-1", detail: "preview" }, reason: "Inspect one panel" },
           {
             toolName: "renderPage",
             input: { pageId: "p1", detail: "detail", crop: { x: 0, y: 0, width: 120, height: 80 } },
@@ -302,6 +361,7 @@ describe("agent response validation", () => {
       { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
       { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
       { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
+      { toolName: "renderPanel", input: { pageId: "p1", panelId: "panel-1", detail: "preview" }, reason: "Inspect one panel" },
       {
         toolName: "renderPage",
         input: { pageId: "p1", detail: "detail", crop: { x: 0, y: 0, width: 120, height: 80 } },

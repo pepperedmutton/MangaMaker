@@ -13,6 +13,8 @@ import {
   agentDocumentSchema,
   agentDocumentFromMarkdown,
   buildAgentDocumentMarkdown,
+  createAgentRoleMetadocDocumentId,
+  createAgentRoleMetadocPath,
   createDefaultAgentRolesForDocuments,
   createAgentDocumentMeta,
   type AgentDocument,
@@ -40,6 +42,20 @@ import {
   getOpenRouterProviderRouting,
   type OpenRouterProviderRouting,
 } from "./src/agent/openRouterProviderRouting";
+import {
+  collectCompletedAgentToolCallKeys,
+  createAgentToolCallKey,
+  createDuplicateToolCallSkippedResult,
+  mergeAgentToolResults,
+  selectAgentDynamicToolResultsForPrompt,
+} from "./src/agent/toolCallPolicy";
+import {
+  DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS,
+  KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+  MIN_AGENT_CONTEXT_WINDOW_TOKENS,
+  parseAgentContextWindowTokens,
+  resolveAgentContextWindowTokens,
+} from "./src/agent/contextWindow";
 
 const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projects";
 const PROJECT_META_FILE = ".latest_project";
@@ -62,7 +78,28 @@ const parsePositiveIntegerEnv = (value: string | undefined, fallback: number) =>
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 };
+const parseBoundedNumberEnv = (
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, parsed));
+};
 const OPENROUTER_REQUEST_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.MANGAMAKER_OPENROUTER_TIMEOUT_MS, 120000);
+const OPENROUTER_MAX_TOKENS = parsePositiveIntegerEnv(
+  process.env.MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS ?? process.env.MANGAMAKER_AGENT_MAX_TOKENS,
+  8192,
+);
+const OPENROUTER_TEMPERATURE = parseBoundedNumberEnv(process.env.MANGAMAKER_AGENT_TEMPERATURE, 0.1, 0, 2);
+const OPENROUTER_TOP_P = parseBoundedNumberEnv(process.env.MANGAMAKER_AGENT_TOP_P, 0.9, 0.01, 1);
+const AGENT_ENV_CONTEXT_WINDOW_TOKENS = parseAgentContextWindowTokens(
+  process.env.MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS ?? process.env.MANGAMAKER_AGENT_CONTEXT_WINDOW,
+);
 const AUTH_COOKIE_NAME = "mangamaker_auth";
 const AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const AUTH_LOGIN_PATH = "/__mangamaker__/auth/login";
@@ -1091,16 +1128,14 @@ const createAgentRoleWithMetadocFile = async (
       throw new Error(`Metadoc document not found: ${metadocId}`);
     }
   } else {
-    metadocId = createAgentRoleId(`${id}-metadoc`, manifest.roles);
+    metadocId = createAgentRoleMetadocDocumentId(name, id);
+    const metadocPath = createAgentRoleMetadocPath(name, id);
     const meta = agentDocumentMetaSchema.parse({
       id: metadocId,
-      title: roleInput.metadocTitle?.trim() || `${name} Metadoc`,
+      title: roleInput.metadocTitle?.trim() || name,
       role: id,
       status: "draft",
-      path: normalizeAgentDocumentPath(
-        roleInput.metadocPath?.trim() || `${AGENT_DOCS_DIR}/roles/${sanitizePathComponent(id, "role")}.md`,
-        metadocId,
-      ),
+      path: normalizeAgentDocumentPath(metadocPath, metadocId),
       relatedPageIds: [],
       updatedAt: now,
       summary: `Metadoc for ${name}.`,
@@ -1115,7 +1150,7 @@ const createAgentRoleWithMetadocFile = async (
     const documentPath = resolvePathInsideProjectDir(projectDir, meta.path);
     await fsp.mkdir(path.dirname(documentPath), { recursive: true });
     const body = [
-      `# ${meta.title}`,
+      `# ${name}`,
       "",
       "## Role",
       "",
@@ -1201,6 +1236,7 @@ type AgentContextPayload = {
   selectedPageId?: string | null;
   currentPage?: {
     id: string;
+    pageNumber?: number;
     name?: string;
     width?: number;
     height?: number;
@@ -1209,12 +1245,21 @@ type AgentContextPayload = {
     objects?: Array<{
       id: string;
       objectType: "panel" | "text" | "bubble" | "element";
+      objectRef?: string;
+      pageId?: string;
+      pageName?: string;
+      panelRef?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
       content?: string;
       hasImage?: boolean;
     }>;
   } | null;
   pages?: Array<{
     id: string;
+    pageNumber?: number;
     name?: string;
     width?: number;
     height?: number;
@@ -1228,6 +1273,14 @@ type AgentContextPayload = {
     objects?: Array<{
       id: string;
       objectType: "panel" | "text" | "bubble" | "element";
+      objectRef?: string;
+      pageId?: string;
+      pageName?: string;
+      panelRef?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
       content?: string;
       hasImage?: boolean;
     }>;
@@ -1242,7 +1295,13 @@ type AgentContextPayload = {
     objectType: "panel" | "text" | "bubble";
     content?: string;
   }>;
-  imageAssets?: Array<{ src: string }>;
+  imageAssets?: Array<{
+    src: string;
+    pageId?: string;
+    pageName?: string;
+    panelId?: string;
+    panelRef?: string;
+  }>;
   commandManifest?: unknown[];
   multiSelection?: unknown[];
   activeTool?: string;
@@ -1264,11 +1323,12 @@ type AgentChatPayload = {
   activeRole?: AgentRoleDefinition;
   activeDocumentId?: string | null;
   harness?: {
-    initialToolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
-    dynamicToolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
+    initialToolResults?: AgentHarnessToolResult[];
+    dynamicToolResults?: AgentHarnessToolResult[];
   };
   canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
   approvedCommandPlan?: AgentCommandPlan | null;
+  contextWindowTokens?: number;
   requestTrace?: AgentRequestTraceMetadata;
 };
 
@@ -1376,6 +1436,7 @@ type AgentRunState = AgentRunPublic & {
   dynamicToolResults: AgentHarnessToolResult[];
   serverToolCallCount?: number;
   serverToolRoundCount?: number;
+  duplicateToolCallStreak?: number;
 };
 
 type AgentRunEvent =
@@ -1785,9 +1846,9 @@ const summarizeToolResultsForRun = (
     };
   });
 
-const SERVER_AGENT_MAX_TOOL_ROUNDS = 8;
-const SERVER_AGENT_MAX_TOOL_CALLS = 24;
-const SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND = 8;
+const SERVER_AGENT_MAX_TOOL_ROUNDS = 24;
+const SERVER_AGENT_MAX_TOOL_CALLS = 72;
+const SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND = 24;
 const SERVER_EXECUTABLE_AGENT_TOOLS = new Set([
   "readProjectSummary",
   "listPages",
@@ -1843,10 +1904,11 @@ const getPayloadCurrentPage = (context: AgentContextPayload | undefined) => {
 const getPayloadPageById = (context: AgentContextPayload | undefined, pageId: string) =>
   getPayloadContextPages(context).find((page) => page.id === pageId) ?? null;
 
-const compactPageIndexEntry = (page: AgentContextPayload["pages"][number]) => {
+const compactPageIndexEntry = (page: AgentContextPayload["pages"][number], index: number) => {
   const objects = Array.isArray(page.objects) ? page.objects : [];
   return {
     id: page.id,
+    pageNumber: page.pageNumber ?? index + 1,
     name: page.name,
     width: page.width,
     height: page.height,
@@ -1876,8 +1938,11 @@ const searchPayloadProject = (
   const limit = clampServerToolLimit(input.limit, 20, 100);
   const matches: Array<{
     pageId: string;
+    pageNumber: number | null;
     pageName: string;
     objectId?: string;
+    objectRef?: string;
+    panelRef?: string;
     objectType?: string;
     assetSrc?: string;
     field: string;
@@ -1893,13 +1958,15 @@ const searchPayloadProject = (
   };
   const matchesQuery = (value: unknown) => !query || normalizedSearchText(value).includes(query);
 
-  for (const page of getPayloadContextPages(context)) {
+  for (const [pageIndex, page] of getPayloadContextPages(context).entries()) {
+    const pageNumber = page.pageNumber ?? pageIndex + 1;
     if (input.pageId && page.id !== input.pageId) {
       continue;
     }
     if (matchesQuery(page.name)) {
       addMatch({
         pageId: page.id,
+        pageNumber,
         pageName: page.name,
         field: "page.name",
         snippet: page.name,
@@ -1926,8 +1993,13 @@ const searchPayloadProject = (
         }
         addMatch({
           pageId: page.id,
+          pageNumber,
           pageName: page.name,
           objectId: object.id,
+          objectRef: objectRecord.objectRef ? asString(objectRecord.objectRef) : `${page.id}:${object.objectType}:${object.id}`,
+          panelRef: object.objectType === "panel"
+            ? asString(objectRecord.panelRef) || `${page.id}:${object.id}`
+            : undefined,
           objectType: object.objectType,
           field,
           snippet: String(value).slice(0, 240),
@@ -1947,6 +2019,7 @@ const searchPayloadProject = (
       ["prompt", asset.prompt],
       ["description", asset.description],
       ["panelId", asset.panelId],
+      ["panelRef", asset.panelRef],
     ] as const;
     for (const [field, value] of fields) {
       if (!value || !matchesQuery(value)) {
@@ -1954,8 +2027,11 @@ const searchPayloadProject = (
       }
       addMatch({
         pageId: assetPageId,
+        pageNumber: getPayloadContextPages(context).find((page) => page.id === assetPageId)?.pageNumber ?? null,
         pageName: asString(asset.pageName),
         objectId: asString(asset.panelId),
+        objectRef: assetPageId && asString(asset.panelId) ? `${assetPageId}:panel:${asString(asset.panelId)}` : undefined,
+        panelRef: asString(asset.panelRef) || (assetPageId && asString(asset.panelId) ? `${assetPageId}:${asString(asset.panelId)}` : undefined),
         objectType: "panel",
         assetSrc: asString(asset.src),
         field: `asset.${field}`,
@@ -1997,6 +2073,34 @@ const documentResultSummary = (document: AgentDocument) => ({
   summary: document.summary ?? "",
   contentLength: document.content.length,
 });
+
+const documentLookupFailureResult = (
+  requestedDocumentId: string,
+  error: unknown,
+  availableDocuments: AgentDocumentMeta[],
+) => ({
+  found: false as const,
+  requestedDocumentId,
+  error: error instanceof Error ? error.message : String(error),
+  availableDocuments: availableDocuments.map(documentIndexEntry),
+  guidance:
+    "Use one of the available document ids or paths. For role output, prefer the active role metadoc instead of inventing a new document id.",
+});
+
+type AgentDocumentLookupFailure = ReturnType<typeof documentLookupFailureResult>;
+
+const isDocumentLookupFailure = (
+  value: AgentDocument | AgentDocumentLookupFailure,
+): value is AgentDocumentLookupFailure => "found" in value && value.found === false;
+
+const readAgentDocumentFileForTool = async (projectId: string, documentId: string) => {
+  try {
+    return await readAgentDocumentFile(projectId, documentId);
+  } catch (error) {
+    const manifest = await ensureProjectDocuments(projectId).catch(() => null);
+    return documentLookupFailureResult(documentId, error, manifest?.documents ?? []);
+  }
+};
 
 const searchAgentDocumentsForTool = async (
   projectId: string,
@@ -2078,7 +2182,15 @@ const validateAgentDocumentAgainstPayloadProject = async (
   context: AgentContextPayload | undefined,
   input: { documentId?: string },
 ) => {
-  const document = await readAgentDocumentFile(projectId, input.documentId ?? "");
+  const document = await readAgentDocumentFileForTool(projectId, input.documentId ?? "");
+  if (isDocumentLookupFailure(document)) {
+    return {
+      ...document,
+      ok: false,
+      referencedPageIds: [],
+      missingPageIds: [],
+    };
+  }
   const existingPageIds = new Set(getPayloadContextPages(context).map((page) => page.id));
   const referencedPageIds = new Set<string>();
   const pageIdPattern = /\bpage[-_A-Za-z0-9]+\b/g;
@@ -2095,23 +2207,6 @@ const validateAgentDocumentAgainstPayloadProject = async (
     missingPageIds,
     ok: missingPageIds.length === 0,
   };
-};
-
-const mergeAgentToolResults = (
-  existing: AgentHarnessToolResult[],
-  incoming: AgentHarnessToolResult[],
-) => {
-  const merged: AgentHarnessToolResult[] = [];
-  const seen = new Set<string>();
-  for (const entry of [...existing, ...incoming]) {
-    const key = `${entry.toolName}:${JSON.stringify(entry.input ?? {})}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    merged.push(entry);
-  }
-  return merged;
 };
 
 const buildRunHarnessWithDynamicResults = (
@@ -2195,7 +2290,7 @@ const executeServerAgentToolCall = async (
       if (!query) {
         return true;
       }
-      return [asset.src, asset.prompt, asset.description, asset.panelId, asset.pageName].some((value) =>
+      return [asset.src, asset.prompt, asset.description, asset.panelId, asset.panelRef, asset.pageName].some((value) =>
         normalizedSearchText(value).includes(query),
       );
     });
@@ -2211,6 +2306,7 @@ const executeServerAgentToolCall = async (
     return createAgentHarnessToolResult(call.toolName, call.input, {
       pageId: currentPage?.id ?? context?.selectedPageId ?? null,
       pageName: currentPage?.name ?? null,
+      pageNumber: currentPage?.pageNumber ?? null,
       isCurrent: true,
       renderOptions: {
         detail: input.detail === "detail" ? "detail" : "preview",
@@ -2254,7 +2350,7 @@ const executeServerAgentToolCall = async (
     });
   }
   if (call.toolName === "readDocument") {
-    return createAgentHarnessToolResult(call.toolName, call.input, await readAgentDocumentFile(projectId, asString(input.documentId)));
+    return createAgentHarnessToolResult(call.toolName, call.input, await readAgentDocumentFileForTool(projectId, asString(input.documentId)));
   }
   if (call.toolName === "searchDocuments") {
     return createAgentHarnessToolResult(call.toolName, call.input, await searchAgentDocumentsForTool(projectId, {
@@ -2265,20 +2361,37 @@ const executeServerAgentToolCall = async (
   }
   if (call.toolName === "writeDocument") {
     const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
-    const saved = await writeAgentDocumentFile(projectId, {
-      id: asString(input.id),
-      title: asString(input.title),
-      role: asString(input.role) || undefined,
-      status: (asString(input.status) || undefined) as AgentDocumentMeta["status"] | undefined,
-      path: asString(input.path) || undefined,
-      relatedPageIds: Array.isArray(input.relatedPageIds)
-        ? input.relatedPageIds.filter((entry): entry is string => typeof entry === "string")
-        : undefined,
-      summary: asString(input.summary) || undefined,
-      content: typeof input.content === "string" ? input.content : "",
-      operationId,
-      lastAgentRunId: run.id,
-    });
+    let saved: AgentDocument;
+    try {
+      saved = await writeAgentDocumentFile(projectId, {
+        id: asString(input.id),
+        title: asString(input.title),
+        role: asString(input.role) || undefined,
+        status: (asString(input.status) || undefined) as AgentDocumentMeta["status"] | undefined,
+        path: asString(input.path) || undefined,
+        relatedPageIds: Array.isArray(input.relatedPageIds)
+          ? input.relatedPageIds.filter((entry): entry is string => typeof entry === "string")
+          : undefined,
+        summary: asString(input.summary) || undefined,
+        content: typeof input.content === "string" ? input.content : "",
+        operationId,
+        lastAgentRunId: run.id,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return createAgentHarnessToolResult(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: true,
+          operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId has already completed earlier with different content. Do not retry this write. Report the previous write as completed to the creator unless they explicitly request a new follow-up edit.",
+        });
+      }
+      throw error;
+    }
     return createAgentHarnessToolResult(call.toolName, call.input, {
       saved: true,
       operationId,
@@ -2313,6 +2426,10 @@ const executeServerAgentToolCalls = async (
       toolResults: [] as AgentHarnessToolResult[],
       clientToolCalls: requestedToolCalls,
       deferredToolCalls: [] as AgentToolCallRequest[],
+      executedToolCallCount: 0,
+      duplicateToolCallCount: 0,
+      duplicateOnly: false,
+      duplicateCompletionOnly: false,
       budgetExhausted: true,
       reason: "Agent reached the backend tool budget and paused instead of answering from incomplete evidence.",
     };
@@ -2325,10 +2442,23 @@ const executeServerAgentToolCalls = async (
   const clientToolCalls: AgentToolCallRequest[] = [];
   const deferredToolCalls: AgentToolCallRequest[] = requestedToolCalls.slice(availableCalls);
   const executableCalls = requestedToolCalls.slice(0, availableCalls);
+  const completedToolCallKeys = collectCompletedAgentToolCallKeys(run.dynamicToolResults);
+  let executedToolCallCount = 0;
+  let duplicateToolCallCount = 0;
   for (const call of executableCalls) {
+    if (SERVER_EXECUTABLE_AGENT_TOOLS.has(call.toolName)) {
+      const toolCallKey = createAgentToolCallKey(call);
+      if (completedToolCallKeys.has(toolCallKey)) {
+        toolResults.push(createDuplicateToolCallSkippedResult(call));
+        duplicateToolCallCount += 1;
+        continue;
+      }
+    }
     const result = await executeServerAgentToolCall(run, call);
     if (result) {
       toolResults.push(result);
+      completedToolCallKeys.add(createAgentToolCallKey(call));
+      executedToolCallCount += 1;
       continue;
     }
     clientToolCalls.push(call);
@@ -2341,10 +2471,25 @@ const executeServerAgentToolCalls = async (
       reason: "Backend per-round tool call limit reached; MangaMaker will resume after this batch.",
     }));
   }
+  const duplicateOnly =
+    duplicateToolCallCount > 0 &&
+    executedToolCallCount === 0 &&
+    clientToolCalls.length === 0 &&
+    deferredToolCalls.length === 0;
+  const duplicateCompletionOnly =
+    duplicateOnly &&
+    toolResults.every((entry) => {
+      const result = asRecord(entry.result);
+      return entry.toolName === "toolCallSkipped" && result.alreadyApplied === true;
+    });
   return {
     toolResults,
     clientToolCalls,
     deferredToolCalls,
+    executedToolCallCount,
+    duplicateToolCallCount,
+    duplicateOnly,
+    duplicateCompletionOnly,
     budgetExhausted: false,
     reason: null as string | null,
   };
@@ -2385,6 +2530,13 @@ const getCurrentAgentConfig = async () => {
   const testMode = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
   const model = process.env.MANGAMAKER_AGENT_MODEL?.trim() || null;
   const apiKeyConfigured = Boolean(process.env.OPENROUTER_API_KEY?.trim());
+  const createContextWindowFields = (modelContextLength?: number | null) =>
+    resolveAgentContextWindowTokens({
+      envTokens: AGENT_ENV_CONTEXT_WINDOW_TOKENS,
+      model,
+      modelContextLength,
+      testMode,
+    });
   if (testMode) {
     return {
       enabled: true,
@@ -2393,6 +2545,8 @@ const getCurrentAgentConfig = async () => {
       apiKeyConfigured,
       testMode: true,
       visionEnabled: true,
+      ...createContextWindowFields(null),
+      reason: undefined,
     };
   }
   if (!apiKeyConfigured) {
@@ -2403,6 +2557,7 @@ const getCurrentAgentConfig = async () => {
       apiKeyConfigured: false,
       testMode: false,
       visionEnabled: false,
+      ...createContextWindowFields(null),
       reason: "OPENROUTER_API_KEY is not configured.",
     };
   }
@@ -2414,6 +2569,7 @@ const getCurrentAgentConfig = async () => {
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
+      ...createContextWindowFields(null),
       reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the multimodal Agent.",
     };
   }
@@ -2428,10 +2584,12 @@ const getCurrentAgentConfig = async () => {
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
+      ...createContextWindowFields(null),
       reason: error instanceof Error ? error.message : "Failed to verify OpenRouter model capabilities.",
     };
   }
-  if (!availableModels.some((entry) => entry.id === model)) {
+  const configuredModel = availableModels.find((entry) => entry.id === model) ?? null;
+  if (!configuredModel) {
     return {
       enabled: false,
       provider: "unavailable" as const,
@@ -2439,6 +2597,7 @@ const getCurrentAgentConfig = async () => {
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
+      ...createContextWindowFields(null),
       reason:
         "Configured model is not available for MangaMaker Agent. Choose a DeepSeek or Kimi model with image input, text output, and JSON response_format support.",
     };
@@ -2450,6 +2609,8 @@ const getCurrentAgentConfig = async () => {
     apiKeyConfigured: true,
     testMode: false,
     visionEnabled: true,
+    ...createContextWindowFields(configuredModel.contextLength),
+    reason: undefined,
   };
 };
 
@@ -2461,7 +2622,7 @@ const TEST_AGENT_MODELS: AgentAvailableModel[] = [
   {
     id: "moonshotai/kimi-k2.6",
     name: "MoonshotAI: Kimi K2.6",
-    contextLength: 262142,
+    contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
     inputModalities: ["text", "image"],
     outputModalities: ["text"],
   },
@@ -2490,20 +2651,54 @@ const redactPromptValue = (value: unknown): unknown => {
   return value;
 };
 
+type AgentPromptBudget = {
+  contextWindowTokens: number;
+  inputBudgetTokens: number;
+  promptCharBudget: number;
+  topStringCharLimit: number;
+  deepStringCharLimit: number;
+  contentStringCharLimit: number;
+  recentDynamicToolResults: number;
+  preservedDynamicToolResults: number;
+  budgetResultLimit: number;
+  skippedResultLimit: number;
+};
+
+const clampInteger = (value: number, min: number, max: number) =>
+  Math.max(min, Math.min(max, Math.floor(value)));
+
+const createPromptBudget = (contextWindowTokens: number): AgentPromptBudget => {
+  const safeWindow = Math.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS, Math.floor(contextWindowTokens));
+  const reservedTokens = OPENROUTER_MAX_TOKENS + 4096;
+  const inputBudgetTokens = Math.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS, safeWindow - reservedTokens);
+  return {
+    contextWindowTokens: safeWindow,
+    inputBudgetTokens,
+    promptCharBudget: clampInteger(inputBudgetTokens * 2, 24_000, 600_000),
+    topStringCharLimit: clampInteger(inputBudgetTokens * 0.35, 8_000, 90_000),
+    deepStringCharLimit: clampInteger(inputBudgetTokens * 0.16, 3_000, 45_000),
+    contentStringCharLimit: clampInteger(inputBudgetTokens * 0.5, 6_000, 140_000),
+    recentDynamicToolResults: clampInteger(inputBudgetTokens / 10_000, 12, 36),
+    preservedDynamicToolResults: clampInteger(inputBudgetTokens / 12_000, 10, 32),
+    budgetResultLimit: clampInteger(inputBudgetTokens / 80_000, 3, 6),
+    skippedResultLimit: clampInteger(inputBudgetTokens / 80_000, 3, 6),
+  };
+};
+
 const truncatePromptString = (value: string, maxLength: number) =>
   value.length > maxLength
     ? `${value.slice(0, maxLength)}\n[truncated ${value.length - maxLength} characters]`
     : value;
 
-const compactPromptValue = (value: unknown, depth = 0): unknown => {
+const compactPromptValue = (value: unknown, budget: AgentPromptBudget, depth = 0): unknown => {
   if (typeof value === "string") {
     if (value.startsWith("data:image/")) {
       return "[redacted inline image data; attached separately only when vision is enabled]";
     }
-    return truncatePromptString(value, depth <= 2 ? 8000 : 3000);
+    return truncatePromptString(value, depth <= 2 ? budget.topStringCharLimit : budget.deepStringCharLimit);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => compactPromptValue(entry, depth + 1));
+    return value.map((entry) => compactPromptValue(entry, budget, depth + 1));
   }
   if (value && typeof value === "object") {
     return Object.fromEntries(
@@ -2512,35 +2707,49 @@ const compactPromptValue = (value: unknown, depth = 0): unknown => {
           return [key, "[attached image redacted from prompt text]"];
         }
         if (key === "content" && typeof entry === "string") {
-          return [key, truncatePromptString(entry, 6000)];
+          return [key, truncatePromptString(entry, budget.contentStringCharLimit)];
         }
-        return [key, compactPromptValue(entry, depth + 1)];
+        return [key, compactPromptValue(entry, budget, depth + 1)];
       }),
     );
   }
   return value;
 };
 
-const compactHarnessForPrompt = (harness: AgentChatPayload["harness"] | undefined) => {
+const compactHarnessForPrompt = (
+  harness: AgentChatPayload["harness"] | undefined,
+  budget: AgentPromptBudget,
+) => {
   if (!harness) {
     return null;
   }
   const initialToolResults = harness.initialToolResults ?? [];
   const dynamicToolResults = harness.dynamicToolResults ?? [];
+  const selectedDynamicToolResults = selectAgentDynamicToolResultsForPrompt(dynamicToolResults, {
+    recentLimit: budget.recentDynamicToolResults,
+    preservedResultLimit: budget.preservedDynamicToolResults,
+    budgetLimit: budget.budgetResultLimit,
+    skippedLimit: budget.skippedResultLimit,
+  });
   return compactPromptValue({
     ...harness,
-    initialToolResults: initialToolResults.map((entry) => compactPromptValue(entry)),
-    dynamicToolResults: dynamicToolResults.slice(-12).map((entry) => compactPromptValue(entry)),
+    initialToolResults: initialToolResults.map((entry) => compactPromptValue(entry, budget)),
+    dynamicToolResults: selectedDynamicToolResults.map((entry) => compactPromptValue(entry, budget)),
     compactedForPrompt: {
-      dynamicToolResultsIncluded: Math.min(dynamicToolResults.length, 12),
+      contextWindowTokens: budget.contextWindowTokens,
+      estimatedInputBudgetTokens: budget.inputBudgetTokens,
+      promptCharBudget: budget.promptCharBudget,
+      dynamicToolResultsIncluded: selectedDynamicToolResults.length,
       dynamicToolResultsTotal: dynamicToolResults.length,
-      policy: "Full data stays in the persisted run and browser harness. Prompt text includes only compacted recent tool results; request tools again only when needed.",
+      policy:
+        "Full data stays in the persisted run and browser harness. Prompt text includes compacted recent tool results plus the latest unique non-budget tool results so document reads do not disappear behind budget/skip messages; render images are attached with explicit page/panel labels when vision is enabled.",
     },
-  });
+  }, budget);
 };
 
 const compactPageForPrompt = (page: NonNullable<AgentContextPayload["pages"]>[number]) => ({
   id: page.id,
+  pageNumber: page.pageNumber,
   name: page.name,
   width: page.width,
   height: page.height,
@@ -2554,7 +2763,10 @@ const compactPageForPrompt = (page: NonNullable<AgentContextPayload["pages"]>[nu
   isCurrent: Boolean(page.isCurrent || page.viewing),
 });
 
-const compactAgentContextForPrompt = (context: AgentContextPayload | undefined) => {
+const compactAgentContextForPrompt = (
+  context: AgentContextPayload | undefined,
+  budget: AgentPromptBudget,
+) => {
   if (!context) {
     return {};
   }
@@ -2583,6 +2795,7 @@ const compactAgentContextForPrompt = (context: AgentContextPayload | undefined) 
       searchAvailableVia: "searchProject",
       imageAssetsAvailableVia: "listImageAssets",
       pageRendersAvailableVia: "renderPage",
+      panelRendersAvailableVia: "renderPanel",
       multiplePageRendersAvailableVia: "renderPages",
       rolesAvailableVia: "listRoles",
       documentsAvailableVia: "listDocuments/readDocument/searchDocuments",
@@ -2591,11 +2804,14 @@ const compactAgentContextForPrompt = (context: AgentContextPayload | undefined) 
       currentCanvasSnapshotAttachedInitially: false,
       visionTokenPolicy: {
         initialImagesAttached: false,
+        contextWindowTokens: budget.contextWindowTokens,
+        estimatedInputBudgetTokens: budget.inputBudgetTokens,
         defaultRenderDetail: "preview",
         previewMaxEdge: AGENT_PREVIEW_RENDER_MAX_EDGE,
         detailMaxEdge: AGENT_DETAIL_RENDER_MAX_EDGE,
         maxImageAttachments: MAX_AGENT_IMAGE_ATTACHMENTS,
         cropSupportedBy: "renderPage",
+        panelCropSupportedBy: "renderPanel",
       },
     },
     counts: {
@@ -2614,34 +2830,103 @@ const getHarnessToolResults = (harness: AgentChatPayload["harness"]) => [
   ...(harness?.dynamicToolResults ?? []),
 ];
 
-const collectImageDataUrls = (value: unknown): string[] => {
-  if (!value || typeof value !== "object") {
-    return [];
-  }
-  if (Array.isArray(value)) {
-    return value.flatMap(collectImageDataUrls);
-  }
-  const record = value as Record<string, unknown>;
-  const ownDataUrl =
-    typeof record.dataUrl === "string" && record.dataUrl.startsWith("data:image/")
-      ? [record.dataUrl]
-      : [];
-  return [
-    ...ownDataUrl,
-    ...Object.entries(record)
-      .filter(([key]) => key === "canvasSnapshot" || key === "results")
-      .flatMap(([, entry]) => collectImageDataUrls(entry)),
-  ];
+type AgentHarnessImageAttachment = {
+  dataUrl: string;
+  label: string;
+  toolName: string;
+  pageId: string | null;
+  pageName: string | null;
+  pageNumber: number | null;
+  panelId: string | null;
+  panelRef: string | null;
 };
 
-const getHarnessImageDataUrls = (harness: AgentChatPayload["harness"]) =>
+const toNullableString = (value: unknown) => {
+  const text = asString(value).trim();
+  return text.length > 0 ? text : null;
+};
+
+const toNullableNumber = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+const createHarnessImageAttachment = (
+  toolName: string,
+  value: unknown,
+  fallbackLabel: string,
+): AgentHarnessImageAttachment | null => {
+  const record = asRecord(value);
+  const snapshot = asRecord(record.canvasSnapshot);
+  const dataUrl = asString(snapshot.dataUrl);
+  if (!dataUrl.startsWith("data:image/")) {
+    return null;
+  }
+  const pageId = toNullableString(record.pageId);
+  const pageName = toNullableString(record.pageName);
+  const pageNumber = toNullableNumber(record.pageNumber);
+  const panelId = toNullableString(record.panelId);
+  const panelRef = toNullableString(record.panelRef);
+  const labelParts = [
+    fallbackLabel,
+    pageNumber ? `pageNumber=${pageNumber}` : null,
+    pageId ? `pageId=${pageId}` : null,
+    pageName ? `pageName=${pageName}` : null,
+    panelId ? `panelId=${panelId}` : null,
+    panelRef ? `panelRef=${panelRef}` : null,
+  ].filter(Boolean);
+  return {
+    dataUrl,
+    label: labelParts.join(" "),
+    toolName,
+    pageId,
+    pageName,
+    pageNumber,
+    panelId,
+    panelRef,
+  };
+};
+
+const getHarnessImageAttachments = (harness: AgentChatPayload["harness"]) =>
   getHarnessToolResults(harness)
-    .flatMap((entry) => collectImageDataUrls(entry.result))
+    .flatMap((entry) => {
+      const toolName = asString(entry.toolName);
+      const result = asRecord(entry.result);
+      if (toolName === "renderPages" && Array.isArray(result.results)) {
+        return result.results
+          .map((item, index) =>
+            createHarnessImageAttachment(
+              toolName,
+              item,
+              `Vision attachment from renderPages resultIndex=${index}; complete page render; not a panel.`,
+            ),
+          )
+          .filter((item): item is AgentHarnessImageAttachment => Boolean(item));
+      }
+      if (toolName === "renderPanel") {
+        const attachment = createHarnessImageAttachment(
+          toolName,
+          result,
+          "Vision attachment from renderPanel; single panel crop; not a complete page.",
+        );
+        return attachment ? [attachment] : [];
+      }
+      if (toolName === "renderPage" || toolName === "renderCurrentPage") {
+        const attachment = createHarnessImageAttachment(
+          toolName,
+          result,
+          `Vision attachment from ${toolName}; complete page render; not a panel.`,
+        );
+        return attachment ? [attachment] : [];
+      }
+      return [];
+    })
     .slice(-MAX_AGENT_IMAGE_ATTACHMENTS);
+
+const getHarnessImageDataUrls = (harness: AgentChatPayload["harness"]) =>
+  getHarnessImageAttachments(harness).map((attachment) => attachment.dataUrl);
 
 const getRenderedPageToolResults = (payload: AgentChatPayload) =>
   getHarnessToolResults(payload.harness).filter(
-    (entry) => entry.toolName === "renderPage" || entry.toolName === "renderPages",
+    (entry) => entry.toolName === "renderPage" || entry.toolName === "renderPages" || entry.toolName === "renderPanel",
   );
 
 const getCurrentPageId = (context: AgentContextPayload) =>
@@ -2683,17 +2968,28 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   const hasDocumentList = harnessResults.some((entry) => entry.toolName === "listDocuments");
   const hasDocumentRead = harnessResults.some((entry) => entry.toolName === "readDocument");
   const hasDocumentWrite = harnessResults.some((entry) => entry.toolName === "writeDocument");
+  const hasCreatorToolBudgetContinuation = harnessResults.some(
+    (entry) =>
+      entry.toolName === "toolBudget" &&
+      Boolean(entry.result && typeof entry.result === "object" && "continuedByCreator" in entry.result),
+  );
 
   if (normalized.includes("tool budget loop")) {
+    if (hasCreatorToolBudgetContinuation) {
+      return {
+        message: "I continued after the tool budget pause and now have enough context to stop.",
+        requestedToolCalls: [],
+        pendingCommandPlan: null,
+        usedVision: hasVisionInput,
+      };
+    }
     return {
       message: "I need one more tool call.",
-      requestedToolCalls: [
-        {
+      requestedToolCalls: Array.from({ length: SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND + 1 }, (_, index) => ({
           toolName: "readProjectSummary",
-          input: {},
+          input: { batchIndex: index },
           reason: "Simulate a model that keeps requesting tools.",
-        },
-      ],
+        })),
       pendingCommandPlan: null,
       usedVision: hasVisionInput,
     };
@@ -3019,13 +3315,67 @@ const parseModelJson = (content: string) => {
   }
 };
 
-const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolean) => {
+const resolvePayloadContextWindow = (
+  payload: AgentChatPayload,
+  config: {
+    model: string | null;
+    testMode: boolean;
+    contextWindowMaxTokens?: number | null;
+  },
+) =>
+  resolveAgentContextWindowTokens({
+    requestedTokens: parseAgentContextWindowTokens(payload.contextWindowTokens),
+    envTokens: AGENT_ENV_CONTEXT_WINDOW_TOKENS,
+    model: config.model,
+    modelContextLength: config.contextWindowMaxTokens ?? null,
+    testMode: config.testMode,
+  });
+
+const compactMessagesForOpenRouter = (
+  messages: AgentChatPayload["messages"],
+  budget: AgentPromptBudget,
+) => {
+  const source = messages ?? [];
+  const maxConversationChars = Math.floor(budget.promptCharBudget * 0.45);
+  const result: Array<{ role: "user" | "assistant"; content: string }> = [];
+  let usedChars = 0;
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    const message = source[index];
+    const remaining = maxConversationChars - usedChars;
+    if (!message || remaining <= 0) {
+      break;
+    }
+    const safeContent = String(message.content ?? "");
+    const content =
+      safeContent.length > remaining
+        ? `[older part of this conversation message truncated to fit context window]\n${safeContent.slice(-remaining)}`
+        : safeContent;
+    usedChars += content.length;
+    result.unshift({
+      role: message.role,
+      content,
+    });
+  }
+  if (result.length < source.length) {
+    result.unshift({
+      role: "assistant",
+      content: `[${source.length - result.length} older conversation message(s) omitted to fit the configured context window.]`,
+    });
+  }
+  return result;
+};
+
+const buildOpenRouterMessages = (
+  payload: AgentChatPayload,
+  includeImage: boolean,
+  budget: AgentPromptBudget,
+) => {
   const systemPrompt = [
     normalizeAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT),
     AGENT_PROTOCOL_SYSTEM_PROMPT,
   ].join("\n\n");
   const harnessText = payload.harness
-    ? `\n\nAgent harness JSON:\n${JSON.stringify(compactHarnessForPrompt(payload.harness), null, 2)}`
+    ? `\n\nAgent harness JSON:\n${JSON.stringify(compactHarnessForPrompt(payload.harness, budget), null, 2)}`
     : "";
   const activeRole = payload.activeRole
     ? agentRoleDefinitionSchema.parse(payload.activeRole)
@@ -3036,23 +3386,29 @@ const buildOpenRouterMessages = (payload: AgentChatPayload, includeImage: boolea
     `Role default autonomy: ${activeRole.defaultAutonomy}`,
     `Role instruction: ${activeRole.prompt}`,
     `Active document id: ${payload.activeDocumentId ?? "none"}`,
-    `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext), null, 2)}${harnessText}`,
+    `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext, budget), null, 2)}${harnessText}`,
   ].join("\n\n");
-  const imageUrls = getHarnessImageDataUrls(payload.harness);
+  const imageAttachments = getHarnessImageAttachments(payload.harness);
   const contextContent =
-    includeImage && imageUrls.length > 0
+    includeImage && imageAttachments.length > 0
       ? [
           { type: "text", text: contextText },
-          ...imageUrls.map((url) => ({ type: "image_url", image_url: { url } })),
+          ...imageAttachments.flatMap((attachment, index) => [
+            {
+              type: "text",
+              text: [
+                `Vision attachment ${index + 1}/${imageAttachments.length}: ${attachment.label}`,
+                "Identity rule: complete page render attachments are separate pages, not panels of one page. renderPanel attachments are crops of exactly one panel owned by the stated pageId.",
+              ].join("\n"),
+            },
+            { type: "image_url", image_url: { url: attachment.dataUrl } },
+          ]),
         ]
       : contextText;
   return [
     { role: "system", content: systemPrompt },
     { role: "user", content: contextContent },
-    ...(payload.messages ?? []).map((message) => ({
-      role: message.role,
-      content: message.content,
-    })),
+    ...compactMessagesForOpenRouter(payload.messages, budget),
   ];
 };
 
@@ -3093,6 +3449,12 @@ const callOpenRouter = async (
   if (!config.enabled || config.provider !== "openrouter" || !config.model) {
     throw new Error(config.reason ?? "Agent is not configured.");
   }
+  const contextWindow = resolvePayloadContextWindow(payload, {
+    model: config.model,
+    testMode: config.testMode,
+    contextWindowMaxTokens: config.contextWindowMaxTokens,
+  });
+  const promptBudget = createPromptBudget(contextWindow.contextWindowTokens);
   trace = recordAgentTraceEvent(trace, "agent_config_checked", {
     provider: "openrouter",
     model: config.model,
@@ -3101,6 +3463,14 @@ const callOpenRouter = async (
       visionEnabled: config.visionEnabled,
       includeImage,
       timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      maxTokens: OPENROUTER_MAX_TOKENS,
+      temperature: OPENROUTER_TEMPERATURE,
+      topP: OPENROUTER_TOP_P,
+      contextWindowTokens: contextWindow.contextWindowTokens,
+      contextWindowMaxTokens: contextWindow.contextWindowMaxTokens,
+      contextWindowSource: contextWindow.contextWindowSource,
+      estimatedInputBudgetTokens: promptBudget.inputBudgetTokens,
+      promptCharBudget: promptBudget.promptCharBudget,
     },
   });
   const sendRequest = async (provider: OpenRouterProviderRouting, retryWarning?: string) => {
@@ -3120,6 +3490,8 @@ const callOpenRouter = async (
           messageCount: payload.messages?.length ?? 0,
           initialToolResults: payload.harness?.initialToolResults?.length ?? 0,
           dynamicToolResults: payload.harness?.dynamicToolResults?.length ?? 0,
+          contextWindowTokens: contextWindow.contextWindowTokens,
+          promptCharBudget: promptBudget.promptCharBudget,
         },
       });
       response = await fetch(OPENROUTER_CHAT_URL, {
@@ -3133,9 +3505,11 @@ const callOpenRouter = async (
         body: JSON.stringify({
           model: config.model,
           provider,
-          temperature: 0.2,
+          temperature: OPENROUTER_TEMPERATURE,
+          top_p: OPENROUTER_TOP_P,
+          max_tokens: OPENROUTER_MAX_TOKENS,
           response_format: { type: "json_object" },
-          messages: buildOpenRouterMessages(payload, includeImage),
+          messages: buildOpenRouterMessages(payload, includeImage, promptBudget),
         }),
         signal: controller.signal,
       });
@@ -3209,9 +3583,17 @@ const callOpenRouter = async (
       throw error;
     }
     const content = extractOpenRouterAssistantContent(parsed);
+    const responseRecord = asRecord(parsed);
+    const choices = Array.isArray(responseRecord.choices) ? responseRecord.choices : [];
+    const firstChoice = asRecord(choices[0]);
+    const usage = asRecord(responseRecord.usage);
     trace = recordAgentTraceEvent(trace, "openrouter_assistant_content_extracted", {
       detail: {
         contentLength: content.length,
+        finishReason: asString(firstChoice.finish_reason) || asString(firstChoice.native_finish_reason) || "unknown",
+        promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null,
+        completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : null,
+        totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : null,
       },
     });
     let parsedModelJson: Record<string, unknown>;
@@ -3458,6 +3840,11 @@ const startAgentRunModelStep = (
         : [];
       if (requestedToolCalls.length > 0) {
         const toolExecution = await executeServerAgentToolCalls(run, requestedToolCalls);
+        const duplicateLoopPauseReason =
+          "Agent reached the backend tool budget because it repeated an identical tool request after MangaMaker had already supplied that result. The run paused to avoid an infinite read loop.";
+        const duplicateToolCallStreak =
+          toolExecution.duplicateOnly ? (run.duplicateToolCallStreak ?? 0) + 1 : 0;
+        run.duplicateToolCallStreak = duplicateToolCallStreak;
         if (toolExecution.toolResults.length > 0) {
           const now = new Date().toISOString();
           run.steps.push({
@@ -3475,10 +3862,14 @@ const startAgentRunModelStep = (
             ...run.payload,
             harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults),
           };
-          run.serverToolCallCount = (run.serverToolCallCount ?? 0) + toolExecution.toolResults.filter((entry) => entry.toolName !== "toolBudget").length;
+          run.serverToolCallCount = (run.serverToolCallCount ?? 0) + toolExecution.executedToolCallCount;
           run.serverToolRoundCount = (run.serverToolRoundCount ?? 0) + 1;
         }
-        if (toolExecution.clientToolCalls.length === 0 && toolExecution.toolResults.length > 0) {
+        if (
+          toolExecution.clientToolCalls.length === 0 &&
+          toolExecution.toolResults.length > 0 &&
+          (!toolExecution.duplicateOnly || toolExecution.duplicateCompletionOnly)
+        ) {
           run.pendingToolCalls = [];
           run.latestResponse = {
             ...response,
@@ -3494,7 +3885,9 @@ const startAgentRunModelStep = (
         run.latestResponse = {
           ...response,
           requestedToolCalls: pendingToolCalls,
-          ...(toolExecution.budgetExhausted && toolExecution.reason
+          ...(toolExecution.duplicateOnly
+            ? { warning: duplicateLoopPauseReason }
+            : toolExecution.budgetExhausted && toolExecution.reason
             ? { warning: toolExecution.reason }
             : {}),
         };
@@ -3813,6 +4206,7 @@ const attachWebAgentMiddleware = (
             harness?: AgentChatPayload["harness"];
             toolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
             dynamicToolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
+            continueBudgetSegment?: boolean;
           }>(req);
           const now = new Date().toISOString();
           const toolResults = (body.toolResults ?? []).map((entry) => ({
@@ -3855,10 +4249,36 @@ const attachWebAgentMiddleware = (
             ),
           };
           run.dynamicToolResults = nextDynamicToolResults;
+          if (body.continueBudgetSegment === true) {
+            run.serverToolCallCount = 0;
+            run.serverToolRoundCount = 0;
+            run.duplicateToolCallStreak = 0;
+            run.steps.push({
+              ...createAgentRunStep(
+                run.id,
+                "tool_result",
+                "Started a new backend tool budget segment",
+                "success",
+                {
+                  continuedByCreator: true,
+                  previousStatus: run.status,
+                },
+              ),
+              finishedAt: now,
+            });
+          }
           run.pendingToolCalls = [];
+          run.status = "queued";
+          if (run.latestResponse && typeof run.latestResponse === "object") {
+            run.latestResponse = {
+              ...run.latestResponse,
+              requestedToolCalls: [],
+              warning: undefined,
+            };
+          }
           await saveAndBroadcastAgentRun(run);
-          startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);
           json(res, 202, toPublicAgentRun(run));
+          startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);
           return;
         }
         if (method === "POST" && runAction === "cancel") {

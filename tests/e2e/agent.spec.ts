@@ -578,6 +578,60 @@ test("agent config edits system prompt and conversation context", async ({ page 
   ]);
 });
 
+test("agent prompt submits with Enter and keeps Shift+Enter as newline", async ({ page }) => {
+  let capturedMessages: Array<{ role: string; content: string }> = [];
+  await page.route("**/__mangamaker__/agent/runs", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    const payload = route.request().postDataJSON() as {
+      messages?: Array<{ role: string; content: string }>;
+      agentContext?: { project?: { id?: string } };
+      activeRoleId?: string;
+    };
+    capturedMessages = payload.messages ?? [];
+    const now = new Date().toISOString();
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "agent-run-e2e-enter-submit",
+        projectId: payload.agentContext?.project?.id ?? "project-e2e",
+        roleId: payload.activeRoleId ?? "assistant",
+        status: "completed",
+        createdAt: now,
+        updatedAt: now,
+        modelTurnIndex: 1,
+        steps: [],
+        trace: [],
+        pendingToolCalls: [],
+        latestResponse: {
+          message: "Enter submitted",
+          pendingCommandPlan: null,
+        },
+      }),
+    });
+  });
+
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Agent Enter Submit");
+  await openAgent(page);
+
+  const prompt = page.getByLabel("Agent prompt");
+  await prompt.fill("Line one");
+  await prompt.press("Shift+Enter");
+  await prompt.type("Line two");
+  await expect(prompt).toHaveValue("Line one\nLine two");
+  await prompt.press("Enter");
+
+  await expect(page.getByLabel("Agent messages")).toContainText("Enter submitted");
+  expect(capturedMessages.at(-1)).toEqual({
+    role: "user",
+    content: "Line one\nLine two",
+  });
+});
+
 test("agent conversation context switches with the active role", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Role Sessions");
@@ -671,10 +725,181 @@ test("agent pauses with continue and stop controls when the tool budget is exhau
   await expect(page.getByLabel("Agent messages")).not.toContainText("more tool calls than the current safety limit");
   await expect(page.getByLabel("Agent messages")).not.toContainText("answering from the pages and resources already inspected");
   await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests");
-  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
-  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Continue" })).toBeVisible();
+  await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Continue" })).toBeEnabled();
+  await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  await page.getByLabel("Paused Agent run").getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel("Paused Agent run")).toHaveCount(0);
+  await expect(page.getByLabel("Agent messages")).toContainText(
+    "I continued after the tool budget pause and now have enough context to stop.",
+  );
+  await expect(page.getByLabel("Agent prompt")).toBeEnabled();
+});
+
+test("agent can stop after the tool budget is exhausted", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Tool Budget Stop");
+  await openAgent(page);
+
+  await askAgent(page, "tool budget loop");
+
+  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests");
+  await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  await page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(page.getByLabel("Paused Agent run")).toHaveCount(0);
+});
+
+test("agent can continue a restored tool budget run after Agent sidebar remount", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Tool Budget Restore");
+  await openAgent(page);
+
+  await askAgent(page, "tool budget loop");
+  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests");
+
+  await openInspector(page);
+  await openAgent(page);
+  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests");
+  await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Continue" })).toBeEnabled();
+  await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  await page.getByLabel("Paused Agent run").getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByLabel("Paused Agent run")).toHaveCount(0);
+  await expect(page.getByLabel("Agent messages")).toContainText(
+    "I continued after the tool budget pause and now have enough context to stop.",
+  );
+  await expect(page.getByLabel("Agent prompt")).toBeEnabled();
+});
+
+test("agent prompt stays editable and exposes stop while a persisted run is running", async ({ page }) => {
+  let cancelCalled = false;
+  const now = new Date().toISOString();
+  await page.route("**/__mangamaker__/agent/runs**", async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === "GET" && url.pathname === "/__mangamaker__/agent/runs") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          runs: [
+            {
+              id: "agent-run-e2e-running",
+              projectId: url.searchParams.get("projectId") ?? "project-e2e",
+              roleId: "assistant",
+              status: "running",
+              createdAt: now,
+              updatedAt: now,
+              modelTurnIndex: 0,
+              steps: [
+                {
+                  id: "agent-step-e2e-running",
+                  runId: "agent-run-e2e-running",
+                  kind: "model_request",
+                  status: "running",
+                  operationId: "model_request:e2e",
+                  summary: "Sending model request",
+                  createdAt: now,
+                  startedAt: now,
+                },
+              ],
+              trace: [],
+              pendingToolCalls: [],
+            },
+          ],
+        }),
+      });
+      return;
+    }
+    if (route.request().method() === "POST" && url.pathname === "/__mangamaker__/agent/runs/agent-run-e2e-running/cancel") {
+      cancelCalled = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "agent-run-e2e-running",
+          projectId: url.searchParams.get("projectId") ?? "project-e2e",
+          roleId: "assistant",
+          status: "cancelled",
+          createdAt: now,
+          updatedAt: new Date().toISOString(),
+          modelTurnIndex: 0,
+          steps: [],
+          trace: [],
+          pendingToolCalls: [],
+          error: "Cancelled by user.",
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Running Agent Controls");
+  await openAgent(page);
+
+  await expect(page.getByLabel("Agent configuration status")).toContainText("Run running");
+  await expect(page.getByLabel("Active Agent run control")).toContainText("Agent is running");
+  await expect(page.getByLabel("Active Agent run control").getByRole("button", { name: "Stop Agent" })).toBeEnabled();
+  await expect(page.getByLabel("Agent prompt")).toBeEnabled();
+  await page.getByLabel("Agent prompt").fill("draft while the previous run is still active");
+  await expect(page.getByLabel("Agent prompt")).toHaveValue("draft while the previous run is still active");
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+
+  await page.getByLabel("Active Agent run control").getByRole("button", { name: "Stop Agent" }).click();
+  expect(cancelCalled).toBe(true);
+  await expect(page.getByLabel("Agent prompt")).toBeEnabled();
+});
+
+test("agent stop is clickable while the request is still preparing local context", async ({ page }) => {
+  let releaseMetadoc: (() => void) | null = null;
+  let metadocReleased = false;
+  await page.route("**/__mangamaker__/agent/document?**", async (route) => {
+    const url = new URL(route.request().url());
+    if (
+      route.request().method() === "GET" &&
+      url.searchParams.get("documentId") === "assistant-metadoc" &&
+      !metadocReleased
+    ) {
+      await new Promise<void>((resolve) => {
+        releaseMetadoc = () => {
+          metadocReleased = true;
+          resolve();
+        };
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "assistant-metadoc",
+          title: "Assistant Metadoc",
+          role: "assistant",
+          status: "draft",
+          path: "docs/agent/assistant-metadoc.md",
+          relatedPageIds: [],
+          updatedAt: new Date().toISOString(),
+          summary: "General assistant role definition.",
+          content: "# Assistant Metadoc\n",
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Local Stop");
+  await openAgent(page);
+
+  await page.getByLabel("Agent prompt").fill("Stop while preparing");
+  await page.getByRole("button", { name: "Send" }).click();
+  const stopButton = page.getByLabel("Active Agent run control").getByRole("button", { name: "Stop Agent" });
+  await expect(stopButton).toBeEnabled();
+  await stopButton.click();
+  await expect(page.getByLabel("Agent messages")).toContainText("Stopped the Agent before a backend run was created.");
+  await expect(page.getByLabel("Agent prompt")).toBeEnabled();
+  releaseMetadoc?.();
+  await expect(page.getByLabel("Agent messages")).not.toContainText("Waiting for model response");
 });
 
 test("agent document write completes after tool result without leaking document body into logs", async ({ page }) => {

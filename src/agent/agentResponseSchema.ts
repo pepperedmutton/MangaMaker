@@ -70,6 +70,7 @@ const allowedToolNames = new Set([
   "listImageAssets",
   "renderCurrentPage",
   "renderPage",
+  "renderPanel",
   "renderPages",
   "listCommandManifest",
   "listDocuments",
@@ -140,6 +141,14 @@ const validateRequestedToolCalls = (
           pageId: z.string().min(1),
           detail: renderDetailSchema,
           crop: renderCropSchema,
+        }).strict().parse(call.input);
+        return { toolName: call.toolName, input: parsed, reason: call.reason };
+      }
+      if (call.toolName === "renderPanel") {
+        const parsed = z.object({
+          pageId: z.string().min(1),
+          panelId: z.string().min(1),
+          detail: renderDetailSchema,
         }).strict().parse(call.input);
         return { toolName: call.toolName, input: parsed, reason: call.reason };
       }

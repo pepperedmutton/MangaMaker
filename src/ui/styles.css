@@ -1553,6 +1553,23 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.agent-run-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.agent-run-status-row p {
+  margin: 0;
+  min-width: 0;
+}
+
+.agent-run-status-row button {
+  flex-shrink: 0;
+}
+
 .agent-role p {
   margin: 0.35rem 0 0;
   overflow-wrap: anywhere;
@@ -1582,9 +1599,15 @@ textarea {
 }
 
 .agent-config-editor textarea,
+.agent-config-editor input,
 .agent-context-message-editor textarea {
   min-height: 84px;
   resize: vertical;
+}
+
+.agent-config-editor input {
+  min-height: 0;
+  resize: none;
 }
 
 .agent-config-actions,
@@ -1643,6 +1666,14 @@ textarea {
 
 .agent-warning {
   color: #b42318;
+}
+
+.agent-muted {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .agent-message-list {
@@ -1752,7 +1783,8 @@ textarea {
 }
 
 .agent-plan-actions,
-.agent-input-row {
+.agent-input-row,
+.agent-run-control {
   display: flex;
   gap: 0.45rem;
 }
@@ -1769,12 +1801,58 @@ textarea {
   color: #8f5b2f;
 }
 
-.agent-input-row {
+.agent-composer {
   position: sticky;
   bottom: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: auto;
   align-items: stretch;
   padding-top: 0.45rem;
   background: var(--panel-muted);
+}
+
+.agent-run-control {
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  background: #fff1f2;
+  box-shadow: 0 8px 20px rgba(127, 29, 29, 0.08);
+}
+
+.agent-run-control div {
+  min-width: 0;
+}
+
+.agent-run-control strong,
+.agent-run-control span {
+  display: block;
+}
+
+.agent-run-control strong {
+  color: #991b1b;
+  font-size: 0.84rem;
+}
+
+.agent-run-control span {
+  margin-top: 0.16rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.agent-stop-button {
+  min-height: 40px;
+  min-width: 108px;
+  font-weight: 700;
+}
+
+.agent-input-row {
+  align-items: stretch;
 }
 
 .agent-input-row textarea {

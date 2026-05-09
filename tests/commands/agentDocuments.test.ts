@@ -4,8 +4,11 @@ import {
   agentDocumentFromMarkdown,
   agentDocumentManifestSchema,
   buildAgentDocumentMarkdown,
+  createAgentRoleMetadocDocumentId,
+  createAgentRoleMetadocPath,
   createDefaultAgentRolesForDocuments,
   createAgentDocumentMeta,
+  normalizeAgentRoleMetadocFileStem,
   parseAgentDocumentMarkdown,
 } from "../../src/agent/documentSchema";
 
@@ -75,5 +78,14 @@ describe("agent documents", () => {
       relatedPageIds: ["page-1"],
       content: expect.stringContaining("Keep this in Markdown."),
     });
+  });
+
+  it("derives role metadoc file names directly from role names", () => {
+    expect(normalizeAgentRoleMetadocFileStem("小说家")).toBe("小说家");
+    expect(createAgentRoleMetadocDocumentId("小说家")).toBe("小说家");
+    expect(createAgentRoleMetadocPath("小说家")).toBe("docs/roles/小说家.md");
+    expect(createAgentRoleMetadocPath("Scene Supervisor")).toBe("docs/roles/Scene Supervisor.md");
+    expect(createAgentRoleMetadocPath("bad/name:role", "role-1")).toBe("docs/roles/bad-name-role.md");
+    expect(createAgentRoleMetadocPath("CON", "role-1")).toBe("docs/roles/role-1.md");
   });
 });

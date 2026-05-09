@@ -66,6 +66,52 @@ export type AgentDefaultDocumentDefinition = {
   body: string;
 };
 
+const WINDOWS_RESERVED_FILE_STEMS = new Set([
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  "com1",
+  "com2",
+  "com3",
+  "com4",
+  "com5",
+  "com6",
+  "com7",
+  "com8",
+  "com9",
+  "lpt1",
+  "lpt2",
+  "lpt3",
+  "lpt4",
+  "lpt5",
+  "lpt6",
+  "lpt7",
+  "lpt8",
+  "lpt9",
+]);
+
+export const normalizeAgentRoleMetadocFileStem = (roleName: string, fallback = "role") => {
+  const normalized = roleName
+    .trim()
+    .replace(/\.md$/i, "")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/[. ]+$/g, "")
+    .replace(/^-+|-+$/g, "");
+  const stem = normalized || fallback;
+  if (WINDOWS_RESERVED_FILE_STEMS.has(stem.toLowerCase())) {
+    return fallback;
+  }
+  return stem;
+};
+
+export const createAgentRoleMetadocDocumentId = (roleName: string, fallback = "role") =>
+  normalizeAgentRoleMetadocFileStem(roleName, fallback);
+
+export const createAgentRoleMetadocPath = (roleName: string, fallback = "role") =>
+  `docs/roles/${normalizeAgentRoleMetadocFileStem(roleName, fallback)}.md`;
+
 export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[] = [
   {
     id: "assistant-metadoc",

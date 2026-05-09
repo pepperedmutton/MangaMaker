@@ -201,6 +201,7 @@ export type AgentImageAsset = {
   pageId: string;
   pageName: string;
   panelId: string;
+  panelRef: string;
   sourceWidth: number;
   sourceHeight: number;
   viewBox: { x: number; y: number; width: number; height: number };
@@ -213,6 +214,10 @@ export type AgentImageAsset = {
 export type AgentObjectSummary = {
   id: string;
   objectType: "panel" | "text" | "bubble" | "element";
+  objectRef: string;
+  pageId: string;
+  pageName: string;
+  panelRef?: string;
   x: number;
   y: number;
   width: number;
@@ -246,6 +251,7 @@ export type AgentObjectSummary = {
 
 export type AgentPageSummary = {
   id: string;
+  pageNumber?: number;
   name: string;
   width: number;
   height: number;
@@ -295,6 +301,9 @@ export type AgentConfig = {
   apiKeyConfigured: boolean;
   testMode: boolean;
   visionEnabled: boolean;
+  contextWindowTokens: number;
+  contextWindowMaxTokens: number | null;
+  contextWindowSource: "request" | "env" | "model" | "default" | "test";
   reason?: string;
 };
 
@@ -316,6 +325,7 @@ export type AgentChatRequest = {
   harness?: AgentHarnessSnapshot;
   canvasSnapshot?: AgentCanvasSnapshot | null;
   approvedCommandPlan?: AgentCommandPlan | null;
+  contextWindowTokens?: number;
   requestTrace?: AgentRequestTraceMetadata;
 };
 
@@ -368,6 +378,7 @@ export type AgentHarnessSnapshot = {
     documentsWritableOnDemand: boolean;
     inlineDataUrlsRedactedFromPrompt: boolean;
     projectMutationPath: "commandPlanOnly";
+    pagePanelBoundary?: string;
   };
 };
 

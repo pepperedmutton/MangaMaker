@@ -49,8 +49,9 @@ const clampLimit = (value: unknown, fallback: number, max: number) => {
 
 const normalized = (value: unknown) => String(value ?? "").toLowerCase();
 
-const pageIndexEntry = (page: AgentContextSnapshot["pages"][number]) => ({
+const pageIndexEntry = (page: AgentContextSnapshot["pages"][number], index: number) => ({
   id: page.id,
+  pageNumber: page.pageNumber ?? index + 1,
   name: page.name,
   width: page.width,
   height: page.height,
@@ -88,6 +89,37 @@ const documentResultSummary = (document: AgentDocument) => ({
   contentLength: document.content.length,
 });
 
+const documentLookupFailureResult = (
+  requestedDocumentId: string,
+  error: unknown,
+  availableDocuments: AgentDocumentMeta[],
+) => ({
+  found: false as const,
+  requestedDocumentId,
+  error: error instanceof Error ? error.message : String(error),
+  availableDocuments: availableDocuments.map(documentIndexEntry),
+  guidance:
+    "Use one of the available document ids or paths. For role output, prefer the active role metadoc instead of inventing a new document id.",
+});
+
+type AgentDocumentLookupFailure = ReturnType<typeof documentLookupFailureResult>;
+
+const isDocumentLookupFailure = (
+  value: AgentDocument | AgentDocumentLookupFailure,
+): value is AgentDocumentLookupFailure => "found" in value && value.found === false;
+
+const readProjectDocumentForTool = async (
+  projectId: string,
+  requestedDocumentId: string,
+) => {
+  try {
+    return await readProjectDocument(projectId, requestedDocumentId);
+  } catch (error) {
+    const manifest = await listProjectDocuments(projectId).catch(() => null);
+    return documentLookupFailureResult(requestedDocumentId, error, manifest?.documents ?? []);
+  }
+};
+
 const searchProject = (
   context: AgentContextSnapshot,
   input: { query?: string; pageId?: string; objectTypes?: string[]; limit?: number },
@@ -97,8 +129,11 @@ const searchProject = (
   const limit = clampLimit(input.limit, DEFAULT_SEARCH_LIMIT, 100);
   const matches: Array<{
     pageId: string;
+    pageNumber: number;
     pageName: string;
     objectId?: string;
+    objectRef?: string;
+    panelRef?: string;
     objectType?: string;
     assetSrc?: string;
     field: string;
@@ -117,13 +152,15 @@ const searchProject = (
     return !query || text.includes(query);
   };
 
-  for (const page of context.pages) {
+  for (const [pageIndex, page] of context.pages.entries()) {
+    const pageNumber = page.pageNumber ?? pageIndex + 1;
     if (input.pageId && page.id !== input.pageId) {
       continue;
     }
     if (matchesQuery(page.name)) {
       addMatch({
         pageId: page.id,
+        pageNumber,
         pageName: page.name,
         field: "page.name",
         snippet: page.name,
@@ -148,8 +185,11 @@ const searchProject = (
         }
         addMatch({
           pageId: page.id,
+          pageNumber,
           pageName: page.name,
           objectId: object.id,
+          objectRef: object.objectRef,
+          panelRef: object.objectType === "panel" ? object.panelRef ?? `${page.id}:${object.id}` : undefined,
           objectType: object.objectType,
           field,
           snippet: String(value).slice(0, 240),
@@ -168,6 +208,7 @@ const searchProject = (
       ["prompt", asset.prompt],
       ["description", asset.description],
       ["panelId", asset.panelId],
+      ["panelRef", asset.panelRef],
     ] as const;
     for (const [field, value] of fields) {
       if (!value || !matchesQuery(value)) {
@@ -176,7 +217,10 @@ const searchProject = (
       addMatch({
         pageId: asset.pageId,
         pageName: asset.pageName,
+        pageNumber: context.pages.findIndex((page) => page.id === asset.pageId) + 1 || 0,
         objectId: asset.panelId,
+        objectRef: `${asset.pageId}:panel:${asset.panelId}`,
+        panelRef: asset.panelRef,
         objectType: "panel",
         assetSrc: asset.src,
         field: `asset.${field}`,
@@ -284,7 +328,15 @@ const validateDocumentAgainstProject = async (
   input: { documentId?: string },
 ) => {
   const documentId = input.documentId ?? "";
-  const document = await readProjectDocument(context.project.id, documentId);
+  const document = await readProjectDocumentForTool(context.project.id, documentId);
+  if (isDocumentLookupFailure(document)) {
+    return {
+      ...document,
+      ok: false,
+      referencedPageIds: [],
+      missingPageIds: [],
+    };
+  }
   const existingPageIds = new Set(context.pages.map((page) => page.id));
   const referencedPageIds = new Set<string>();
   const pageIdPattern = /\bpage[-_A-Za-z0-9]+\b/g;
@@ -316,7 +368,7 @@ const listFilteredImageAssets = (
     if (!query) {
       return true;
     }
-    return [asset.src, asset.prompt, asset.description, asset.panelId, asset.pageName].some((value) =>
+    return [asset.src, asset.prompt, asset.description, asset.panelId, asset.panelRef, asset.pageName].some((value) =>
       normalized(value).includes(query),
     );
   });
@@ -455,6 +507,23 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     requiresConfirmation: false,
   }),
   tool({
+    name: "renderPanel",
+    description: "Render one panel's bounded visual crop by pageId and panelId. A panel always belongs to exactly one page; use panelRef/pageId+panelId from readPage/readPages/listImageAssets.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pageId", "panelId"],
+      properties: {
+        pageId: { type: "string" },
+        panelId: { type: "string" },
+        detail: renderDetailSchema,
+      },
+    },
+    outputDescription: "Panel crop screenshot metadata, page owner, panel object summary, and related image resource if present.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
     name: "renderPages",
     description: "Render several pages to bounded visual screenshots in one call. Defaults to detail=\"preview\" and should be used for a small visual sample, not whole-project high-detail review.",
     inputSchema: {
@@ -501,7 +570,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "readDocument",
-    description: "Read one project Markdown document by manifest id. The backend also accepts path, filename, or exact title as a fallback. Use this instead of relying on conversation context for production state.",
+    description: "Read one project Markdown document by manifest id. The backend also accepts path, filename, or exact title as a fallback. If the document is not found, the result returns found=false with available documents instead of failing the run.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -535,7 +604,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "writeDocument",
-    description: "Create or update one durable Markdown production document. Use this for role output that must survive beyond chat.",
+    description: "Create or update one durable Markdown production document. For role output, update the active role metadoc unless the creator explicitly asks for a new ordinary document.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -561,7 +630,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "validateDocumentAgainstProject",
-    description: "Check whether page ids referenced by one Markdown document exist in the current project context. Prefer manifest id; path, filename, or exact title are accepted as fallback.",
+    description: "Check whether page ids referenced by one Markdown document exist in the current project context. Prefer manifest id; path, filename, or exact title are accepted as fallback. Missing lookups return found=false.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -645,11 +714,23 @@ export const buildAgentHarness = (
     documentsWritableOnDemand: true,
     inlineDataUrlsRedactedFromPrompt: true,
     projectMutationPath: "commandPlanOnly",
+    pagePanelBoundary:
+      "A page is a top-level comic page. A panel is an object inside exactly one page. Refer to panels by pageId+panelId or panelRef.",
   },
 });
 
 const getPageById = (context: AgentContextSnapshot, pageId: string) =>
   context.pages.find((page) => page.id === pageId) ?? null;
+
+const getPanelById = (
+  context: AgentContextSnapshot,
+  pageId: string,
+  panelId: string,
+) => {
+  const page = getPageById(context, pageId);
+  const panel = page?.objects.find((object) => object.objectType === "panel" && object.id === panelId) ?? null;
+  return { page, panel };
+};
 
 const getPageIdsInput = (input: unknown, maxItems: number) => {
   const requestedPageIds = Array.isArray((input as { pageIds?: unknown }).pageIds)
@@ -791,6 +872,30 @@ export const executeAgentHarnessToolCall = async (
       canvasSnapshot,
     });
   }
+  if (call.toolName === "renderPanel") {
+    const pageId = (call.input as { pageId?: string }).pageId ?? "";
+    const panelId = (call.input as { panelId?: string }).panelId ?? "";
+    const detail = getRenderDetailInput(call.input);
+    const { page, panel } = getPanelById(context, pageId, panelId);
+    const crop = panel
+      ? { x: panel.x, y: panel.y, width: panel.width, height: panel.height }
+      : undefined;
+    const canvasSnapshot = await renderPageSnapshot(pageId, { detail, crop });
+    return result(call.toolName, call.input, {
+      pageId,
+      pageName: page?.name ?? null,
+      pageNumber: page?.pageNumber ?? null,
+      panelId,
+      panelRef: page && panel ? `${page.id}:${panel.id}` : null,
+      renderOptions: {
+        detail,
+        crop: crop ?? null,
+      },
+      panel,
+      imageAsset: context.imageAssets.find((asset) => asset.pageId === pageId && asset.panelId === panelId) ?? null,
+      canvasSnapshot,
+    });
+  }
   if (call.toolName === "renderPages") {
     const pageIdInput = getPageIdsInput(call.input, AGENT_MAX_BATCH_RENDER_PAGES);
     const detail = getRenderDetailInput(call.input);
@@ -852,7 +957,7 @@ export const executeAgentHarnessToolCall = async (
   }
   if (call.toolName === "readDocument") {
     const documentId = (call.input as { documentId?: string }).documentId ?? "";
-    return result(call.toolName, call.input, await readProjectDocument(context.project.id, documentId));
+    return result(call.toolName, call.input, await readProjectDocumentForTool(context.project.id, documentId));
   }
   if (call.toolName === "searchDocuments") {
     return result(call.toolName, call.input, await searchDocuments(context, call.input as {
@@ -863,7 +968,24 @@ export const executeAgentHarnessToolCall = async (
   }
   if (call.toolName === "writeDocument") {
     const input = call.input as Partial<AgentDocumentMeta> & { content: string; operationId: string };
-    const saved = await writeProjectDocument(context.project.id, input);
+    let saved: AgentDocument;
+    try {
+      saved = await writeProjectDocument(context.project.id, input);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return result(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: true,
+          operationId: input.operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId has already completed earlier with different content. Do not retry this write. Report the previous write as completed to the creator unless they explicitly request a new follow-up edit.",
+        });
+      }
+      throw error;
+    }
     return result(call.toolName, call.input, {
       saved: true,
       operationId: input.operationId,

@@ -304,6 +304,8 @@ Configuration rules:
 - `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode for tests and demos.
 - `OPENROUTER_API_KEY` is required for the OpenRouter web backend.
 - `MANGAMAKER_AGENT_MODEL` must be explicit outside test mode unless the project documents a vision-capable default.
+- `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` controls the Agent prompt/input budget and defaults to `262144`, the Kimi K2.6 upper context limit used by this project. The UI may send a per-project runtime override, but the backend must clamp it to the known model limit when one is available.
+- `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS` defaults to `8192`; `MANGAMAKER_AGENT_TEMPERATURE` defaults to `0.1`; `MANGAMAKER_AGENT_TOP_P` defaults to `0.9`. These settings should favor reliable JSON/tool behavior over exploratory prose.
 - The OpenRouter model allowlist is provider-restricted to DeepSeek and Kimi/Moonshot model ids, then capability-restricted to models whose metadata includes image input, text output, and `response_format` support.
 - Google, Anthropic, OpenAI, text-only, and non-JSON-capable models must not be offered as available built-in Agent models.
 - The UI must show whether vision input is enabled. If vision is unavailable or a screenshot send fails, the user-visible response must include a warning or error.
@@ -325,6 +327,7 @@ Context rules:
 - The Agent harness should present project reading as local tools such as project summary, page listing, project search, single-page and batch page reading, selection inspection, filtered image asset listing, single-page and batch page rendering, role listing, Markdown document listing/reading/searching/writing, and command manifest reading.
 - The Agent must be able to close the multimodal loop for a page: request a screenshot/render tool for a specific page, receive the composed visual result as a vision attachment, and receive the same page's structured resources so it can compare resource-level state with rendered outcome.
 - The Agent must follow a structured-first visual budget policy. It should search/read resources before screenshots, use preview renders by default, request cropped page renders for local details, and reserve high-detail renders for small text, faces, or fine line art. Token savings must come from reducing image count, pixels, and crop area rather than relying on PNG/JPG format differences.
+- The Agent context window controls prompt compaction only; it is not permission to preload every page, every asset, or every document. The default budget should allow Kimi K2.6-scale long document edits while still preserving the tool-first harness.
 - The Agent UI must enforce a finite per-turn tool budget, skip repeated identical tool calls, and pause with Continue/Stop when more tools are needed instead of forcing a final answer from incomplete evidence.
 - Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
 - Large base64 assets must not be sent without bounds.
@@ -341,6 +344,8 @@ Agent run rules:
 - The UI should subscribe to run status with SSE or an equivalent realtime channel rather than waiting for a long `/chat` fetch.
 - Provider timeouts, terminated upstream connections, HTTP 429, HTTP 5xx, non-JSON responses, and invalid Agent JSON must be recorded in the run trace and retried or surfaced as clear run failures.
 - Tool results included in model resumes should be compacted or summarized when large; the model should request details on demand rather than receiving large context repeatedly.
+- Prompt compaction must preserve the latest unique non-budget tool results, especially document reads/writes, so repeated budget or skip messages cannot hide the evidence the model just requested.
+- If the model repeats an identical tool call after the result is already available, the harness should return a corrective skipped-tool result once; if it repeats again, pause the run instead of continuing an infinite loop.
 
 Conversation Context rules:
 

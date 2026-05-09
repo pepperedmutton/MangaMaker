@@ -15,6 +15,8 @@ const LEGACY_AGENT_CHAT_HISTORY_FILE: &str = "agent-chat.json";
 const DEFAULT_AGENT_CONVERSATION_ROLE_ID: &str = "assistant";
 const AGENT_DOCS_DIR: &str = "docs";
 const AGENT_DOCS_MANIFEST_FILE: &str = "manifest.json";
+const KIMI_K2_6_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
+const MIN_AGENT_CONTEXT_WINDOW_TOKENS: u32 = 8_192;
 
 fn default_agent_conversation_role_id() -> String {
     DEFAULT_AGENT_CONVERSATION_ROLE_ID.to_string()
@@ -29,6 +31,9 @@ struct AgentConfig {
     api_key_configured: bool,
     test_mode: bool,
     vision_enabled: bool,
+    context_window_tokens: u32,
+    context_window_max_tokens: Option<u32>,
+    context_window_source: String,
     reason: Option<String>,
 }
 
@@ -41,6 +46,8 @@ struct AgentChatPayload {
     agent_context: Option<serde_json::Value>,
     #[allow(dead_code)]
     canvas_snapshot: Option<serde_json::Value>,
+    #[allow(dead_code)]
+    context_window_tokens: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -182,10 +189,44 @@ fn read_env_trimmed(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn parse_agent_context_window_tokens(value: Option<String>) -> Option<u32> {
+    value
+        .and_then(|entry| entry.parse::<u32>().ok())
+        .map(|tokens| tokens.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS))
+}
+
+fn agent_context_window_fields(model: Option<&str>, test_mode: bool) -> (u32, Option<u32>, String) {
+    let env_tokens = parse_agent_context_window_tokens(
+        read_env_trimmed("MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS")
+            .or_else(|| read_env_trimmed("MANGAMAKER_AGENT_CONTEXT_WINDOW")),
+    );
+    let model_max = if model == Some("moonshotai/kimi-k2.6") {
+        Some(KIMI_K2_6_CONTEXT_WINDOW_TOKENS)
+    } else {
+        None
+    };
+    let (source, value) = if let Some(tokens) = env_tokens {
+        ("env".to_string(), tokens)
+    } else if let Some(tokens) = model_max {
+        ("model".to_string(), tokens)
+    } else if test_mode {
+        ("test".to_string(), KIMI_K2_6_CONTEXT_WINDOW_TOKENS)
+    } else {
+        ("default".to_string(), KIMI_K2_6_CONTEXT_WINDOW_TOKENS)
+    };
+    let clamped = model_max
+        .map(|max_tokens| value.min(max_tokens))
+        .unwrap_or(value)
+        .max(MIN_AGENT_CONTEXT_WINDOW_TOKENS);
+    (clamped, model_max, source)
+}
+
 fn current_agent_config() -> AgentConfig {
     let test_mode = std::env::var("MANGAMAKER_AGENT_TEST_MODE").ok().as_deref() == Some("1");
     let model = read_env_trimmed("MANGAMAKER_AGENT_MODEL");
     let api_key_configured = read_env_trimmed("OPENROUTER_API_KEY").is_some();
+    let (context_window_tokens, context_window_max_tokens, context_window_source) =
+        agent_context_window_fields(model.as_deref(), test_mode);
 
     if test_mode {
         return AgentConfig {
@@ -195,6 +236,9 @@ fn current_agent_config() -> AgentConfig {
             api_key_configured,
             test_mode: true,
             vision_enabled: true,
+            context_window_tokens,
+            context_window_max_tokens,
+            context_window_source,
             reason: None,
         };
     }
@@ -206,6 +250,9 @@ fn current_agent_config() -> AgentConfig {
         api_key_configured,
         test_mode: false,
         vision_enabled: false,
+        context_window_tokens,
+        context_window_max_tokens,
+        context_window_source,
         reason: Some(
             "The desktop production Agent backend is not configured in this build. Use the Vite web backend or enable a native Agent proxy before chatting.".to_string(),
         ),
@@ -229,6 +276,47 @@ fn sanitize_path_component(value: &str, fallback: &str) -> String {
     } else {
         trimmed
     }
+}
+
+fn normalize_agent_role_metadoc_file_stem(role_name: &str, fallback: &str) -> String {
+    let mut stem = role_name.trim().trim_end_matches(".md").to_string();
+    let invalid_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    stem = stem
+        .chars()
+        .map(|ch| {
+            if invalid_chars.contains(&ch) || ch.is_control() {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    stem = stem
+        .trim_matches(|ch| ch == '-' || ch == '.' || ch == ' ')
+        .to_string();
+    if stem.is_empty() {
+        stem = fallback.to_string();
+    }
+    let reserved = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8",
+        "lpt9",
+    ];
+    if reserved.contains(&stem.to_lowercase().as_str()) {
+        fallback.to_string()
+    } else {
+        stem
+    }
+}
+
+fn create_agent_role_metadoc_path(role_name: &str, fallback: &str) -> String {
+    format!(
+        "{AGENT_DOCS_DIR}/roles/{}.md",
+        normalize_agent_role_metadoc_file_stem(role_name, fallback)
+    )
 }
 
 fn ensure_projects_root() -> Result<PathBuf, String> {
@@ -998,19 +1086,15 @@ fn create_agent_role_binding(project_id: &str, role_input: AgentRoleInput) -> Re
         }
         existing_metadoc_id
     } else {
-        let metadoc_id = unique_agent_role_id(&format!("{id}-metadoc"), &manifest.roles);
-        let metadoc_path_input = role_input
-            .metadoc_path
-            .clone()
-            .filter(|entry| !entry.trim().is_empty())
-            .unwrap_or_else(|| format!("{AGENT_DOCS_DIR}/roles/{}.md", sanitize_path_component(&id, "role")));
+        let metadoc_id = normalize_agent_role_metadoc_file_stem(&name, &id);
+        let metadoc_path_input = create_agent_role_metadoc_path(&name, &id);
         let meta = AgentDocumentMeta {
             id: metadoc_id.clone(),
             title: role_input
                 .metadoc_title
                 .clone()
                 .filter(|entry| !entry.trim().is_empty())
-                .unwrap_or_else(|| format!("{name} Metadoc")),
+                .unwrap_or_else(|| name.clone()),
             role: Some(id.clone()),
             status: "draft".to_string(),
             path: normalize_agent_document_path(&metadoc_path_input, &metadoc_id)?,

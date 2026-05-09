@@ -1,5 +1,9 @@
 import type { AgentConfig } from "./types";
 import type { AgentAvailableModel } from "./modelCatalog";
+import {
+  parseAgentContextWindowTokens,
+  resolveAgentContextWindowTokens,
+} from "./contextWindow";
 
 export type AgentConfigEnv = Record<string, string | undefined>;
 
@@ -12,6 +16,16 @@ export const getAgentConfigFromEnv = (
   const testMode = readFlag(env, "MANGAMAKER_AGENT_TEST_MODE");
   const model = env.MANGAMAKER_AGENT_MODEL?.trim() || null;
   const apiKeyConfigured = Boolean(env.OPENROUTER_API_KEY?.trim());
+  const envContextWindowTokens = parseAgentContextWindowTokens(
+    env.MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS ?? env.MANGAMAKER_AGENT_CONTEXT_WINDOW,
+  );
+  const configuredModel = availableModels?.find((entry) => entry.id === model) ?? null;
+  const contextWindow = resolveAgentContextWindowTokens({
+    envTokens: envContextWindowTokens,
+    model,
+    modelContextLength: configuredModel?.contextLength ?? null,
+    testMode,
+  });
 
   if (testMode) {
     return {
@@ -21,6 +35,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured,
       testMode: true,
       visionEnabled: true,
+      ...contextWindow,
     };
   }
 
@@ -32,6 +47,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured: false,
       testMode: false,
       visionEnabled: false,
+      ...contextWindow,
       reason: "OPENROUTER_API_KEY is not configured.",
     };
   }
@@ -44,6 +60,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
+      ...contextWindow,
       reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the multimodal Agent.",
     };
   }
@@ -56,6 +73,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
+      ...contextWindow,
       reason:
         "Configured model is not in the MangaMaker Agent allowlist. Use a DeepSeek or Kimi model that supports image input, text output, and JSON response_format.",
     };
@@ -68,5 +86,6 @@ export const getAgentConfigFromEnv = (
     apiKeyConfigured: true,
     testMode: false,
     visionEnabled: true,
+    ...contextWindow,
   };
 };

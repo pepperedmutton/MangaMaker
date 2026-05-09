@@ -13,10 +13,12 @@
     "vite.config.ts",
     "playwright.config.ts",
     "src/agent/documentSchema.ts",
+    "src/agent/contextWindow.ts",
     "src/agent/openRouterProviderRouting.ts",
     "src/agent/openRouterResponse.ts",
     "src/agent/roles.ts",
     "src/agent/systemPrompt.ts",
+    "src/agent/toolCallPolicy.ts",
     "src/agent/toolLimits.ts"
   ]
 }

@@ -1,6 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAgentHarness, executeAgentHarnessToolCall } from "../../src/agent/harness";
+import { AGENT_MAX_BATCH_READ_PAGES } from "../../src/agent/toolLimits";
+import {
+  collectCompletedAgentToolCallKeys,
+  createAgentToolCallKey,
+  createDuplicateToolCallSkippedResult,
+  mergeAgentToolResults,
+  selectAgentDynamicToolResultsForPrompt,
+} from "../../src/agent/toolCallPolicy";
 import type { AgentCanvasSnapshot, AgentContextSnapshot, AgentPageContextSummary } from "../../src/agent/types";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
+});
 
 const snapshot: AgentCanvasSnapshot = {
   scope: "canvas",
@@ -49,6 +64,9 @@ const context: AgentContextSnapshot = {
       {
         id: "text-1",
         objectType: "text",
+        objectRef: "page-1:text:text-1",
+        pageId: "page-1",
+        pageName: "page-1",
         x: 10,
         y: 20,
         width: 100,
@@ -61,6 +79,10 @@ const context: AgentContextSnapshot = {
       {
         id: "panel-1",
         objectType: "panel",
+        objectRef: "page-2:panel:panel-1",
+        pageId: "page-2",
+        pageName: "page-2",
+        panelRef: "page-2:panel-1",
         x: 0,
         y: 0,
         width: 320,
@@ -83,6 +105,7 @@ const context: AgentContextSnapshot = {
       pageId: "page-2",
       pageName: "page-2",
       panelId: "panel-1",
+      panelRef: "page-2:panel-1",
       sourceWidth: 640,
       sourceHeight: 480,
       viewBox: { x: 0, y: 0, width: 640, height: 480 },
@@ -151,16 +174,17 @@ describe("agent harness", () => {
       ],
     });
 
+    const oversizedPageIds = Array.from({ length: AGENT_MAX_BATCH_READ_PAGES + 2 }, (_, index) => `page-${index + 1}`);
     const oversizedRead = await executeAgentHarnessToolCall(context, {
       toolName: "readPages",
-      input: { pageIds: Array.from({ length: 14 }, (_, index) => `page-${index + 1}`) },
+      input: { pageIds: oversizedPageIds },
     });
     expect(oversizedRead.result).toMatchObject({
-      requestedPageIdCount: 14,
-      maxPageIds: 12,
+      requestedPageIdCount: AGENT_MAX_BATCH_READ_PAGES + 2,
+      maxPageIds: AGENT_MAX_BATCH_READ_PAGES,
       truncated: true,
-      pageIds: Array.from({ length: 12 }, (_, index) => `page-${index + 1}`),
-      skippedPageIds: ["page-13", "page-14"],
+      pageIds: oversizedPageIds.slice(0, AGENT_MAX_BATCH_READ_PAGES),
+      skippedPageIds: oversizedPageIds.slice(AGENT_MAX_BATCH_READ_PAGES),
     });
   });
 
@@ -203,6 +227,147 @@ describe("agent harness", () => {
     expect(harness.tools.find((entry) => entry.name === "renderPages")?.inputSchema).toMatchObject({
       properties: {
         detail: { enum: ["preview", "detail"] },
+      },
+    });
+    expect(harness.tools.find((entry) => entry.name === "renderPanel")?.inputSchema).toMatchObject({
+      required: ["pageId", "panelId"],
+      properties: {
+        pageId: { type: "string" },
+        panelId: { type: "string" },
+        detail: { enum: ["preview", "detail"] },
+      },
+    });
+  });
+
+  it("returns structured document lookup failures instead of throwing", async () => {
+    const manifest = {
+      projectId: "project-1",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      roleSetupVersion: 1,
+      documents: [
+        {
+          id: "小说家",
+          title: "小说家",
+          role: "novelist",
+          status: "draft",
+          path: "docs/roles/小说家.md",
+          relatedPageIds: [],
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          summary: "Metadoc for 小说家.",
+        },
+      ],
+      roles: [],
+    };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/__mangamaker__/agent/document?")) {
+        return new Response(
+          JSON.stringify({ error: "Agent document not found: novelist-log-p01-p06-20260509." }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.startsWith("/__mangamaker__/agent/documents?")) {
+        return new Response(JSON.stringify(manifest), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ error: `Unexpected URL: ${url}` }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const readDocument = await executeAgentHarnessToolCall(context, {
+      toolName: "readDocument",
+      input: { documentId: "novelist-log-p01-p06-20260509" },
+    });
+
+    expect(readDocument.result).toMatchObject({
+      found: false,
+      requestedDocumentId: "novelist-log-p01-p06-20260509",
+      availableDocuments: [
+        expect.objectContaining({
+          id: "小说家",
+          path: "docs/roles/小说家.md",
+        }),
+      ],
+      guidance: expect.stringContaining("active role metadoc"),
+    });
+  });
+
+  it("keeps the latest unique document result visible when budget noise accumulates", () => {
+    const originalRead = {
+      toolName: "readDocument",
+      input: { documentId: "story" },
+      result: { id: "story", content: "old", contentLength: 3 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const refreshedRead = {
+      ...originalRead,
+      result: { id: "story", content: "new", contentLength: 3 },
+      createdAt: "2026-01-01T00:01:00.000Z",
+    };
+    const noisyBudgetResults = Array.from({ length: 20 }, (_, index) => ({
+      toolName: "toolBudget",
+      input: {},
+      result: { remainingToolCalls: 20 - index },
+      createdAt: `2026-01-01T00:02:${String(index).padStart(2, "0")}.000Z`,
+    }));
+    const merged = mergeAgentToolResults([originalRead, ...noisyBudgetResults], [refreshedRead]);
+    const selected = selectAgentDynamicToolResultsForPrompt(merged);
+
+    expect(merged.filter((entry) => entry.toolName === "readDocument")).toHaveLength(1);
+    expect(selected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: "readDocument",
+          result: expect.objectContaining({ content: "new" }),
+        }),
+      ]),
+    );
+  });
+
+  it("identifies repeated tool calls and creates a corrective skipped result", () => {
+    const call = { toolName: "readDocument", input: { documentId: "story" } };
+    const writeCall = {
+      toolName: "writeDocument",
+      input: { operationId: "op-1", id: "story", title: "Story", content: "new" },
+    };
+    const completed = collectCompletedAgentToolCallKeys([
+      {
+        toolName: "readDocument",
+        input: { documentId: "story" },
+        result: { id: "story", content: "body" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        toolName: "writeDocument",
+        input: { operationId: "op-1", id: "story", title: "Story", content: "old" },
+        result: { saved: true, operationId: "op-1" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    const skipped = createDuplicateToolCallSkippedResult(call, "2026-01-01T00:00:01.000Z");
+    const skippedWrite = createDuplicateToolCallSkippedResult(writeCall, "2026-01-01T00:00:02.000Z");
+
+    expect(completed.has(createAgentToolCallKey(call))).toBe(true);
+    expect(completed.has(createAgentToolCallKey(writeCall))).toBe(true);
+    expect(skipped).toMatchObject({
+      toolName: "toolCallSkipped",
+      input: call,
+      result: {
+        duplicate: true,
+        guidance: expect.stringContaining("pause instead of automatically resuming"),
+      },
+    });
+    expect(skippedWrite).toMatchObject({
+      toolName: "toolCallSkipped",
+      result: {
+        duplicate: true,
+        alreadyApplied: true,
+        operationId: "op-1",
+        guidance: expect.stringContaining("report completion"),
       },
     });
   });

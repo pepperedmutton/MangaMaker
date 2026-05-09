@@ -1,5 +1,6 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  cancelAgentRun,
   createAgentRequestTraceMetadata,
   AgentRunError,
   getAgentConfig,
@@ -19,7 +20,16 @@ import { getAgentContext } from "../agent/context";
 import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
 import { createProjectRole, deleteProjectRole, readProjectDocument } from "../agent/documents";
 import { buildAgentHarness, createAgentHarnessToolResult, executeAgentHarnessToolCall } from "../agent/harness";
-import type { AgentDocumentManifest } from "../agent/documentSchema";
+import { createAgentToolCallKey } from "../agent/toolCallPolicy";
+import {
+  DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS,
+  MIN_AGENT_CONTEXT_WINDOW_TOKENS,
+  parseAgentContextWindowTokens,
+} from "../agent/contextWindow";
+import {
+  createAgentRoleMetadocPath,
+  type AgentDocumentManifest,
+} from "../agent/documentSchema";
 import {
   AGENT_ROLES,
   DEFAULT_AGENT_ROLE_ID,
@@ -102,6 +112,27 @@ const createBackendToolLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] 
 const hasToolBudgetPauseWarning = (payload: AgentChatResponse) =>
   Boolean(payload.requestedToolCalls?.length && payload.warning?.toLowerCase().includes("tool budget"));
 
+type AgentLocalOperation = {
+  id: string;
+  cancelled: boolean;
+};
+
+const isToolBudgetPausedRun = (run: AgentRun | null | undefined) =>
+  Boolean(run?.status === "waiting_for_tool" && run.latestResponse && hasToolBudgetPauseWarning(run.latestResponse));
+
+const markRunAsContinuing = (run: AgentRun): AgentRun => ({
+  ...run,
+  status: "running",
+  pendingToolCalls: [],
+  latestResponse: run.latestResponse
+    ? {
+        ...run.latestResponse,
+        warning: undefined,
+        requestedToolCalls: [],
+      }
+    : run.latestResponse,
+});
+
 const createMessageEntry = (message: AgentChatMessage): AgentConversationEntry => ({
   id: message.id,
   kind: "message",
@@ -130,11 +161,17 @@ const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPl
   });
 };
 
-const MAX_AGENT_TOOL_ROUNDS = 8;
-const MAX_AGENT_TOOL_CALLS = 24;
-const MAX_AGENT_TOOL_CALLS_PER_ROUND = 8;
+const MAX_AGENT_TOOL_ROUNDS = 24;
+const MAX_AGENT_TOOL_CALLS = 72;
+const MAX_AGENT_TOOL_CALLS_PER_ROUND = 24;
 const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.";
 const RESTORABLE_RUN_STATUSES = new Set(["queued", "running", "waiting_for_tool", "waiting_for_confirmation"]);
+const CANCELLABLE_RUN_STATUSES = new Set<AgentRun["status"]>([
+  "queued",
+  "running",
+  "waiting_for_tool",
+  "waiting_for_confirmation",
+]);
 const createDefaultAgentMessages = () => [
   createMessage("assistant", DEFAULT_AGENT_GREETING),
 ];
@@ -153,9 +190,6 @@ const toAgentWireMessages = (
   ...messages.map(({ role, content }) => ({ role, content })),
   ...(internalNotice ? [{ role: "user" as const, content: internalNotice }] : []),
 ];
-
-const createToolCallKey = (call: { toolName: string; input: unknown }) =>
-  `${call.toolName}:${JSON.stringify(call.input ?? {})}`;
 
 type AgentContinuationState = {
   id: string;
@@ -207,27 +241,40 @@ const RUNTIME_CONFIG_KEY_PREFIX = "mangamaker:agent:runtimeConfig:v1:";
 
 const runtimeConfigKeyForProject = (projectId: string) => `${RUNTIME_CONFIG_KEY_PREFIX}${projectId}`;
 
-const loadRuntimeSystemPrompt = (projectId: string) => {
+type AgentRuntimeConfig = {
+  systemPrompt: string;
+  contextWindowTokens: number | null;
+};
+
+const loadRuntimeConfig = (projectId: string): AgentRuntimeConfig => {
   try {
     const raw = window.localStorage.getItem(runtimeConfigKeyForProject(projectId));
     if (!raw) {
-      return DEFAULT_AGENT_SYSTEM_PROMPT;
+      return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null };
     }
-    const parsed = JSON.parse(raw) as { systemPrompt?: unknown };
-    return typeof parsed.systemPrompt === "string" && parsed.systemPrompt.trim().length > 0
-      ? parsed.systemPrompt
-      : DEFAULT_AGENT_SYSTEM_PROMPT;
+    const parsed = JSON.parse(raw) as { systemPrompt?: unknown; contextWindowTokens?: unknown };
+    return {
+      systemPrompt:
+        typeof parsed.systemPrompt === "string" && parsed.systemPrompt.trim().length > 0
+          ? parsed.systemPrompt
+          : DEFAULT_AGENT_SYSTEM_PROMPT,
+      contextWindowTokens: parseAgentContextWindowTokens(parsed.contextWindowTokens),
+    };
   } catch {
-    return DEFAULT_AGENT_SYSTEM_PROMPT;
+    return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null };
   }
 };
 
-const saveRuntimeSystemPrompt = (projectId: string, systemPrompt: string) => {
+const saveRuntimeConfig = (
+  projectId: string,
+  config: { systemPrompt: string; contextWindowTokens: number | null },
+) => {
   try {
     window.localStorage.setItem(
       runtimeConfigKeyForProject(projectId),
       JSON.stringify({
-        systemPrompt,
+        systemPrompt: config.systemPrompt,
+        contextWindowTokens: config.contextWindowTokens,
         updatedAt: new Date().toISOString(),
       }),
     );
@@ -235,6 +282,11 @@ const saveRuntimeSystemPrompt = (projectId: string, systemPrompt: string) => {
     // Runtime config is a front-end override. Failing to persist it must not block chat.
   }
 };
+
+const formatTokenCount = (tokens: number | null | undefined) =>
+  typeof tokens === "number" && Number.isFinite(tokens)
+    ? new Intl.NumberFormat("en-US").format(tokens)
+    : "unknown";
 
 export const AgentSidebar = ({
   selectedDocumentId = null,
@@ -261,6 +313,7 @@ export const AgentSidebar = ({
   const [conversationContextLoaded, setConversationContextLoaded] = useState(false);
   const [activeRoleId, setActiveRoleId] = useState<AgentRoleId>(DEFAULT_AGENT_ROLE_ID);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_AGENT_SYSTEM_PROMPT);
+  const [contextWindowInput, setContextWindowInput] = useState(String(DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS));
   const [configPanelOpen, setConfigPanelOpen] = useState(false);
   const [roleDialogOpen, setRoleDialogOpen] = useState(false);
   const [roleSaving, setRoleSaving] = useState(false);
@@ -269,11 +322,16 @@ export const AgentSidebar = ({
   const [localDocumentManifest, setLocalDocumentManifest] = useState<AgentDocumentManifest | null>(null);
   const [requestTraces, setRequestTraces] = useState<AgentRequestTrace[]>([]);
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [continuingToolBudgetRunId, setContinuingToolBudgetRunId] = useState<string | null>(null);
+  const [toolBudgetActionRunId, setToolBudgetActionRunId] = useState<string | null>(null);
   const handledRunResponsesRef = useRef(new Set<string>());
   const handledRunStepLogIdsRef = useRef(new Set<string>());
   const localRunControlRef = useRef(false);
   const reconnectingRunRef = useRef<string | null>(null);
   const suppressCompletedRunRestoreRef = useRef(false);
+  const continuingToolBudgetRunRef = useRef<{ runId: string; previousModelTurnIndex: number } | null>(null);
+  const toolBudgetActionRunIdRef = useRef<string | null>(null);
+  const currentAgentOperationRef = useRef<AgentLocalOperation | null>(null);
   const [newRole, setNewRole] = useState({
     name: "",
     title: "",
@@ -318,7 +376,63 @@ export const AgentSidebar = ({
     ].slice(0, 30));
   };
 
+  const beginContinuingToolBudgetRun = (run: AgentRun) => {
+    continuingToolBudgetRunRef.current = {
+      runId: run.id,
+      previousModelTurnIndex: run.modelTurnIndex,
+    };
+    setContinuingToolBudgetRunId(run.id);
+  };
+
+  const clearContinuingToolBudgetRun = (runId?: string | null) => {
+    if (!runId || continuingToolBudgetRunRef.current?.runId === runId) {
+      continuingToolBudgetRunRef.current = null;
+      setContinuingToolBudgetRunId(null);
+    }
+  };
+
+  const beginToolBudgetAction = (actionId: string) => {
+    if (toolBudgetActionRunIdRef.current === actionId) {
+      return false;
+    }
+    toolBudgetActionRunIdRef.current = actionId;
+    setToolBudgetActionRunId(actionId);
+    return true;
+  };
+
+  const clearToolBudgetAction = (actionId?: string | null) => {
+    if (!actionId || toolBudgetActionRunIdRef.current === actionId) {
+      toolBudgetActionRunIdRef.current = null;
+      setToolBudgetActionRunId(null);
+    }
+  };
+
+  const isAgentOperationCancelled = (operationId: string) =>
+    currentAgentOperationRef.current?.id === operationId &&
+    currentAgentOperationRef.current.cancelled;
+
+  const cancelCurrentAgentOperation = () => {
+    if (currentAgentOperationRef.current) {
+      currentAgentOperationRef.current.cancelled = true;
+    }
+  };
+
   const recordAgentRunUpdate = (run: AgentRun, _event?: AgentRunEvent) => {
+    const continuingRun = continuingToolBudgetRunRef.current;
+    if (
+      continuingRun?.runId === run.id &&
+      run.modelTurnIndex <= continuingRun.previousModelTurnIndex &&
+      isToolBudgetPausedRun(run)
+    ) {
+      return;
+    }
+    if (
+      continuingRun?.runId === run.id &&
+      run.modelTurnIndex > continuingRun.previousModelTurnIndex &&
+      (run.status === "waiting_for_tool" || run.status === "waiting_for_confirmation" || run.status === "completed" || run.status === "failed" || run.status === "cancelled")
+    ) {
+      clearContinuingToolBudgetRun(run.id);
+    }
     setActiveRun(run);
     for (const step of run.steps) {
       if (handledRunStepLogIdsRef.current.has(step.id)) {
@@ -354,11 +468,18 @@ export const AgentSidebar = ({
   const sendAgentRunRequest = async (
     request: Omit<AgentChatRequest, "requestTrace">,
     stage: string,
+    operationId?: string,
   ) => {
     const result = await startAgentRunTurn({
       ...request,
+      contextWindowTokens: effectiveContextWindowTokens,
       requestTrace: createAgentRequestTraceMetadata(stage),
-    }, recordAgentRunUpdate);
+    }, (run, event) => {
+      if (operationId && isAgentOperationCancelled(operationId)) {
+        return;
+      }
+      recordAgentRunUpdate(run, event);
+    });
     recordRequestTrace(result.response.requestTrace);
     return result;
   };
@@ -381,7 +502,7 @@ export const AgentSidebar = ({
     });
     setLatestAgentDebugSnapshot(snapshot);
     void publishAgentDebugSnapshot(snapshot);
-  }, [busy, messages, toolLogs, requestTraces, config, configError, lastWarning, pendingPlan, contextSnapshot, activeRoleId, selectedDocumentId, activeRun]);
+  }, [busy, messages, toolLogs, requestTraces, config, configError, lastWarning, pendingPlan, contextSnapshot, activeRoleId, selectedDocumentId, activeRun, continuingToolBudgetRunId]);
 
   useEffect(() => {
     let active = true;
@@ -401,6 +522,9 @@ export const AgentSidebar = ({
           apiKeyConfigured: false,
           testMode: false,
           visionEnabled: false,
+          contextWindowTokens: DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS,
+          contextWindowMaxTokens: null,
+          contextWindowSource: "default",
           reason: message,
         });
         setConfigError(message);
@@ -408,7 +532,13 @@ export const AgentSidebar = ({
       if (contextResult.status === "fulfilled") {
         setContextSnapshot(contextResult.value);
         const projectId = contextResult.value.project.id;
-        setSystemPrompt(loadRuntimeSystemPrompt(projectId));
+        const runtimeConfig = loadRuntimeConfig(projectId);
+        const backendContextWindow =
+          configResult.status === "fulfilled"
+            ? configResult.value.contextWindowTokens
+            : DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS;
+        setSystemPrompt(runtimeConfig.systemPrompt);
+        setContextWindowInput(String(runtimeConfig.contextWindowTokens ?? backendContextWindow));
       }
     });
     return () => {
@@ -437,8 +567,11 @@ export const AgentSidebar = ({
     if (!conversationContextLoaded || !conversationContextScope) {
       return;
     }
-    saveRuntimeSystemPrompt(conversationContextScope.projectId, systemPrompt);
-  }, [conversationContextLoaded, conversationContextScope, systemPrompt]);
+    saveRuntimeConfig(conversationContextScope.projectId, {
+      systemPrompt,
+      contextWindowTokens: parseAgentContextWindowTokens(contextWindowInput),
+    });
+  }, [contextWindowInput, conversationContextLoaded, conversationContextScope, systemPrompt]);
 
   useEffect(() => {
     if (busy) {
@@ -479,20 +612,26 @@ export const AgentSidebar = ({
     [effectiveDocumentManifest, metadocRoleIds],
   );
 
+  const effectiveContextWindowTokens =
+    parseAgentContextWindowTokens(contextWindowInput) ??
+    config?.contextWindowTokens ??
+    DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS;
+
   const configSummary = useMemo(() => {
     if (!config) {
       return "Checking Agent configuration...";
     }
+    const contextLabel = `context ${formatTokenCount(effectiveContextWindowTokens)} tokens`;
     if (config.testMode) {
-      return `Test mode · ${config.visionEnabled ? "vision enabled" : "vision unavailable"}`;
+      return `Test mode · ${config.visionEnabled ? "vision enabled" : "vision unavailable"} · ${contextLabel}`;
     }
     if (!config.enabled) {
       return config.reason ?? "Agent backend is not configured.";
     }
     return `OpenRouter · ${config.model ?? "model not set"} · ${
       config.visionEnabled ? "vision enabled" : "vision unavailable"
-    }`;
-  }, [config]);
+    } · ${contextLabel}`;
+  }, [config, effectiveContextWindowTokens]);
   const activeRole = useMemo(
     () => (availableRoles.length > 0 ? getAgentRole(activeRoleId, availableRoles) : null),
     [activeRoleId, availableRoles],
@@ -673,8 +812,7 @@ export const AgentSidebar = ({
         ...(newRole.metadocMode === "existing"
           ? { metadocId: newRole.metadocId }
           : {
-              metadocTitle: newRole.metadocTitle.trim() || `${name} Metadoc`,
-              metadocPath: newRole.metadocPath.trim() || undefined,
+              metadocTitle: name,
             }),
       });
       setLocalDocumentManifest(manifest);
@@ -840,6 +978,7 @@ export const AgentSidebar = ({
     segmentExecutedToolCallCount: number;
     pauseReason: string;
   }) => {
+    clearContinuingToolBudgetRun(run?.id);
     const nextTotalExecutedToolCallCount = totalExecutedToolCallCount + segmentExecutedToolCallCount;
     const nextDynamicToolResults = [
       ...dynamicToolResults,
@@ -891,6 +1030,7 @@ export const AgentSidebar = ({
     dynamicToolResults: initialDynamicToolResults,
     completedToolCallKeys,
     totalExecutedToolCallCount,
+    continueBackendBudgetSegment,
   }: {
     initialPayload: AgentChatResponse;
     initialRun?: AgentRun | null;
@@ -902,11 +1042,13 @@ export const AgentSidebar = ({
     dynamicToolResults: AgentHarnessToolResult[];
     completedToolCallKeys?: string[];
     totalExecutedToolCallCount?: number;
+    continueBackendBudgetSegment?: boolean;
   }) => {
     let payload = initialPayload;
     let currentRun = initialRun ?? null;
     let dynamicToolResults = initialDynamicToolResults;
     let segmentExecutedToolCallCount = 0;
+    let shouldContinueBackendBudgetSegment = continueBackendBudgetSegment === true;
     const completedToolCalls = new Set(completedToolCallKeys ?? []);
 
     if (hasToolBudgetPauseWarning(payload)) {
@@ -930,6 +1072,25 @@ export const AgentSidebar = ({
     }
 
     for (let round = 0; round < MAX_AGENT_TOOL_ROUNDS && payload.requestedToolCalls?.length; round += 1) {
+      if (hasToolBudgetPauseWarning(payload)) {
+        pauseForToolBudget({
+          messages,
+          systemPromptSnapshot,
+          context,
+          activeRoleSnapshot,
+          activeDocumentId,
+          run: currentRun,
+          dynamicToolResults,
+          completedToolCallKeys: Array.from(completedToolCalls),
+          requestedToolCalls: payload.requestedToolCalls ?? [],
+          totalExecutedToolCallCount: totalExecutedToolCallCount ?? 0,
+          segmentExecutedToolCallCount,
+          pauseReason:
+            payload.warning ??
+            "Agent reached the backend tool budget. It paused instead of answering from incomplete evidence.",
+        });
+        return;
+      }
       const requestedCalls = payload.requestedToolCalls;
       const remainingToolCalls = Math.max(0, MAX_AGENT_TOOL_CALLS - segmentExecutedToolCallCount);
       if (remainingToolCalls === 0) {
@@ -952,7 +1113,7 @@ export const AgentSidebar = ({
       appendLog(createLog("agentToolCalls", "pending", requestedCalls.map((call) => call.toolName).join(", ")));
       const toolResults: AgentHarnessToolResult[] = [];
       for (const call of executableCalls) {
-        const toolCallKey = createToolCallKey(call);
+        const toolCallKey = createAgentToolCallKey(call);
         if (completedToolCalls.has(toolCallKey)) {
           const skipped = createAgentHarnessToolResult("toolCallSkipped", {
             toolName: call.toolName,
@@ -1003,9 +1164,15 @@ export const AgentSidebar = ({
         const result = await resumeAgentRunTurn(
           currentRun.id,
           currentRun.modelTurnIndex,
-          { harness, toolResults, dynamicToolResults },
+          {
+            harness,
+            toolResults,
+            dynamicToolResults,
+            continueBudgetSegment: shouldContinueBackendBudgetSegment,
+          },
           recordAgentRunUpdate,
         );
+        shouldContinueBackendBudgetSegment = false;
         currentRun = result.run;
         payload = result.response;
       } else {
@@ -1044,14 +1211,25 @@ export const AgentSidebar = ({
   };
 
   const continueAgentRun = async () => {
-    if (!pendingContinuation || busy) {
+    if (!pendingContinuation) {
       return;
     }
     const continuation = pendingContinuation;
+    const actionId = continuation.run?.id ?? continuation.id;
+    if (!beginToolBudgetAction(actionId)) {
+      return;
+    }
     setPendingContinuation(null);
     setLastWarning(null);
     localRunControlRef.current = true;
     setBusy(true);
+    if (continuation.run) {
+      const continuingRunId = continuation.run.id;
+      beginContinuingToolBudgetRun(continuation.run);
+      setActiveRun((current) =>
+        current?.id === continuingRunId ? markRunAsContinuing(current) : current,
+      );
+    }
     appendLog(createLog("agentToolBudget", "success", "Continuing with a new tool budget segment"));
     try {
       await runAgentToolLoop({
@@ -1066,23 +1244,107 @@ export const AgentSidebar = ({
         activeRoleSnapshot: continuation.activeRole,
         activeDocumentId: continuation.activeDocumentId,
         initialRun: continuation.run,
-        dynamicToolResults: continuation.dynamicToolResults,
+        dynamicToolResults: [
+          ...continuation.dynamicToolResults,
+          createAgentHarnessToolResult("toolBudget", {}, {
+            exhausted: false,
+            continuedByCreator: true,
+            reason: "Creator continued the run after the previous tool budget segment was exhausted.",
+          }),
+        ],
         completedToolCallKeys: continuation.completedToolCallKeys,
         totalExecutedToolCallCount: continuation.totalExecutedToolCallCount,
+        continueBackendBudgetSegment: true,
       });
     } catch (error) {
+      clearContinuingToolBudgetRun(continuation.run?.id);
       recordAgentError(error);
       const message = error instanceof Error ? error.message : String(error);
       markPendingLogsAsError(message);
       appendMessage(createMessage("assistant", message));
     } finally {
       localRunControlRef.current = false;
+      clearToolBudgetAction(actionId);
+      setBusy(false);
+    }
+  };
+
+  const continueBudgetPausedActiveRun = async () => {
+    if (!activeRun) {
+      return;
+    }
+    const actionId = activeRun.id;
+    if (!beginToolBudgetAction(actionId)) {
+      return;
+    }
+    if (!activeRole) {
+      clearToolBudgetAction(actionId);
+      appendMessage(createMessage("assistant", "Create or restore an Agent role before continuing this run."));
+      return;
+    }
+    const response = activeRun.latestResponse ?? {
+      message: "Continuing paused tool requests.",
+      pendingCommandPlan: null,
+      requestedToolCalls: activeRun.pendingToolCalls,
+    };
+    const requestedToolCalls = response.requestedToolCalls ?? activeRun.pendingToolCalls;
+    if (requestedToolCalls.length === 0) {
+      clearToolBudgetAction(actionId);
+      appendMessage(createMessage("assistant", "This paused run has no pending tool requests to continue."));
+      return;
+    }
+    setLastWarning(null);
+    localRunControlRef.current = true;
+    setBusy(true);
+    beginContinuingToolBudgetRun(activeRun);
+    setActiveRun((current) =>
+      current?.id === activeRun.id ? markRunAsContinuing(current) : current,
+    );
+    appendLog(createLog("agentToolBudget", "success", "Continuing persisted run with a new tool budget segment"));
+    try {
+      const context = await getAgentContext();
+      setContextSnapshot(context);
+      await runAgentToolLoop({
+        initialPayload: {
+          ...response,
+          warning: undefined,
+          requestedToolCalls,
+        },
+        initialRun: activeRun,
+        messages,
+        systemPromptSnapshot: systemPrompt,
+        context,
+        activeRoleSnapshot: activeRole,
+        activeDocumentId: selectedDocumentId,
+        dynamicToolResults: [
+          createAgentHarnessToolResult("toolBudget", {}, {
+            exhausted: false,
+            continuedByCreator: true,
+            reason: "Creator continued a persisted run after the previous backend tool budget segment was exhausted.",
+          }),
+        ],
+        totalExecutedToolCallCount: 0,
+        continueBackendBudgetSegment: true,
+      });
+    } catch (error) {
+      clearContinuingToolBudgetRun(activeRun.id);
+      recordAgentError(error);
+      const message = error instanceof Error ? error.message : String(error);
+      markPendingLogsAsError(message);
+      appendMessage(createMessage("assistant", message));
+    } finally {
+      localRunControlRef.current = false;
+      clearToolBudgetAction(actionId);
       setBusy(false);
     }
   };
 
   const resumeActiveRun = async () => {
     if (!activeRun || busy) {
+      return;
+    }
+    if (isToolBudgetPausedRun(activeRun)) {
+      await continueBudgetPausedActiveRun();
       return;
     }
     setLastWarning(null);
@@ -1136,14 +1398,83 @@ export const AgentSidebar = ({
     }
   };
 
-  const stopAgentRun = () => {
-    if (!pendingContinuation || busy) {
+  const stopAgentRun = async () => {
+    if (!pendingContinuation) {
+      return;
+    }
+    const run = pendingContinuation.run;
+    const actionId = run?.id ?? pendingContinuation.id;
+    if (!beginToolBudgetAction(actionId)) {
       return;
     }
     setPendingContinuation(null);
     setLastWarning(null);
+    clearContinuingToolBudgetRun(run?.id);
+    setActiveRun((current) => (run && current?.id === run.id ? null : current));
     appendLog(createLog("agentToolBudget", "success", "Stopped paused Agent run"));
     appendMessage(createMessage("assistant", "Stopped the paused Agent run. No final answer was generated from incomplete evidence."));
+    if (run && !run.id.startsWith("agent-run-tauri")) {
+      try {
+        const cancelledRun = await cancelAgentRun(run.id, { projectId: run.projectId });
+        recordAgentRunUpdate(cancelledRun);
+        setActiveRun(null);
+      } catch (error) {
+        appendLog(createLog("agentRun", "error", error instanceof Error ? error.message : String(error)));
+      }
+    }
+    clearToolBudgetAction(actionId);
+    setBusy(false);
+  };
+
+  const stopActiveRun = async () => {
+    if (!activeRun) {
+      return;
+    }
+    cancelCurrentAgentOperation();
+    const run = activeRun;
+    const actionId = run.id;
+    if (!beginToolBudgetAction(actionId)) {
+      return;
+    }
+    setLastWarning(null);
+    clearContinuingToolBudgetRun(run.id);
+    setActiveRun(null);
+    appendLog(createLog("agentRun", "success", "Stopped Agent run"));
+    appendMessage(createMessage("assistant", "Stopped the Agent run. No final answer was generated from incomplete evidence."));
+    if (!run.id.startsWith("agent-run-tauri")) {
+      try {
+        const cancelledRun = await cancelAgentRun(run.id, { projectId: run.projectId });
+        recordAgentRunUpdate(cancelledRun);
+        setActiveRun(null);
+      } catch (error) {
+        appendLog(createLog("agentRun", "error", error instanceof Error ? error.message : String(error)));
+      }
+    }
+    clearToolBudgetAction(actionId);
+    setBusy(false);
+  };
+
+  const stopCurrentAgentOperation = async () => {
+    if (activeRun && activeRunCanStop) {
+      await stopActiveRun();
+      return;
+    }
+    if (!busy) {
+      return;
+    }
+    const operationId = currentAgentOperationRef.current?.id ?? createId("agent-operation");
+    if (!beginToolBudgetAction(operationId)) {
+      return;
+    }
+    cancelCurrentAgentOperation();
+    localRunControlRef.current = false;
+    setLastWarning(null);
+    setPendingContinuation(null);
+    setBusy(false);
+    markPendingLogsAsError("Stopped by creator before a backend Agent run was created.");
+    appendLog(createLog("agentRun", "success", "Stopped local Agent operation before backend run was created"));
+    appendMessage(createMessage("assistant", "Stopped the Agent before a backend run was created."));
+    clearToolBudgetAction(operationId);
   };
 
   useEffect(() => {
@@ -1238,7 +1569,7 @@ export const AgentSidebar = ({
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || busy) {
+    if (!trimmed || agentSendDisabled) {
       return;
     }
     setInput("");
@@ -1247,6 +1578,8 @@ export const AgentSidebar = ({
     setPendingContinuation(null);
     suppressCompletedRunRestoreRef.current = false;
     localRunControlRef.current = true;
+    const operationId = createId("agent-operation");
+    currentAgentOperationRef.current = { id: operationId, cancelled: false };
     const userMessage = createMessage("user", trimmed);
     const nextMessages = [...messages, userMessage];
     setConversationEntries((current) => [...current, createMessageEntry(userMessage)]);
@@ -1260,6 +1593,9 @@ export const AgentSidebar = ({
         throw new Error("Create or restore an Agent role before chatting. Every role must have a metadoc.");
       }
       const context = await getAgentContext();
+      if (isAgentOperationCancelled(operationId)) {
+        return;
+      }
       setContextSnapshot(context);
       appendLog(
         createLog(
@@ -1273,6 +1609,9 @@ export const AgentSidebar = ({
       );
       appendLog(createLog("readMetadoc", "pending", activeRole.metadocId));
       const activeMetadoc = await readProjectDocument(context.project.id, activeRole.metadocId);
+      if (isAgentOperationCancelled(operationId)) {
+        return;
+      }
       const metadocContentLimit = 12000;
       const metadocResult = createAgentHarnessToolResult("readActiveRoleMetadoc", {
         documentId: activeRole.metadocId,
@@ -1315,7 +1654,13 @@ export const AgentSidebar = ({
         activeDocumentId: selectedDocumentId,
         harness,
         canvasSnapshot: context.canvasSnapshot,
-      }, "initial-model-response");
+      }, "initial-model-response", operationId);
+      if (isAgentOperationCancelled(operationId)) {
+        if (!initialRunResult.run.id.startsWith("agent-run-tauri")) {
+          void cancelAgentRun(initialRunResult.run.id, { projectId: initialRunResult.run.projectId }).catch(() => undefined);
+        }
+        return;
+      }
       await runAgentToolLoop({
         initialPayload: initialRunResult.response,
         initialRun: initialRunResult.run,
@@ -1327,15 +1672,87 @@ export const AgentSidebar = ({
         dynamicToolResults,
       });
     } catch (error) {
+      if (isAgentOperationCancelled(operationId)) {
+        return;
+      }
       recordAgentError(error);
       const message = error instanceof Error ? error.message : String(error);
       markPendingLogsAsError(message);
       appendMessage(createMessage("assistant", message));
     } finally {
+      if (currentAgentOperationRef.current?.id === operationId) {
+        currentAgentOperationRef.current = null;
+      }
       localRunControlRef.current = false;
       setBusy(false);
     }
   };
+
+  const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.nativeEvent.isComposing
+    ) {
+      return;
+    }
+    event.preventDefault();
+    if (!agentSendDisabled) {
+      event.currentTarget.form?.requestSubmit();
+    }
+  };
+
+  const pendingContinuationIsContinuing =
+    Boolean(pendingContinuation?.run?.id && pendingContinuation.run.id === continuingToolBudgetRunId);
+  const activeRunIsContinuingToolBudget = Boolean(activeRun?.id && activeRun.id === continuingToolBudgetRunId);
+  const activeRunIsToolBudgetPaused = !activeRunIsContinuingToolBudget && isToolBudgetPausedRun(activeRun);
+  const pendingContinuationActionId = pendingContinuation?.run?.id ?? pendingContinuation?.id ?? null;
+  const activeRunActionId = activeRun?.id ?? null;
+  const localOperationActionId = currentAgentOperationRef.current?.id ?? null;
+  const activeStopActionId = activeRunActionId ?? localOperationActionId;
+  const activeRunCanStop = Boolean(activeRun && CANCELLABLE_RUN_STATUSES.has(activeRun.status));
+  const agentStopAvailable = activeRunCanStop || busy;
+  const agentStopActionInProgress = Boolean(activeStopActionId && activeStopActionId === toolBudgetActionRunId);
+  const activeRunBlocksSend = Boolean(
+    activeRun && CANCELLABLE_RUN_STATUSES.has(activeRun.status) && !activeRunIsContinuingToolBudget,
+  );
+  const pendingContinuationBlocksInput = Boolean(pendingContinuation && !pendingContinuationIsContinuing);
+  const activeRunBlocksInput = Boolean(
+    activeRun?.status === "waiting_for_tool" && !activeRunIsContinuingToolBudget,
+  );
+  const agentPromptDisabled = config?.enabled !== true || !activeRole;
+  const agentSendDisabled =
+    agentPromptDisabled ||
+    busy ||
+    pendingContinuationBlocksInput ||
+    activeRunBlocksInput ||
+    activeRunBlocksSend ||
+    input.trim().length === 0;
+  const agentPromptPlaceholder =
+    pendingContinuationBlocksInput
+      ? "Continue or stop the paused Agent run. You can still type a draft here."
+      : activeRunBlocksInput
+        ? "Resume or stop the paused backend Agent run. You can still type a draft here."
+      : activeRunCanStop || busy
+        ? "Agent is running. You can type a draft while waiting."
+      : config?.enabled
+      ? activeRole
+        ? "Ask the agent..."
+        : "Create an Agent role first."
+      : "Configure the Agent backend first.";
+
+  useEffect(() => {
+    if (!busy) {
+      return;
+    }
+    if (pendingContinuationBlocksInput || activeRunIsToolBudgetPaused) {
+      localRunControlRef.current = false;
+      setBusy(false);
+    }
+  }, [activeRunIsToolBudgetPaused, busy, pendingContinuationBlocksInput]);
 
   return (
     <aside className="right-sidebar agent-sidebar" aria-label="Agent sidebar">
@@ -1350,9 +1767,11 @@ export const AgentSidebar = ({
         <h3>Configuration</h3>
         <p>{configSummary}</p>
         {activeRun ? (
-          <p className="agent-run-status">
-            Run {activeRun.status.replace(/_/g, " ")} - {activeRun.steps.length} steps
-          </p>
+          <div className="agent-run-status-row">
+            <p className="agent-run-status">
+              Run {activeRun.status.replace(/_/g, " ")} - {activeRun.steps.length} steps
+            </p>
+          </div>
         ) : null}
         {configError ? <p className="agent-warning">{configError}</p> : null}
         {lastWarning ? <p className="agent-warning">{lastWarning}</p> : null}
@@ -1373,30 +1792,44 @@ export const AgentSidebar = ({
               rows={10}
               value={systemPrompt}
               spellCheck={false}
-              disabled={busy}
               onChange={(event) => setSystemPrompt(event.currentTarget.value)}
             />
           </label>
           <div className="agent-config-actions">
             <button
               type="button"
-              disabled={busy}
               onClick={() => setSystemPrompt(DEFAULT_AGENT_SYSTEM_PROMPT)}
             >
               Reset prompt
             </button>
           </div>
+          <label>
+            <span>Context window tokens</span>
+            <input
+              aria-label="Agent context window tokens"
+              type="number"
+              min={MIN_AGENT_CONTEXT_WINDOW_TOKENS}
+              step={1024}
+              value={contextWindowInput}
+              onChange={(event) => setContextWindowInput(event.currentTarget.value)}
+            />
+          </label>
+          <p className="agent-muted">
+            Effective {formatTokenCount(effectiveContextWindowTokens)} tokens; backend default{" "}
+            {formatTokenCount(config?.contextWindowTokens)} tokens, model max{" "}
+            {formatTokenCount(config?.contextWindowMaxTokens)}.
+          </p>
           <div className="agent-context-editor" aria-label="Agent conversation context editor">
             <div className="agent-context-editor-header">
               <h3>Conversation Context</h3>
               <div>
-                <button type="button" disabled={busy || !conversationContextLoaded} onClick={() => addContextMessage("user")}>
+                <button type="button" disabled={!conversationContextLoaded} onClick={() => addContextMessage("user")}>
                   Add user
                 </button>
-                <button type="button" disabled={busy || !conversationContextLoaded} onClick={() => addContextMessage("assistant")}>
+                <button type="button" disabled={!conversationContextLoaded} onClick={() => addContextMessage("assistant")}>
                   Add agent
                 </button>
-                <button type="button" disabled={busy || !conversationContextLoaded} onClick={clearConversationContext}>
+                <button type="button" disabled={!conversationContextLoaded} onClick={clearConversationContext}>
                   Clear context
                 </button>
               </div>
@@ -1411,7 +1844,7 @@ export const AgentSidebar = ({
                     <select
                       aria-label={`Context message ${index + 1} role`}
                       value={message.role}
-                      disabled={busy || !conversationContextLoaded}
+                      disabled={!conversationContextLoaded}
                       onChange={(event) =>
                         updateMessage(message.id, {
                           role: event.currentTarget.value as AgentChatMessage["role"],
@@ -1421,7 +1854,7 @@ export const AgentSidebar = ({
                       <option value="user">User</option>
                       <option value="assistant">Agent</option>
                     </select>
-                    <button type="button" disabled={busy || !conversationContextLoaded} onClick={() => deleteMessage(message.id)}>
+                    <button type="button" disabled={!conversationContextLoaded} onClick={() => deleteMessage(message.id)}>
                       Delete
                     </button>
                   </div>
@@ -1429,7 +1862,7 @@ export const AgentSidebar = ({
                     aria-label={`Context message ${index + 1} content`}
                     rows={3}
                     value={message.content}
-                    disabled={busy || !conversationContextLoaded}
+                    disabled={!conversationContextLoaded}
                     onChange={(event) =>
                       updateMessage(message.id, {
                         content: event.currentTarget.value,
@@ -1578,31 +2011,9 @@ export const AgentSidebar = ({
                 </select>
               </label>
             ) : (
-              <>
-                <label>
-                  <span>Metadoc title</span>
-                  <input
-                    aria-label="New role metadoc title"
-                    value={newRole.metadocTitle}
-                    onChange={(event) => {
-                      const metadocTitle = event.currentTarget.value;
-                      setNewRole((current) => ({ ...current, metadocTitle }));
-                    }}
-                  />
-                </label>
-                <label>
-                  <span>Metadoc path</span>
-                  <input
-                    aria-label="New role metadoc path"
-                    value={newRole.metadocPath}
-                    placeholder="docs/roles/role-name.md"
-                    onChange={(event) => {
-                      const metadocPath = event.currentTarget.value;
-                      setNewRole((current) => ({ ...current, metadocPath }));
-                    }}
-                  />
-                </label>
-              </>
+              <p className="agent-muted">
+                Metadoc will be created as {createAgentRoleMetadocPath(newRole.name || "role")}.
+              </p>
             )}
             <label>
               <span>Role prompt</span>
@@ -1633,7 +2044,7 @@ export const AgentSidebar = ({
         </div>
       ) : null}
 
-      {pendingContinuation ? (
+      {pendingContinuation && !pendingContinuationIsContinuing ? (
         <section className="agent-continuation" aria-label="Paused Agent run">
           <div>
             <h3>Tool Budget Reached</h3>
@@ -1644,17 +2055,56 @@ export const AgentSidebar = ({
             </p>
           </div>
           <div className="agent-plan-actions">
-            <button type="button" className="primary-button" onClick={() => void continueAgentRun()} disabled={busy}>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void continueAgentRun()}
+              disabled={pendingContinuationActionId === toolBudgetActionRunId}
+            >
               Continue
             </button>
-            <button type="button" onClick={stopAgentRun} disabled={busy}>
+            <button
+              type="button"
+              onClick={() => void stopAgentRun()}
+              disabled={pendingContinuationActionId === toolBudgetActionRunId}
+            >
               Stop
             </button>
           </div>
         </section>
       ) : null}
 
-      {!pendingContinuation && activeRun && activeRun.status === "waiting_for_tool" ? (
+      {!pendingContinuation && activeRunIsToolBudgetPaused ? (
+        <section className="agent-continuation" aria-label="Paused Agent run">
+          <div>
+            <h3>Tool Budget Reached</h3>
+            <p>
+              {activeRun?.latestResponse?.warning ??
+                "Agent reached the backend tool budget and paused instead of answering from incomplete evidence."}
+            </p>
+            <p>Pending tool requests: {activeRun?.pendingToolCalls.length ?? 0}.</p>
+          </div>
+          <div className="agent-plan-actions">
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void continueBudgetPausedActiveRun()}
+              disabled={activeRunActionId === toolBudgetActionRunId}
+            >
+              Continue
+            </button>
+            <button
+              type="button"
+              onClick={() => void stopActiveRun()}
+              disabled={activeRunActionId === toolBudgetActionRunId}
+            >
+              Stop
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {!pendingContinuation && activeRun && activeRun.status === "waiting_for_tool" && !activeRunIsToolBudgetPaused ? (
         <section className="agent-continuation" aria-label="Resumable Agent run">
           <div>
             <h3>Agent Run Paused</h3>
@@ -1663,6 +2113,13 @@ export const AgentSidebar = ({
           <div className="agent-plan-actions">
             <button type="button" className="primary-button" onClick={() => void resumeActiveRun()} disabled={busy}>
               Resume Run
+            </button>
+            <button
+              type="button"
+              onClick={() => void stopActiveRun()}
+              disabled={activeRunActionId === toolBudgetActionRunId}
+            >
+              Stop
             </button>
           </div>
         </section>
@@ -1684,33 +2141,46 @@ export const AgentSidebar = ({
         }}
       />
 
-      <form className="agent-input-row" onSubmit={sendMessage}>
-        <textarea
-          aria-label="Agent prompt"
-          value={input}
-          rows={3}
-          placeholder={
-            pendingContinuation
-              ? "Continue or stop the paused Agent run."
-              : activeRun?.status === "waiting_for_tool"
-                ? "Resume the paused backend Agent run first."
-              : config?.enabled
-              ? activeRole
-                ? "Ask the agent..."
-                : "Create an Agent role first."
-              : "Configure the Agent backend first."
-          }
-          onChange={(event) => setInput(event.currentTarget.value)}
-          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation) || activeRun?.status === "waiting_for_tool"}
-        />
-        <button
-          type="submit"
-          className="primary-button"
-          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation) || activeRun?.status === "waiting_for_tool" || input.trim().length === 0}
-        >
-          Send
-        </button>
-      </form>
+      <div className="agent-composer">
+        {agentStopAvailable ? (
+          <section className="agent-run-control" aria-label="Active Agent run control">
+            <div>
+              <strong>{activeRunCanStop ? "Agent is running" : "Agent is starting"}</strong>
+              <span>
+                {activeRun
+                  ? `Run ${activeRun.status.replace(/_/g, " ")} - ${activeRun.steps.length} steps`
+                  : "Waiting for run id"}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="danger-btn agent-stop-button"
+              onClick={() => void stopCurrentAgentOperation()}
+              disabled={!agentStopAvailable || agentStopActionInProgress}
+            >
+              Stop Agent
+            </button>
+          </section>
+        ) : null}
+        <form className="agent-input-row" onSubmit={sendMessage}>
+          <textarea
+            aria-label="Agent prompt"
+            value={input}
+            rows={3}
+            placeholder={agentPromptPlaceholder}
+            onChange={(event) => setInput(event.currentTarget.value)}
+            onKeyDown={handlePromptKeyDown}
+            disabled={agentPromptDisabled}
+          />
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={agentSendDisabled}
+          >
+            Send
+          </button>
+        </form>
+      </div>
     </aside>
   );
 };

@@ -295,6 +295,7 @@ export const listImageAssets = (project: Project = useEditorStore.getState().pro
               pageId: page.id,
               pageName: page.name,
               panelId: panel.id,
+              panelRef: `${page.id}:${panel.id}`,
               sourceWidth: panel.image.sourceWidth ?? panel.image.viewBox.width,
               sourceHeight: panel.image.sourceHeight ?? panel.image.viewBox.height,
               viewBox: { ...panel.image.viewBox },
@@ -308,8 +309,9 @@ export const listImageAssets = (project: Project = useEditorStore.getState().pro
     ),
   );
 
-const summarizePage = (page: Page): AgentPageSummary => ({
+const summarizePage = (page: Page, pageIndex: number): AgentPageSummary => ({
   id: page.id,
+  pageNumber: pageIndex + 1,
   name: page.name,
   width: page.width,
   height: page.height,
@@ -330,6 +332,10 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
         objects.push({
           id: panel.id,
           objectType,
+          objectRef: `${page.id}:panel:${panel.id}`,
+          pageId: page.id,
+          pageName: page.name,
+          panelRef: `${page.id}:${panel.id}`,
           x: panel.x,
           y: panel.y,
           width: panel.width,
@@ -349,6 +355,7 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
                 pageId: page.id,
                 pageName: page.name,
                 panelId: panel.id,
+                panelRef: `${page.id}:${panel.id}`,
                 sourceWidth: panel.image.sourceWidth ?? panel.image.viewBox.width,
                 sourceHeight: panel.image.sourceHeight ?? panel.image.viewBox.height,
                 viewBox: { ...panel.image.viewBox },
@@ -368,6 +375,9 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
         objects.push({
           id: text.id,
           objectType,
+          objectRef: `${page.id}:text:${text.id}`,
+          pageId: page.id,
+          pageName: page.name,
           x: text.x,
           y: text.y,
           width: text.width,
@@ -394,6 +404,9 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
         objects.push({
           id: bubble.id,
           objectType,
+          objectRef: `${page.id}:bubble:${bubble.id}`,
+          pageId: page.id,
+          pageName: page.name,
           x: bubble.x,
           y: bubble.y,
           width: bubble.width,
@@ -419,6 +432,9 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
         objects.push({
           id: element.id,
           objectType,
+          objectRef: `${page.id}:element:${element.id}`,
+          pageId: page.id,
+          pageName: page.name,
           x: element.x,
           y: element.y,
           width: element.width,
@@ -458,11 +474,11 @@ export const getAgentContext = async (): Promise<AgentContextSnapshot> => {
     selectedPage && state.selection?.pageId === selectedPage.id
       ? await captureCurrentCanvasSnapshot("selection")
       : null;
-  const pages: AgentPageContextSummary[] = state.project.pages.map((page) => {
+  const pages: AgentPageContextSummary[] = state.project.pages.map((page, pageIndex) => {
     const objects = summarizeObjects(page);
     const isCurrent = page.id === selectedPage?.id;
     return {
-      ...summarizePage(page),
+      ...summarizePage(page, pageIndex),
       isCurrent,
       viewing: isCurrent,
       selectedObject:

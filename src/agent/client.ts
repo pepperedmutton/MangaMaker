@@ -477,6 +477,7 @@ export const resumeAgentRunTurn = async (
     harness: AgentHarnessSnapshot;
     toolResults: AgentHarnessToolResult[];
     dynamicToolResults: AgentHarnessToolResult[];
+    continueBudgetSegment?: boolean;
   },
   onRunUpdate?: (run: AgentRun, event: AgentRunEvent) => void,
 ): Promise<{ run: AgentRun; response: AgentChatResponse }> => {
@@ -498,6 +499,24 @@ export const resumeAgentRunTurn = async (
     throw new AgentRunError("Agent run completed without a model response.", completedRun);
   }
   return { run: completedRun, response: completedRun.latestResponse };
+};
+
+export const cancelAgentRun = async (
+  runId: string,
+  options: { projectId?: string | null } = {},
+): Promise<AgentRun> => {
+  if (isTauriRuntime()) {
+    throw new AgentRunError("Tauri Agent runs do not support persisted run cancellation yet.");
+  }
+  const params = new URLSearchParams();
+  if (options.projectId) {
+    params.set("projectId", options.projectId);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${AGENT_API_BASE}/runs/${encodeURIComponent(runId)}/cancel${suffix}`, {
+    method: "POST",
+  });
+  return readAgentRunResponse(response);
 };
 
 export const publishAgentDebugSnapshot = async (snapshot: AgentDebugSnapshot): Promise<void> => {
