@@ -1,5 +1,6 @@
 import {
   GRID_SIZE,
+  MOVE_SNAP_SIZE,
   MIN_BUBBLE_HEIGHT,
   MIN_BUBBLE_WIDTH,
   MIN_PANEL_SIZE,
@@ -31,6 +32,8 @@ type RenderableLayer =
 export const snapValue = (value: number, step = GRID_SIZE) =>
   Math.round(value / step) * step;
 
+export const snapMoveValue = (value: number) => snapValue(value, MOVE_SNAP_SIZE);
+
 export const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
@@ -61,17 +64,23 @@ export const clampRectToWorkspace = (
   rect: { x: number; y: number; width: number; height: number },
   minimumWidth: number,
   minimumHeight = minimumWidth,
+  options: {
+    xStep?: number;
+    yStep?: number;
+    widthStep?: number;
+    heightStep?: number;
+  } = {},
 ) => {
   const workspace = getPageWorkspace(page);
-  const width = clamp(snapValue(rect.width), minimumWidth, workspace.width);
-  const height = clamp(snapValue(rect.height), minimumHeight, workspace.height);
+  const width = clamp(snapValue(rect.width, options.widthStep), minimumWidth, workspace.width);
+  const height = clamp(snapValue(rect.height, options.heightStep), minimumHeight, workspace.height);
   const x = clamp(
-    snapValue(rect.x),
+    snapValue(rect.x, options.xStep),
     workspace.x,
     workspace.x + workspace.width - width,
   );
   const y = clamp(
-    snapValue(rect.y),
+    snapValue(rect.y, options.yStep),
     workspace.y,
     workspace.y + workspace.height - height,
   );
@@ -83,12 +92,30 @@ export const clampPanelRectToWorkspace = (
   rect: { x: number; y: number; width: number; height: number },
 ) => clampRectToWorkspace(page, rect, MIN_PANEL_SIZE);
 
+export const clampPanelMoveRectToWorkspace = (
+  page: Page,
+  rect: { x: number; y: number; width: number; height: number },
+) =>
+  clampRectToWorkspace(page, rect, MIN_PANEL_SIZE, MIN_PANEL_SIZE, {
+    xStep: MOVE_SNAP_SIZE,
+    yStep: MOVE_SNAP_SIZE,
+  });
+
 export const clampBubbleRectToWorkspace = (
   page: Page,
   rect: { x: number; y: number; width: number; height: number },
 ) => {
   return clampRectToWorkspace(page, rect, MIN_BUBBLE_WIDTH, MIN_BUBBLE_HEIGHT);
 };
+
+export const clampBubbleMoveRectToWorkspace = (
+  page: Page,
+  rect: { x: number; y: number; width: number; height: number },
+) =>
+  clampRectToWorkspace(page, rect, MIN_BUBBLE_WIDTH, MIN_BUBBLE_HEIGHT, {
+    xStep: MOVE_SNAP_SIZE,
+    yStep: MOVE_SNAP_SIZE,
+  });
 
 export const clampTextBoxToWorkspace = (
   page: Page,
@@ -97,12 +124,30 @@ export const clampTextBoxToWorkspace = (
   return clampRectToWorkspace(page, rect, MIN_TEXT_BOX_WIDTH, MIN_TEXT_BOX_HEIGHT);
 };
 
+export const clampTextBoxMoveToWorkspace = (
+  page: Page,
+  rect: { x: number; y: number; width: number; height: number },
+) =>
+  clampRectToWorkspace(page, rect, MIN_TEXT_BOX_WIDTH, MIN_TEXT_BOX_HEIGHT, {
+    xStep: MOVE_SNAP_SIZE,
+    yStep: MOVE_SNAP_SIZE,
+  });
+
 export const clampElementRectToWorkspace = (
   page: Page,
   rect: { x: number; y: number; width: number; height: number },
 ) => {
   return clampRectToWorkspace(page, rect, 24, 24);
 };
+
+export const clampElementMoveRectToWorkspace = (
+  page: Page,
+  rect: { x: number; y: number; width: number; height: number },
+) =>
+  clampRectToWorkspace(page, rect, 24, 24, {
+    xStep: MOVE_SNAP_SIZE,
+    yStep: MOVE_SNAP_SIZE,
+  });
 
 export const clampPointToWorkspace = (
   page: Pick<Page, "width" | "height">,

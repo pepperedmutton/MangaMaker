@@ -1272,6 +1272,19 @@ type AgentChatPayload = {
   requestTrace?: AgentRequestTraceMetadata;
 };
 
+type AgentToolCallRequest = {
+  toolName: string;
+  input: unknown;
+  reason?: string;
+};
+
+type AgentHarnessToolResult = {
+  toolName: string;
+  input: unknown;
+  result: unknown;
+  createdAt: string;
+};
+
 type AgentRequestTraceStatus = "pending" | "success" | "error" | "timeout";
 
 type AgentRequestTraceDetailValue = string | number | boolean | null;
@@ -1353,14 +1366,16 @@ type AgentRunPublic = {
   modelTurnIndex: number;
   steps: AgentRunStep[];
   trace: AgentRequestTrace[];
-  pendingToolCalls: Array<{ toolName: string; input: unknown; reason?: string }>;
+  pendingToolCalls: AgentToolCallRequest[];
   latestResponse?: unknown;
   error?: string;
 };
 
 type AgentRunState = AgentRunPublic & {
   payload: AgentChatPayload;
-  dynamicToolResults: Array<{ toolName: string; input: unknown; result: unknown; createdAt: string }>;
+  dynamicToolResults: AgentHarnessToolResult[];
+  serverToolCallCount?: number;
+  serverToolRoundCount?: number;
 };
 
 type AgentRunEvent =
@@ -1678,6 +1693,33 @@ const getAgentRunState = async (runId: string, projectId?: string | null) => {
   return persistedRun;
 };
 
+const listAgentRunsForProject = async (
+  projectId: string,
+  options: { roleId?: string | null; limit?: number } = {},
+) => {
+  const runsDir = await getAgentRunProjectDir(projectId);
+  const entries = await fsp.readdir(runsDir, { withFileTypes: true }).catch(() => []);
+  const runs: AgentRunState[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const runId = entry.name;
+    const run = await getAgentRunState(runId, projectId).catch(() => null);
+    if (!run) {
+      continue;
+    }
+    if (options.roleId && run.roleId !== options.roleId) {
+      continue;
+    }
+    runs.push(run);
+  }
+  return runs
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+    .slice(0, Math.max(1, Math.min(100, options.limit ?? 20)))
+    .map(toPublicAgentRun);
+};
+
 const createAgentRunStep = (
   runId: string,
   kind: AgentRunStepKind,
@@ -1742,6 +1784,571 @@ const summarizeToolResultsForRun = (
       : null,
     };
   });
+
+const SERVER_AGENT_MAX_TOOL_ROUNDS = 8;
+const SERVER_AGENT_MAX_TOOL_CALLS = 24;
+const SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND = 8;
+const SERVER_EXECUTABLE_AGENT_TOOLS = new Set([
+  "readProjectSummary",
+  "listPages",
+  "searchProject",
+  "readPage",
+  "readPages",
+  "inspectSelection",
+  "listImageAssets",
+  "renderCurrentPage",
+  "listCommandManifest",
+  "listDocuments",
+  "listRoles",
+  "readDocument",
+  "searchDocuments",
+  "writeDocument",
+  "validateDocumentAgainstProject",
+  "proposeCommandPlan",
+]);
+
+const createAgentHarnessToolResult = (
+  toolName: string,
+  input: unknown,
+  resultValue: unknown,
+): AgentHarnessToolResult => ({
+  toolName,
+  input,
+  result: resultValue,
+  createdAt: new Date().toISOString(),
+});
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+const asString = (value: unknown) => (typeof value === "string" ? value : "");
+const normalizedSearchText = (value: unknown) => String(value ?? "").toLowerCase();
+
+const getPayloadContextPages = (context: AgentContextPayload | undefined) =>
+  Array.isArray(context?.pages) ? context.pages : [];
+
+const getPayloadContextObjects = (context: AgentContextPayload | undefined) =>
+  Array.isArray(context?.objects) ? context.objects : [];
+
+const getPayloadContextImageAssets = (context: AgentContextPayload | undefined) =>
+  Array.isArray(context?.imageAssets)
+    ? context.imageAssets.map((asset) => asRecord(asset))
+    : [];
+
+const getPayloadCurrentPage = (context: AgentContextPayload | undefined) => {
+  const pages = getPayloadContextPages(context);
+  return pages.find((page) => page.isCurrent || page.viewing) ?? context?.currentPage ?? pages[0] ?? null;
+};
+
+const getPayloadPageById = (context: AgentContextPayload | undefined, pageId: string) =>
+  getPayloadContextPages(context).find((page) => page.id === pageId) ?? null;
+
+const compactPageIndexEntry = (page: AgentContextPayload["pages"][number]) => {
+  const objects = Array.isArray(page.objects) ? page.objects : [];
+  return {
+    id: page.id,
+    name: page.name,
+    width: page.width,
+    height: page.height,
+    background: page.background,
+    panelCount: page.panelCount,
+    textCount: page.textCount,
+    bubbleCount: page.bubbleCount,
+    layerCount: page.layerCount,
+    objectCount: objects.length,
+    hasImages: objects.some((object) => object.objectType === "panel" && object.hasImage),
+    hasText: Number(page.textCount ?? 0) > 0,
+    isCurrent: page.isCurrent || page.viewing,
+  };
+};
+
+const clampServerToolLimit = (value: unknown, fallback: number, max: number) => {
+  const parsed = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
+  return Math.max(1, Math.min(max, parsed));
+};
+
+const searchPayloadProject = (
+  context: AgentContextPayload | undefined,
+  input: { query?: string; pageId?: string; objectTypes?: string[]; limit?: number },
+) => {
+  const query = normalizedSearchText(input.query).trim();
+  const objectTypeFilter = new Set(input.objectTypes ?? []);
+  const limit = clampServerToolLimit(input.limit, 20, 100);
+  const matches: Array<{
+    pageId: string;
+    pageName: string;
+    objectId?: string;
+    objectType?: string;
+    assetSrc?: string;
+    field: string;
+    snippet: string;
+    isCurrent: boolean;
+  }> = [];
+  let totalMatches = 0;
+  const addMatch = (entry: (typeof matches)[number]) => {
+    totalMatches += 1;
+    if (matches.length < limit) {
+      matches.push(entry);
+    }
+  };
+  const matchesQuery = (value: unknown) => !query || normalizedSearchText(value).includes(query);
+
+  for (const page of getPayloadContextPages(context)) {
+    if (input.pageId && page.id !== input.pageId) {
+      continue;
+    }
+    if (matchesQuery(page.name)) {
+      addMatch({
+        pageId: page.id,
+        pageName: page.name,
+        field: "page.name",
+        snippet: page.name,
+        isCurrent: Boolean(page.isCurrent || page.viewing),
+      });
+    }
+    for (const object of Array.isArray(page.objects) ? page.objects : []) {
+      const objectRecord = asRecord(object);
+      const imageRecord = asRecord(objectRecord.image);
+      if (objectTypeFilter.size > 0 && !objectTypeFilter.has(object.objectType)) {
+        continue;
+      }
+      const candidateFields = [
+        ["id", object.id],
+        ["content", object.content],
+        ["description", objectRecord.description],
+        ["image.prompt", imageRecord.prompt],
+        ["image.description", imageRecord.description],
+        ["image.src", imageRecord.src],
+      ] as const;
+      for (const [field, value] of candidateFields) {
+        if (!value || !matchesQuery(value)) {
+          continue;
+        }
+        addMatch({
+          pageId: page.id,
+          pageName: page.name,
+          objectId: object.id,
+          objectType: object.objectType,
+          field,
+          snippet: String(value).slice(0, 240),
+          isCurrent: Boolean(page.isCurrent || page.viewing),
+        });
+      }
+    }
+  }
+
+  for (const asset of getPayloadContextImageAssets(context)) {
+    const assetPageId = asString(asset.pageId);
+    if (input.pageId && assetPageId !== input.pageId) {
+      continue;
+    }
+    const fields = [
+      ["src", asset.src],
+      ["prompt", asset.prompt],
+      ["description", asset.description],
+      ["panelId", asset.panelId],
+    ] as const;
+    for (const [field, value] of fields) {
+      if (!value || !matchesQuery(value)) {
+        continue;
+      }
+      addMatch({
+        pageId: assetPageId,
+        pageName: asString(asset.pageName),
+        objectId: asString(asset.panelId),
+        objectType: "panel",
+        assetSrc: asString(asset.src),
+        field: `asset.${field}`,
+        snippet: String(value).slice(0, 240),
+        isCurrent: getPayloadCurrentPage(context)?.id === assetPageId,
+      });
+    }
+  }
+
+  return {
+    query: input.query ?? "",
+    limit,
+    totalMatches,
+    returned: matches.length,
+    truncated: totalMatches > matches.length,
+    matches,
+  };
+};
+
+const documentIndexEntry = (document: AgentDocumentMeta) => ({
+  id: document.id,
+  title: document.title,
+  role: document.role ?? null,
+  status: document.status,
+  path: document.path,
+  relatedPageIds: document.relatedPageIds,
+  updatedAt: document.updatedAt,
+  summary: document.summary ?? "",
+});
+
+const documentResultSummary = (document: AgentDocument) => ({
+  id: document.id,
+  title: document.title,
+  role: document.role ?? null,
+  status: document.status,
+  path: document.path,
+  relatedPageIds: document.relatedPageIds,
+  updatedAt: document.updatedAt,
+  summary: document.summary ?? "",
+  contentLength: document.content.length,
+});
+
+const searchAgentDocumentsForTool = async (
+  projectId: string,
+  input: { query?: string; role?: string; limit?: number },
+) => {
+  const query = normalizedSearchText(input.query).trim();
+  const limit = clampServerToolLimit(input.limit, 20, 100);
+  const manifest = await ensureProjectDocuments(projectId);
+  const matches: Array<{
+    documentId: string;
+    title: string;
+    role: string | null;
+    path: string;
+    field: string;
+    snippet: string;
+  }> = [];
+  let totalMatches = 0;
+  const addMatch = (entry: (typeof matches)[number]) => {
+    totalMatches += 1;
+    if (matches.length < limit) {
+      matches.push(entry);
+    }
+  };
+  const matchesQuery = (value: unknown) => !query || normalizedSearchText(value).includes(query);
+  for (const meta of manifest.documents) {
+    if (input.role && meta.role !== input.role) {
+      continue;
+    }
+    const fields = [
+      ["title", meta.title],
+      ["summary", meta.summary],
+      ["path", meta.path],
+      ["role", meta.role],
+    ] as const;
+    for (const [field, value] of fields) {
+      if (!value || !matchesQuery(value)) {
+        continue;
+      }
+      addMatch({
+        documentId: meta.id,
+        title: meta.title,
+        role: meta.role ?? null,
+        path: meta.path,
+        field,
+        snippet: String(value).slice(0, 240),
+      });
+    }
+    if (query) {
+      const document = await readAgentDocumentFile(projectId, meta.id);
+      const lowerContent = normalizedSearchText(document.content);
+      const matchIndex = lowerContent.indexOf(query);
+      if (matchIndex >= 0) {
+        const start = Math.max(0, matchIndex - 120);
+        const end = Math.min(document.content.length, matchIndex + query.length + 120);
+        addMatch({
+          documentId: meta.id,
+          title: meta.title,
+          role: meta.role ?? null,
+          path: meta.path,
+          field: "content",
+          snippet: document.content.slice(start, end),
+        });
+      }
+    }
+  }
+  return {
+    query: input.query ?? "",
+    role: input.role ?? null,
+    limit,
+    totalMatches,
+    returned: matches.length,
+    truncated: totalMatches > matches.length,
+    matches,
+  };
+};
+
+const validateAgentDocumentAgainstPayloadProject = async (
+  projectId: string,
+  context: AgentContextPayload | undefined,
+  input: { documentId?: string },
+) => {
+  const document = await readAgentDocumentFile(projectId, input.documentId ?? "");
+  const existingPageIds = new Set(getPayloadContextPages(context).map((page) => page.id));
+  const referencedPageIds = new Set<string>();
+  const pageIdPattern = /\bpage[-_A-Za-z0-9]+\b/g;
+  for (const match of document.content.matchAll(pageIdPattern)) {
+    referencedPageIds.add(match[0]);
+  }
+  for (const pageId of document.relatedPageIds) {
+    referencedPageIds.add(pageId);
+  }
+  const missingPageIds = Array.from(referencedPageIds).filter((pageId) => !existingPageIds.has(pageId));
+  return {
+    document: documentResultSummary(document),
+    referencedPageIds: Array.from(referencedPageIds),
+    missingPageIds,
+    ok: missingPageIds.length === 0,
+  };
+};
+
+const mergeAgentToolResults = (
+  existing: AgentHarnessToolResult[],
+  incoming: AgentHarnessToolResult[],
+) => {
+  const merged: AgentHarnessToolResult[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...existing, ...incoming]) {
+    const key = `${entry.toolName}:${JSON.stringify(entry.input ?? {})}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(entry);
+  }
+  return merged;
+};
+
+const buildRunHarnessWithDynamicResults = (
+  run: AgentRunState,
+  dynamicToolResults: AgentHarnessToolResult[],
+): NonNullable<AgentChatPayload["harness"]> => ({
+  ...(run.payload.harness ?? { initialToolResults: [] }),
+  dynamicToolResults,
+});
+
+const executeServerAgentToolCall = async (
+  run: AgentRunState,
+  call: AgentToolCallRequest,
+): Promise<AgentHarnessToolResult | null> => {
+  if (!SERVER_EXECUTABLE_AGENT_TOOLS.has(call.toolName)) {
+    return null;
+  }
+  const context = run.payload.agentContext;
+  const input = asRecord(call.input);
+  const projectId = run.projectId;
+  if (call.toolName === "readProjectSummary") {
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      project: context?.project ?? { id: run.projectId, title: "", pageCount: 0 },
+      selectedPageId: context?.selectedPageId ?? null,
+      currentPageId: getPayloadCurrentPage(context)?.id ?? null,
+      selection: context?.selection ?? null,
+      multiSelection: context?.multiSelection ?? [],
+      activeTool: context?.activeTool ?? null,
+      zoom: context?.zoom ?? null,
+      saveStatus: context?.saveStatus ?? null,
+    });
+  }
+  if (call.toolName === "listPages") {
+    return createAgentHarnessToolResult(call.toolName, call.input, getPayloadContextPages(context).map(compactPageIndexEntry));
+  }
+  if (call.toolName === "searchProject") {
+    return createAgentHarnessToolResult(call.toolName, call.input, searchPayloadProject(context, {
+      query: asString(input.query) || undefined,
+      pageId: asString(input.pageId) || undefined,
+      objectTypes: Array.isArray(input.objectTypes)
+        ? input.objectTypes.filter((entry): entry is string => typeof entry === "string")
+        : undefined,
+      limit: typeof input.limit === "number" ? input.limit : undefined,
+    }));
+  }
+  if (call.toolName === "readPage") {
+    return createAgentHarnessToolResult(call.toolName, call.input, getPayloadPageById(context, asString(input.pageId)));
+  }
+  if (call.toolName === "readPages") {
+    const pageIds = Array.isArray(input.pageIds)
+      ? input.pageIds.filter((pageId): pageId is string => typeof pageId === "string" && pageId.trim().length > 0)
+      : [];
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      pageIds,
+      pages: pageIds.map((pageId) => getPayloadPageById(context, pageId)),
+    });
+  }
+  if (call.toolName === "inspectSelection") {
+    const contextRecord = asRecord(context);
+    const selectionSnapshot = contextRecord.selectionSnapshot && typeof contextRecord.selectionSnapshot === "object"
+      ? {
+          ...asRecord(contextRecord.selectionSnapshot),
+          dataUrl: asString(asRecord(contextRecord.selectionSnapshot).dataUrl) ? "[selection image attachment available]" : null,
+        }
+      : null;
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      selection: context?.selection ?? null,
+      multiSelection: context?.multiSelection ?? [],
+      selectedObject: contextRecord.selectedObject ?? null,
+      selectionSnapshot,
+    });
+  }
+  if (call.toolName === "listImageAssets") {
+    const query = normalizedSearchText(input.query).trim();
+    const limit = clampServerToolLimit(input.limit, 40, 100);
+    const pageId = asString(input.pageId);
+    const filtered = getPayloadContextImageAssets(context).filter((asset) => {
+      if (pageId && asString(asset.pageId) !== pageId) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      return [asset.src, asset.prompt, asset.description, asset.panelId, asset.pageName].some((value) =>
+        normalizedSearchText(value).includes(query),
+      );
+    });
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      totalMatches: filtered.length,
+      returned: Math.min(filtered.length, limit),
+      truncated: filtered.length > limit,
+      assets: filtered.slice(0, limit),
+    });
+  }
+  if (call.toolName === "renderCurrentPage") {
+    const currentPage = getPayloadCurrentPage(context);
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      pageId: currentPage?.id ?? context?.selectedPageId ?? null,
+      pageName: currentPage?.name ?? null,
+      isCurrent: true,
+      renderOptions: {
+        detail: input.detail === "detail" ? "detail" : "preview",
+        crop: input.crop ?? null,
+      },
+      resources: {
+        page: currentPage,
+        imageAssets: getPayloadContextImageAssets(context).filter((asset) => asString(asset.pageId) === currentPage?.id),
+      },
+      canvasSnapshot: context?.canvasSnapshot ?? {
+        dataUrl: null,
+        reason: "Current canvas snapshot was not included in the run payload.",
+      },
+    });
+  }
+  if (call.toolName === "listCommandManifest") {
+    return createAgentHarnessToolResult(call.toolName, call.input, context?.commandManifest ?? []);
+  }
+  if (call.toolName === "listDocuments") {
+    const manifest = await ensureProjectDocuments(projectId);
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      projectId: manifest.projectId,
+      updatedAt: manifest.updatedAt,
+      roles: manifest.roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        title: role.title,
+        metadocId: role.metadocId,
+        defaultAutonomy: role.defaultAutonomy,
+        preferredTools: role.preferredTools,
+      })),
+      documents: manifest.documents.map(documentIndexEntry),
+    });
+  }
+  if (call.toolName === "listRoles") {
+    const manifest = await ensureProjectDocuments(projectId);
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      projectId: manifest.projectId,
+      updatedAt: manifest.updatedAt,
+      roles: manifest.roles,
+    });
+  }
+  if (call.toolName === "readDocument") {
+    return createAgentHarnessToolResult(call.toolName, call.input, await readAgentDocumentFile(projectId, asString(input.documentId)));
+  }
+  if (call.toolName === "searchDocuments") {
+    return createAgentHarnessToolResult(call.toolName, call.input, await searchAgentDocumentsForTool(projectId, {
+      query: asString(input.query) || undefined,
+      role: asString(input.role) || undefined,
+      limit: typeof input.limit === "number" ? input.limit : undefined,
+    }));
+  }
+  if (call.toolName === "writeDocument") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const saved = await writeAgentDocumentFile(projectId, {
+      id: asString(input.id),
+      title: asString(input.title),
+      role: asString(input.role) || undefined,
+      status: (asString(input.status) || undefined) as AgentDocumentMeta["status"] | undefined,
+      path: asString(input.path) || undefined,
+      relatedPageIds: Array.isArray(input.relatedPageIds)
+        ? input.relatedPageIds.filter((entry): entry is string => typeof entry === "string")
+        : undefined,
+      summary: asString(input.summary) || undefined,
+      content: typeof input.content === "string" ? input.content : "",
+      operationId,
+      lastAgentRunId: run.id,
+    });
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      saved: true,
+      operationId,
+      document: documentResultSummary(saved),
+    });
+  }
+  if (call.toolName === "validateDocumentAgainstProject") {
+    return createAgentHarnessToolResult(
+      call.toolName,
+      call.input,
+      await validateAgentDocumentAgainstPayloadProject(projectId, context, { documentId: asString(input.documentId) }),
+    );
+  }
+  if (call.toolName === "proposeCommandPlan") {
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      accepted: false,
+      reason:
+        "Return this plan as pendingCommandPlan in the final JSON response so MangaMaker can validate schemas and apply confirmation policy.",
+    });
+  }
+  return null;
+};
+
+const executeServerAgentToolCalls = async (
+  run: AgentRunState,
+  requestedToolCalls: AgentToolCallRequest[],
+) => {
+  const serverToolCallCount = run.serverToolCallCount ?? 0;
+  const serverToolRoundCount = run.serverToolRoundCount ?? 0;
+  if (serverToolCallCount >= SERVER_AGENT_MAX_TOOL_CALLS || serverToolRoundCount >= SERVER_AGENT_MAX_TOOL_ROUNDS) {
+    return {
+      toolResults: [] as AgentHarnessToolResult[],
+      clientToolCalls: requestedToolCalls,
+      deferredToolCalls: [] as AgentToolCallRequest[],
+      budgetExhausted: true,
+      reason: "Agent reached the backend tool budget and paused instead of answering from incomplete evidence.",
+    };
+  }
+  const availableCalls = Math.min(
+    SERVER_AGENT_MAX_TOOL_CALLS - serverToolCallCount,
+    SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND,
+  );
+  const toolResults: AgentHarnessToolResult[] = [];
+  const clientToolCalls: AgentToolCallRequest[] = [];
+  const deferredToolCalls: AgentToolCallRequest[] = requestedToolCalls.slice(availableCalls);
+  const executableCalls = requestedToolCalls.slice(0, availableCalls);
+  for (const call of executableCalls) {
+    const result = await executeServerAgentToolCall(run, call);
+    if (result) {
+      toolResults.push(result);
+      continue;
+    }
+    clientToolCalls.push(call);
+  }
+  if (deferredToolCalls.length > 0) {
+    toolResults.push(createAgentHarnessToolResult("toolBudget", {}, {
+      exhausted: false,
+      remainingToolCalls: Math.max(0, SERVER_AGENT_MAX_TOOL_CALLS - serverToolCallCount - toolResults.length),
+      deferredToolCalls: deferredToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
+      reason: "Backend per-round tool call limit reached; MangaMaker will resume after this batch.",
+    }));
+  }
+  return {
+    toolResults,
+    clientToolCalls,
+    deferredToolCalls,
+    budgetExhausted: false,
+    reason: null as string | null,
+  };
+};
 
 const createRetryStepsFromTrace = (runId: string, trace: AgentRequestTrace): AgentRunStep[] =>
   trace.events
@@ -2850,16 +3457,61 @@ const startAgentRunModelStep = (
         ? response.requestedToolCalls
         : [];
       if (requestedToolCalls.length > 0) {
-        run.pendingToolCalls = requestedToolCalls;
+        const toolExecution = await executeServerAgentToolCalls(run, requestedToolCalls);
+        if (toolExecution.toolResults.length > 0) {
+          const now = new Date().toISOString();
+          run.steps.push({
+            ...createAgentRunStep(
+              run.id,
+              "tool_result",
+              `${toolExecution.toolResults.length} backend tool result(s) produced`,
+              "success",
+              summarizeToolResultsForRun(toolExecution.toolResults),
+            ),
+            finishedAt: now,
+          });
+          run.dynamicToolResults = mergeAgentToolResults(run.dynamicToolResults, toolExecution.toolResults);
+          run.payload = {
+            ...run.payload,
+            harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults),
+          };
+          run.serverToolCallCount = (run.serverToolCallCount ?? 0) + toolExecution.toolResults.filter((entry) => entry.toolName !== "toolBudget").length;
+          run.serverToolRoundCount = (run.serverToolRoundCount ?? 0) + 1;
+        }
+        if (toolExecution.clientToolCalls.length === 0 && toolExecution.toolResults.length > 0) {
+          run.pendingToolCalls = [];
+          run.latestResponse = {
+            ...response,
+            requestedToolCalls: [],
+          };
+          await saveAndBroadcastAgentRun(run);
+          startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);
+          return;
+        }
+        const pendingToolCalls = toolExecution.clientToolCalls.length > 0
+          ? toolExecution.clientToolCalls
+          : requestedToolCalls;
+        run.latestResponse = {
+          ...response,
+          requestedToolCalls: pendingToolCalls,
+          ...(toolExecution.budgetExhausted && toolExecution.reason
+            ? { warning: toolExecution.reason }
+            : {}),
+        };
+        run.pendingToolCalls = pendingToolCalls;
         run.status = "waiting_for_tool";
         run.steps.push({
           ...createAgentRunStep(
             run.id,
             "tool_call",
-            `Waiting for ${requestedToolCalls.length} tool call(s)`,
+            toolExecution.clientToolCalls.length > 0
+              ? `Waiting for ${toolExecution.clientToolCalls.length} browser tool call(s)`
+              : `Waiting for ${pendingToolCalls.length} tool call(s)`,
             "waiting",
             {
-              toolCalls: requestedToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
+              toolCalls: pendingToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
+              backendExecutedToolResults: toolExecution.toolResults.length,
+              deferredToolCalls: toolExecution.deferredToolCalls?.map(({ toolName, input, reason }) => ({ toolName, input, reason })) ?? [],
             },
           ),
           finishedAt: new Date().toISOString(),
@@ -3057,6 +3709,21 @@ const attachWebAgentMiddleware = (
           return;
         }
       }
+      if (method === "GET" && pathname === `${AGENT_API_BASE}/runs`) {
+        const projectId = url.searchParams.get("projectId")?.trim();
+        const roleId = url.searchParams.get("roleId")?.trim() || null;
+        const limit = Number(url.searchParams.get("limit") ?? "20") || 20;
+        if (!projectId) {
+          json(res, 400, { error: "projectId query parameter is required." });
+          return;
+        }
+        json(res, 200, {
+          projectId,
+          roleId,
+          runs: await listAgentRunsForProject(projectId, { roleId, limit }),
+        });
+        return;
+      }
       if (method === "POST" && pathname === `${AGENT_API_BASE}/runs`) {
         const payload = await readJsonBody<AgentChatPayload>(req);
         const now = new Date().toISOString();
@@ -3154,6 +3821,16 @@ const attachWebAgentMiddleware = (
             result: entry.result,
             createdAt: entry.createdAt ?? now,
           }));
+          const incomingDynamicToolResults = (body.dynamicToolResults ?? []).map((entry) => ({
+            toolName: String(entry.toolName ?? "unknown"),
+            input: entry.input,
+            result: entry.result,
+            createdAt: entry.createdAt ?? now,
+          }));
+          const nextDynamicToolResults = mergeAgentToolResults(
+            run.dynamicToolResults,
+            mergeAgentToolResults(incomingDynamicToolResults, toolResults),
+          );
           run.steps.push({
             ...createAgentRunStep(
               run.id,
@@ -3166,14 +3843,18 @@ const attachWebAgentMiddleware = (
           });
           run.payload = {
             ...run.payload,
-            harness: body.harness ?? run.payload.harness,
+            harness: buildRunHarnessWithDynamicResults(
+              {
+                ...run,
+                payload: {
+                  ...run.payload,
+                  harness: body.harness ?? run.payload.harness,
+                },
+              },
+              nextDynamicToolResults,
+            ),
           };
-          run.dynamicToolResults = (body.dynamicToolResults ?? toolResults).map((entry) => ({
-            toolName: String(entry.toolName ?? "unknown"),
-            input: entry.input,
-            result: entry.result,
-            createdAt: entry.createdAt ?? now,
-          }));
+          run.dynamicToolResults = nextDynamicToolResults;
           run.pendingToolCalls = [];
           await saveAndBroadcastAgentRun(run);
           startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);

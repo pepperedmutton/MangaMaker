@@ -19,9 +19,10 @@ import {
 } from "../domain/defaults";
 import {
   clampBubbleTailBaseLocalPoint,
+  clampBubbleMoveRectToWorkspace,
   clampBubbleRectToWorkspace,
-  clampElementRectToWorkspace,
-  clampTextBoxToWorkspace,
+  clampElementMoveRectToWorkspace,
+  clampTextBoxMoveToWorkspace,
   getBubbleBasePoints,
   getPageWorkspace,
   getPanelAbsolutePoints,
@@ -31,7 +32,7 @@ import {
   isPointInPolygon,
   panImageViewBox,
   scaleBubbleLocalPoint,
-  snapValue,
+  snapMoveValue,
   zoomImageViewBox,
 } from "../domain/helpers";
 import type { Bubble, ElementItem, Page, Panel, Point, Rect as PanelRect, TextItem } from "../domain/schema";
@@ -1152,7 +1153,7 @@ const PanelNode = ({
 
     if (nextMode === "x") {
       return {
-        deltaX: snapValue(rawDeltaX),
+        deltaX: snapMoveValue(rawDeltaX),
         deltaY: 0,
         nextMode,
       };
@@ -1160,13 +1161,13 @@ const PanelNode = ({
     if (nextMode === "y") {
       return {
         deltaX: 0,
-        deltaY: snapValue(rawDeltaY),
+        deltaY: snapMoveValue(rawDeltaY),
         nextMode,
       };
     }
     return {
-      deltaX: snapValue(rawDeltaX),
-      deltaY: snapValue(rawDeltaY),
+      deltaX: snapMoveValue(rawDeltaX),
+      deltaY: snapMoveValue(rawDeltaY),
       nextMode,
     };
   };
@@ -1780,12 +1781,12 @@ const PanelNode = ({
               }}
               onDragMove={(event) => {
                 event.target.position({
-                  x: snapValue(event.target.x() / scale) * scale,
-                  y: snapValue(event.target.y() / scale) * scale,
+                  x: snapMoveValue(event.target.x() / scale) * scale,
+                  y: snapMoveValue(event.target.y() / scale) * scale,
                 });
                 // Real-time preview: update live points during drag
-                const absoluteX = snapValue(event.target.x() / scale);
-                const absoluteY = snapValue(event.target.y() / scale);
+                const absoluteX = snapMoveValue(event.target.x() / scale);
+                const absoluteY = snapMoveValue(event.target.y() / scale);
                 setLivePoints(
                   panel.points.map((entry, pointIndex) =>
                     pointIndex === index
@@ -1795,8 +1796,8 @@ const PanelNode = ({
                 );
               }}
               onDragEnd={(event) => {
-                const absoluteX = snapValue(event.target.x() / scale);
-                const absoluteY = snapValue(event.target.y() / scale);
+                const absoluteX = snapMoveValue(event.target.x() / scale);
+                const absoluteY = snapMoveValue(event.target.y() / scale);
                 const nextPoints = panel.points.map((entry, pointIndex) =>
                   pointIndex === index
                     ? { x: absoluteX - panel.x, y: absoluteY - panel.y }
@@ -1954,7 +1955,7 @@ const TextNode = ({
       "text",
       item.id,
       item,
-      clampTextBoxToWorkspace(page, {
+      clampTextBoxMoveToWorkspace(page, {
         x,
         y,
         width: item.width,
@@ -2293,7 +2294,7 @@ const ElementNode = ({
       "element",
       item.id,
       item,
-      clampElementRectToWorkspace(page, {
+      clampElementMoveRectToWorkspace(page, {
         x,
         y,
         width: item.width,
@@ -2704,7 +2705,7 @@ const BubbleNode = ({
       "bubble",
       bubble.id,
       bubble,
-      clampBubbleRectToWorkspace(page, {
+      clampBubbleMoveRectToWorkspace(page, {
         x,
         y,
         width: bubble.width,

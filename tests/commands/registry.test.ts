@@ -4,6 +4,74 @@ import type { Bubble } from "../../src/domain/schema";
 import { createHarness, runCommand } from "./harness";
 
 describe("commandRegistry", () => {
+  it("keeps one-unit precision for canvas object moves", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Fine Moves" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const panel = (await runCommand(harness, "createPanel", {
+      pageId: page.id,
+      x: 60,
+      y: 80,
+      width: 240,
+      height: 220,
+    })) as { id: string };
+    const text = (await runCommand(harness, "createText", {
+      pageId: page.id,
+      x: 120,
+      y: 160,
+      content: "Fine move",
+    })) as { id: string };
+    const element = (await runCommand(harness, "createElement", {
+      pageId: page.id,
+      x: 180,
+      y: 220,
+      width: 260,
+      height: 180,
+      src: "/elements/artwords-bam.svg",
+      title: "BAM!",
+    })) as { id: string };
+    const bubble = (await runCommand(harness, "createBubble", {
+      pageId: page.id,
+      x: 240,
+      y: 280,
+      width: 260,
+      height: 150,
+    })) as Bubble;
+
+    const movedPanel = await runCommand(harness, "movePanel", {
+      pageId: page.id,
+      panelId: panel.id,
+      x: 123,
+      y: 157,
+    });
+    const movedText = await runCommand(harness, "updateText", {
+      pageId: page.id,
+      textId: text.id,
+      x: 213,
+      y: 277,
+    });
+    const movedElement = await runCommand(harness, "updateElement", {
+      pageId: page.id,
+      elementId: element.id,
+      x: 337,
+      y: 419,
+    });
+    const movedBubble = (await runCommand(harness, "updateBubble", {
+      pageId: page.id,
+      bubbleId: bubble.id,
+      x: 391,
+      y: 463,
+    })) as Bubble;
+
+    expect(movedPanel).toMatchObject({ x: 123, y: 157 });
+    expect(movedText).toMatchObject({ x: 213, y: 277 });
+    expect(movedElement).toMatchObject({ x: 337, y: 419 });
+    expect(movedBubble).toMatchObject({ x: 391, y: 463 });
+    expect(movedBubble.tailTip.x - bubble.tailTip.x).toBeCloseTo(391 - bubble.x, 6);
+    expect(movedBubble.tailTip.y - bubble.tailTip.y).toBeCloseTo(463 - bubble.y, 6);
+  });
+
   it("supports the core page workflow for creation, duplication, reorder, and removal", async () => {
     const harness = createHarness();
 

@@ -15,11 +15,15 @@ import {
 } from "../domain/defaults";
 import {
   clamp,
+  clampBubbleMoveRectToWorkspace,
   clampBubbleRectToWorkspace,
   clampElementRectToWorkspace,
+  clampElementMoveRectToWorkspace,
   clampBubbleTailBaseLocalPoint,
+  clampPanelMoveRectToWorkspace,
   clampPanelRectToWorkspace,
   clampPointToWorkspace,
+  clampTextBoxMoveToWorkspace,
   clampTextBoxToWorkspace,
   clampImageViewBox,
   createInitialPanelViewBox,
@@ -2594,7 +2598,7 @@ const commands = {
     execute: (context, input) => {
       const page = getPageById(context.getProject(), input.pageId);
       const panel = getPanel(context.getProject(), input.pageId, input.panelId);
-      const rect = clampPanelRectToWorkspace(page, {
+      const rect = clampPanelMoveRectToWorkspace(page, {
         x: input.x,
         y: input.y,
         width: panel.width,
@@ -3181,16 +3185,16 @@ const commands = {
       if (!currentElement) {
         throw new Error(`Element not found: ${input.elementId}`);
       }
-      const nextRect = clampElementRectToWorkspace(page, {
+      const shouldApplyGroupedMove =
+        (input.x !== undefined || input.y !== undefined) &&
+        input.width === undefined &&
+        input.height === undefined;
+      const nextRect = (shouldApplyGroupedMove ? clampElementMoveRectToWorkspace : clampElementRectToWorkspace)(page, {
         x: input.x ?? currentElement.x,
         y: input.y ?? currentElement.y,
         width: input.width ?? currentElement.width,
         height: input.height ?? currentElement.height,
       });
-      const shouldApplyGroupedMove =
-        (input.x !== undefined || input.y !== undefined) &&
-        input.width === undefined &&
-        input.height === undefined;
       const moveMembers = shouldApplyGroupedMove
         ? getMoveMembersForObject(page, "element", input.elementId)
         : [{ objectType: "element" as const, objectId: input.elementId }];
@@ -3335,16 +3339,16 @@ const commands = {
           : input.direction === "vertical" && currentText.textAlign === "left"
             ? "center"
             : undefined;
-      const nextRect = clampTextBoxToWorkspace(page, {
+      const shouldApplyGroupedMove =
+        (input.x !== undefined || input.y !== undefined) &&
+        input.width === undefined &&
+        input.height === undefined;
+      const nextRect = (shouldApplyGroupedMove ? clampTextBoxMoveToWorkspace : clampTextBoxToWorkspace)(page, {
         x: input.x ?? currentText.x,
         y: input.y ?? currentText.y,
         width: input.width ?? currentText.width,
         height: input.height ?? currentText.height,
       });
-      const shouldApplyGroupedMove =
-        (input.x !== undefined || input.y !== undefined) &&
-        input.width === undefined &&
-        input.height === undefined;
       const moveMembers = shouldApplyGroupedMove
         ? getMoveMembersForObject(page, "text", input.textId)
         : [{ objectType: "text" as const, objectId: input.textId }];
@@ -3572,16 +3576,16 @@ const commands = {
       if (!bubble) {
         throw new Error(`Bubble not found: ${input.bubbleId}`);
       }
-      const rect = clampBubbleRectToWorkspace(page, {
+      const shouldApplyGroupedMove =
+        (input.x !== undefined || input.y !== undefined) &&
+        input.width === undefined &&
+        input.height === undefined;
+      const rect = (shouldApplyGroupedMove ? clampBubbleMoveRectToWorkspace : clampBubbleRectToWorkspace)(page, {
         x: input.x ?? bubble.x,
         y: input.y ?? bubble.y,
         width: input.width ?? bubble.width,
         height: input.height ?? bubble.height,
       });
-      const shouldApplyGroupedMove =
-        (input.x !== undefined || input.y !== undefined) &&
-        input.width === undefined &&
-        input.height === undefined;
       const moveMembers = shouldApplyGroupedMove
         ? getMoveMembersForObject(page, "bubble", input.bubbleId)
         : [{ objectType: "bubble" as const, objectId: input.bubbleId }];

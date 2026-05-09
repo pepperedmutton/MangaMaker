@@ -1,12 +1,14 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   createAgentRequestTraceMetadata,
   AgentRunError,
   getAgentConfig,
   getAgentRequestTraceFromError,
+  listAgentRuns,
   publishAgentDebugSnapshot,
   resumeAgentRunTurn,
   startAgentRunTurn,
+  waitForExistingAgentRunTurn,
 } from "../agent/client";
 import {
   deleteAgentConversationContext,
@@ -39,6 +41,7 @@ import type {
   AgentHarnessToolResult,
   AgentRun,
   AgentRunEvent,
+  AgentRunStep,
   AgentRequestTrace,
   AgentToolCallRequest,
   AgentToolLogEntry,
@@ -72,6 +75,33 @@ const createLog = (
   createdAt: new Date().toISOString(),
 });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value && typeof value === "object" && !Array.isArray(value));
+
+const createBackendToolLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] => {
+  if (step.kind !== "tool_result" || step.status !== "success" || !step.summary.includes("backend")) {
+    return [];
+  }
+  const resultSummaries = Array.isArray(step.output) ? step.output : step.input;
+  if (!Array.isArray(resultSummaries)) {
+    return [];
+  }
+  return resultSummaries
+    .filter(isRecord)
+    .map((entry) => {
+      const toolName = typeof entry.toolName === "string" ? entry.toolName : "agentTool";
+      const contentLength = typeof entry.contentLength === "number" ? `contentLength=${entry.contentLength}` : null;
+      const resultKeys = Array.isArray(entry.resultKeys)
+        ? entry.resultKeys.filter((key): key is string => typeof key === "string")
+        : [];
+      const keySummary = resultKeys.length > 0 ? `keys=${resultKeys.slice(0, 6).join(",")}` : null;
+      return createLog(toolName, "success", [contentLength, keySummary].filter(Boolean).join("; ") || "Backend tool result");
+    });
+};
+
+const hasToolBudgetPauseWarning = (payload: AgentChatResponse) =>
+  Boolean(payload.requestedToolCalls?.length && payload.warning?.toLowerCase().includes("tool budget"));
+
 const createMessageEntry = (message: AgentChatMessage): AgentConversationEntry => ({
   id: message.id,
   kind: "message",
@@ -104,6 +134,7 @@ const MAX_AGENT_TOOL_ROUNDS = 8;
 const MAX_AGENT_TOOL_CALLS = 24;
 const MAX_AGENT_TOOL_CALLS_PER_ROUND = 8;
 const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.";
+const RESTORABLE_RUN_STATUSES = new Set(["queued", "running", "waiting_for_tool", "waiting_for_confirmation"]);
 const createDefaultAgentMessages = () => [
   createMessage("assistant", DEFAULT_AGENT_GREETING),
 ];
@@ -238,6 +269,11 @@ export const AgentSidebar = ({
   const [localDocumentManifest, setLocalDocumentManifest] = useState<AgentDocumentManifest | null>(null);
   const [requestTraces, setRequestTraces] = useState<AgentRequestTrace[]>([]);
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const handledRunResponsesRef = useRef(new Set<string>());
+  const handledRunStepLogIdsRef = useRef(new Set<string>());
+  const localRunControlRef = useRef(false);
+  const reconnectingRunRef = useRef<string | null>(null);
+  const suppressCompletedRunRestoreRef = useRef(false);
   const [newRole, setNewRole] = useState({
     name: "",
     title: "",
@@ -284,6 +320,19 @@ export const AgentSidebar = ({
 
   const recordAgentRunUpdate = (run: AgentRun, _event?: AgentRunEvent) => {
     setActiveRun(run);
+    for (const step of run.steps) {
+      if (handledRunStepLogIdsRef.current.has(step.id)) {
+        continue;
+      }
+      const backendLogs = createBackendToolLogsFromStep(step);
+      if (backendLogs.length === 0) {
+        continue;
+      }
+      handledRunStepLogIdsRef.current.add(step.id);
+      for (const log of backendLogs) {
+        appendLog(log);
+      }
+    }
     setRequestTraces((current) => {
       const byId = new Map(current.map((trace) => [trace.requestId, trace]));
       for (const trace of run.trace) {
@@ -478,6 +527,7 @@ export const AgentSidebar = ({
     }
 
     let active = true;
+    suppressCompletedRunRestoreRef.current = false;
     setConversationContextLoaded(false);
     setConversationEntries(createDefaultConversationEntries());
     setPendingPlan(null);
@@ -566,10 +616,12 @@ export const AgentSidebar = ({
   const clearConversationContext = () => {
     const projectId = contextSnapshot?.project.id ?? conversationContextScope?.projectId;
     const roleId = activeRole?.id ?? conversationContextScope?.roleId;
+    suppressCompletedRunRestoreRef.current = true;
     if (projectId && roleId) {
       void deleteAgentConversationContext(projectId, roleId);
     }
     setConversationEntries(createDefaultConversationEntries());
+    setActiveRun(null);
     if (projectId && roleId) {
       setConversationContextScope({ projectId, roleId });
     }
@@ -716,7 +768,7 @@ export const AgentSidebar = ({
     }
   };
 
-  const finishAgentPayload = async (payload: AgentChatResponse) => {
+  const finishAgentPayload = async (payload: AgentChatResponse, options: { suppressMessage?: boolean } = {}) => {
     if (payload.error) {
       throw new Error(payload.error);
     }
@@ -726,7 +778,9 @@ export const AgentSidebar = ({
       setLastWarning(warning);
       appendLog(createLog("agentWarning", "error", warning));
     }
-    appendMessage(createMessage("assistant", payload.message));
+    if (!options.suppressMessage) {
+      appendMessage(createMessage("assistant", payload.message));
+    }
     for (const log of payload.toolLogs ?? []) {
       appendLog(log);
     }
@@ -738,6 +792,25 @@ export const AgentSidebar = ({
     if (!plan.requiresConfirmation) {
       await runPlan(plan, true);
     }
+  };
+
+  const finishRunResponse = async (run: AgentRun) => {
+    const response = run.latestResponse;
+    if (!response) {
+      return;
+    }
+    const responseKey = `${run.id}:${run.modelTurnIndex}`;
+    if (handledRunResponsesRef.current.has(responseKey)) {
+      return;
+    }
+    handledRunResponsesRef.current.add(responseKey);
+    const responseAlreadyVisible = messages.some(
+      (message) => message.role === "assistant" && message.content === response.message,
+    );
+    if (responseAlreadyVisible && !response.pendingCommandPlan) {
+      return;
+    }
+    await finishAgentPayload(response, { suppressMessage: responseAlreadyVisible });
   };
 
   const pauseForToolBudget = ({
@@ -835,6 +908,26 @@ export const AgentSidebar = ({
     let dynamicToolResults = initialDynamicToolResults;
     let segmentExecutedToolCallCount = 0;
     const completedToolCalls = new Set(completedToolCallKeys ?? []);
+
+    if (hasToolBudgetPauseWarning(payload)) {
+      pauseForToolBudget({
+        messages,
+        systemPromptSnapshot,
+        context,
+        activeRoleSnapshot,
+        activeDocumentId,
+        run: currentRun,
+        dynamicToolResults,
+        completedToolCallKeys: Array.from(completedToolCalls),
+        requestedToolCalls: payload.requestedToolCalls ?? [],
+        totalExecutedToolCallCount: totalExecutedToolCallCount ?? 0,
+        segmentExecutedToolCallCount,
+        pauseReason:
+          payload.warning ??
+          "Agent reached the backend tool budget. It paused instead of answering from incomplete evidence.",
+      });
+      return;
+    }
 
     for (let round = 0; round < MAX_AGENT_TOOL_ROUNDS && payload.requestedToolCalls?.length; round += 1) {
       const requestedCalls = payload.requestedToolCalls;
@@ -957,6 +1050,7 @@ export const AgentSidebar = ({
     const continuation = pendingContinuation;
     setPendingContinuation(null);
     setLastWarning(null);
+    localRunControlRef.current = true;
     setBusy(true);
     appendLog(createLog("agentToolBudget", "success", "Continuing with a new tool budget segment"));
     try {
@@ -982,6 +1076,62 @@ export const AgentSidebar = ({
       markPendingLogsAsError(message);
       appendMessage(createMessage("assistant", message));
     } finally {
+      localRunControlRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const resumeActiveRun = async () => {
+    if (!activeRun || busy) {
+      return;
+    }
+    setLastWarning(null);
+    localRunControlRef.current = true;
+    setBusy(true);
+    appendLog(createLog("agentRun", "pending", `Resuming ${activeRun.id}`));
+    try {
+      if (activeRun.status === "queued" || activeRun.status === "running") {
+        const completedRun = await waitForExistingAgentRunTurn(
+          activeRun.id,
+          activeRun.modelTurnIndex,
+          recordAgentRunUpdate,
+        );
+        await finishRunResponse(completedRun);
+        return;
+      }
+      if (activeRun.status === "waiting_for_confirmation" || activeRun.status === "completed") {
+        await finishRunResponse(activeRun);
+        return;
+      }
+      if (activeRun.status !== "waiting_for_tool") {
+        throw new Error(`Agent run cannot be resumed from status ${activeRun.status}.`);
+      }
+      if (!activeRole) {
+        throw new Error("Create or restore an Agent role before resuming this run.");
+      }
+      const context = await getAgentContext();
+      setContextSnapshot(context);
+      await runAgentToolLoop({
+        initialPayload: activeRun.latestResponse ?? {
+          message: "Resuming pending tool requests.",
+          pendingCommandPlan: null,
+          requestedToolCalls: activeRun.pendingToolCalls,
+        },
+        initialRun: activeRun,
+        messages,
+        systemPromptSnapshot: systemPrompt,
+        context,
+        activeRoleSnapshot: activeRole,
+        activeDocumentId: selectedDocumentId,
+        dynamicToolResults: [],
+      });
+    } catch (error) {
+      recordAgentError(error);
+      const message = error instanceof Error ? error.message : String(error);
+      markPendingLogsAsError(message);
+      appendMessage(createMessage("assistant", message));
+    } finally {
+      localRunControlRef.current = false;
       setBusy(false);
     }
   };
@@ -996,6 +1146,95 @@ export const AgentSidebar = ({
     appendMessage(createMessage("assistant", "Stopped the paused Agent run. No final answer was generated from incomplete evidence."));
   };
 
+  useEffect(() => {
+    const projectId = contextSnapshot?.project.id;
+    const roleId = activeRole?.id;
+    if (!conversationContextLoaded || !projectId || !roleId || busy) {
+      return;
+    }
+    let active = true;
+    void listAgentRuns(projectId, { roleId, limit: 5 })
+      .then(async (runs) => {
+        if (!active || runs.length === 0) {
+          return;
+        }
+        const candidate = runs.find((run) => {
+          if (RESTORABLE_RUN_STATUSES.has(run.status)) {
+            return true;
+          }
+          if (suppressCompletedRunRestoreRef.current) {
+            return false;
+          }
+          const responseMessage = run.latestResponse?.message;
+          return Boolean(
+            run.status === "completed" &&
+              responseMessage &&
+              !messages.some((message) => message.role === "assistant" && message.content === responseMessage),
+          );
+        });
+        if (!candidate) {
+          return;
+        }
+        setActiveRun(candidate);
+        if (
+          (candidate.status === "completed" || candidate.status === "waiting_for_confirmation") &&
+          candidate.latestResponse
+        ) {
+          await finishRunResponse(candidate);
+        }
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        appendLog(createLog("agentRun", "error", error instanceof Error ? error.message : String(error)));
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeRole?.id, busy, contextSnapshot?.project.id, conversationContextLoaded, messages]);
+
+  useEffect(() => {
+    if (
+      !activeRun ||
+      busy ||
+      localRunControlRef.current ||
+      reconnectingRunRef.current === activeRun.id ||
+      (activeRun.status !== "queued" && activeRun.status !== "running")
+    ) {
+      return;
+    }
+    let active = true;
+    reconnectingRunRef.current = activeRun.id;
+    setBusy(true);
+    appendLog(createLog("agentRun", "pending", `Reconnected to ${activeRun.id}`));
+    void waitForExistingAgentRunTurn(activeRun.id, activeRun.modelTurnIndex, recordAgentRunUpdate)
+      .then(async (run) => {
+        if (!active) {
+          return;
+        }
+        await finishRunResponse(run);
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        recordAgentError(error);
+        appendLog(createLog("agentRun", "error", error instanceof Error ? error.message : String(error)));
+      })
+      .finally(() => {
+        if (active) {
+          setBusy(false);
+        }
+      });
+    return () => {
+      active = false;
+      if (reconnectingRunRef.current === activeRun.id) {
+        reconnectingRunRef.current = null;
+      }
+    };
+  }, [activeRun?.id, activeRun?.modelTurnIndex, activeRun?.status]);
+
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = input.trim();
@@ -1006,6 +1245,8 @@ export const AgentSidebar = ({
     setPendingPlan(null);
     setLastWarning(null);
     setPendingContinuation(null);
+    suppressCompletedRunRestoreRef.current = false;
+    localRunControlRef.current = true;
     const userMessage = createMessage("user", trimmed);
     const nextMessages = [...messages, userMessage];
     setConversationEntries((current) => [...current, createMessageEntry(userMessage)]);
@@ -1091,6 +1332,7 @@ export const AgentSidebar = ({
       markPendingLogsAsError(message);
       appendMessage(createMessage("assistant", message));
     } finally {
+      localRunControlRef.current = false;
       setBusy(false);
     }
   };
@@ -1412,6 +1654,20 @@ export const AgentSidebar = ({
         </section>
       ) : null}
 
+      {!pendingContinuation && activeRun && activeRun.status === "waiting_for_tool" ? (
+        <section className="agent-continuation" aria-label="Resumable Agent run">
+          <div>
+            <h3>Agent Run Paused</h3>
+            <p>This run is persisted on the backend and is waiting for {activeRun.pendingToolCalls.length} browser tool call(s).</p>
+          </div>
+          <div className="agent-plan-actions">
+            <button type="button" className="primary-button" onClick={() => void resumeActiveRun()} disabled={busy}>
+              Resume Run
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <AgentMessageList entries={conversationEntries} />
 
       <AgentCommandPlanView
@@ -1436,6 +1692,8 @@ export const AgentSidebar = ({
           placeholder={
             pendingContinuation
               ? "Continue or stop the paused Agent run."
+              : activeRun?.status === "waiting_for_tool"
+                ? "Resume the paused backend Agent run first."
               : config?.enabled
               ? activeRole
                 ? "Ask the agent..."
@@ -1443,12 +1701,12 @@ export const AgentSidebar = ({
               : "Configure the Agent backend first."
           }
           onChange={(event) => setInput(event.currentTarget.value)}
-          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation)}
+          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation) || activeRun?.status === "waiting_for_tool"}
         />
         <button
           type="submit"
           className="primary-button"
-          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation) || input.trim().length === 0}
+          disabled={busy || config?.enabled !== true || !activeRole || Boolean(pendingContinuation) || activeRun?.status === "waiting_for_tool" || input.trim().length === 0}
         >
           Send
         </button>

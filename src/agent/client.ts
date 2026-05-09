@@ -302,8 +302,8 @@ const readAgentRunResponse = async (response: Response): Promise<AgentRun> => {
 
 const isAgentRunTurnComplete = (run: AgentRun, previousModelTurnIndex: number) =>
   Boolean(run.latestResponse) &&
-  (run.modelTurnIndex > previousModelTurnIndex ||
-    run.status === "completed" ||
+  run.modelTurnIndex > previousModelTurnIndex &&
+  (run.status === "completed" ||
     run.status === "waiting_for_tool" ||
     run.status === "waiting_for_confirmation");
 
@@ -331,6 +331,70 @@ const createSyntheticCompletedRun = (
 
 const createAgentRunEventSource = (runId: string) =>
   new EventSource(`${AGENT_API_BASE}/runs/${encodeURIComponent(runId)}/events`);
+
+export const listAgentRuns = async (
+  projectId: string,
+  options: { roleId?: string | null; limit?: number } = {},
+): Promise<AgentRun[]> => {
+  if (isTauriRuntime()) {
+    return [];
+  }
+  const params = new URLSearchParams({
+    projectId,
+    limit: String(options.limit ?? 20),
+  });
+  if (options.roleId) {
+    params.set("roleId", options.roleId);
+  }
+  const response = await fetch(`${AGENT_API_BASE}/runs?${params.toString()}`);
+  const payload = await readJsonResponse<{ runs?: AgentRun[] }>(response);
+  return payload.runs ?? [];
+};
+
+export const getAgentRun = async (
+  runId: string,
+  options: { projectId?: string | null } = {},
+): Promise<AgentRun> => {
+  if (isTauriRuntime()) {
+    throw new AgentRunError("Tauri Agent runs do not support persisted run lookup yet.");
+  }
+  const params = new URLSearchParams();
+  if (options.projectId) {
+    params.set("projectId", options.projectId);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${AGENT_API_BASE}/runs/${encodeURIComponent(runId)}${suffix}`);
+  return readAgentRunResponse(response);
+};
+
+export const subscribeToAgentRun = (
+  runId: string,
+  onRunUpdate: (run: AgentRun, event: AgentRunEvent) => void,
+  onError?: (error: Error) => void,
+) => {
+  if (isTauriRuntime()) {
+    return () => undefined;
+  }
+  const source = createAgentRunEventSource(runId);
+  source.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data) as AgentRunEvent;
+      if ("run" in payload && payload.run) {
+        onRunUpdate(payload.run, payload);
+        return;
+      }
+      if (payload.type === "run_error") {
+        onError?.(new AgentRunError(payload.error, payload.run ?? null));
+      }
+    } catch (error) {
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+  source.onerror = () => {
+    onError?.(new AgentRunError("Agent run event stream disconnected."));
+  };
+  return () => source.close();
+};
 
 const waitForAgentRunTurn = (
   runId: string,
@@ -372,6 +436,12 @@ const waitForAgentRunTurn = (
       reject(new AgentRunError("Agent run event stream disconnected."));
     };
   });
+
+export const waitForExistingAgentRunTurn = async (
+  runId: string,
+  previousModelTurnIndex: number,
+  onRunUpdate?: (run: AgentRun, event: AgentRunEvent) => void,
+): Promise<AgentRun> => waitForAgentRunTurn(runId, previousModelTurnIndex, onRunUpdate);
 
 export const startAgentRunTurn = async (
   request: AgentChatRequest,

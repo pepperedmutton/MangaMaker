@@ -2,6 +2,7 @@ import type { Bubble, ElementItem, Page, PanelStyle, Point, Project, ProjectType
 import { DEFAULT_TEXT_FONT_FAMILY } from "../platform/localFonts";
 
 export const GRID_SIZE = 20;
+export const MOVE_SNAP_SIZE = 1;
 export const MIN_PANEL_SIZE = 160;
 export const MIN_BUBBLE_WIDTH = 180;
 export const MIN_BUBBLE_HEIGHT = 120;
