@@ -96,7 +96,7 @@ export const executeCommand = async ({
 
 export const executeCommandPlan = async (
   plan: AgentCommandPlan,
-  options: { approved?: boolean } = {},
+  options: { approved?: boolean; persistProject?: boolean } = {},
 ) => {
   const normalizedPlan = previewCommandPlan({
     commands: plan.commands,
@@ -135,6 +135,14 @@ export const executeCommandPlan = async (
     if (recordsHistory) {
       remainingHistoryCommands -= 1;
     }
+  }
+  if (options.persistProject === true && historyCommands.length > 0) {
+    results.push(
+      await executeCommand({
+        commandId: "saveProject",
+        payload: { target: "localDraft" },
+      }),
+    );
   }
   return {
     plan: validatedPlan,

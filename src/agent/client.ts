@@ -519,6 +519,37 @@ export const cancelAgentRun = async (
   return readAgentRunResponse(response);
 };
 
+export const reportAgentCommandPlanResult = async (
+  runId: string,
+  result: {
+    projectId?: string | null;
+    status: "success" | "error";
+    commandIds: string[];
+    saved?: boolean;
+    error?: string;
+  },
+): Promise<AgentRun | null> => {
+  if (isTauriRuntime()) {
+    return null;
+  }
+  const params = new URLSearchParams();
+  if (result.projectId) {
+    params.set("projectId", result.projectId);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${AGENT_API_BASE}/runs/${encodeURIComponent(runId)}/command-result${suffix}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      status: result.status,
+      commandIds: result.commandIds,
+      saved: result.saved === true,
+      ...(result.error ? { error: result.error } : {}),
+    }),
+  });
+  return readAgentRunResponse(response);
+};
+
 export const publishAgentDebugSnapshot = async (snapshot: AgentDebugSnapshot): Promise<void> => {
   if (isTauriRuntime()) {
     return;

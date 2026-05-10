@@ -4347,6 +4347,67 @@ const attachWebAgentMiddleware = (
           startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);
           return;
         }
+        if (method === "POST" && runAction === "command-result") {
+          const run = await getAgentRunState(runId, projectId);
+          if (!run) {
+            json(res, 404, { error: "Agent run not found." });
+            return;
+          }
+          const body = await readJsonBody<{
+            status?: unknown;
+            commandIds?: unknown;
+            saved?: unknown;
+            error?: unknown;
+          }>(req);
+          const status = body.status === "success" ? "success" : body.status === "error" ? "error" : null;
+          if (!status) {
+            json(res, 400, { error: "status must be success or error." });
+            return;
+          }
+          const commandIds = Array.isArray(body.commandIds)
+            ? body.commandIds.filter((entry): entry is string => typeof entry === "string")
+            : [];
+          const now = new Date().toISOString();
+          const waitingPlanStep = [...run.steps].reverse().find((step) =>
+            step.kind === "command_plan" && step.status === "waiting"
+          );
+          if (waitingPlanStep) {
+            waitingPlanStep.status = status;
+            waitingPlanStep.finishedAt = now;
+          }
+          run.steps.push({
+            ...createAgentRunStep(
+              run.id,
+              "command_result",
+              status === "success"
+                ? `Executed command plan: ${commandIds.join(", ") || "no commands reported"}`
+                : `Command plan execution failed: ${typeof body.error === "string" ? body.error : "Unknown error"}`,
+              status,
+              {
+                commandIds,
+                saved: body.saved === true,
+              },
+            ),
+            finishedAt: now,
+            ...(status === "error" && typeof body.error === "string" ? { error: body.error } : {}),
+          });
+          run.status = status === "success" ? "completed" : "failed";
+          run.pendingToolCalls = [];
+          if (run.latestResponse && typeof run.latestResponse === "object") {
+            run.latestResponse = {
+              ...(run.latestResponse as Record<string, unknown>),
+              pendingCommandPlan: null,
+            };
+          }
+          if (status === "error" && typeof body.error === "string") {
+            run.error = body.error;
+          } else {
+            delete run.error;
+          }
+          await saveAndBroadcastAgentRun(run);
+          json(res, 200, toPublicAgentRun(run));
+          return;
+        }
         if (method === "POST" && runAction === "cancel") {
           const run = await getAgentRunState(runId, projectId);
           if (!run) {

@@ -7,6 +7,7 @@ import {
   getAgentRequestTraceFromError,
   listAgentRuns,
   publishAgentDebugSnapshot,
+  reportAgentCommandPlanResult,
   resumeAgentRunTurn,
   startAgentRunTurn,
   waitForExistingAgentRunTurn,
@@ -305,6 +306,7 @@ export const AgentSidebar = ({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<AgentCommandPlan | null>(null);
+  const [pendingPlanRun, setPendingPlanRun] = useState<{ runId: string; projectId: string } | null>(null);
   const [contextSnapshot, setContextSnapshot] = useState<AgentContextSnapshot | null>(null);
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
@@ -881,32 +883,67 @@ export const AgentSidebar = ({
     setConversationEntries((current) => [...current, createMessageEntry(createMessage(role, ""))]);
   };
 
-  const runPlan = async (plan: AgentCommandPlan, approved: boolean) => {
+  const runPlan = async (
+    plan: AgentCommandPlan,
+    approved: boolean,
+    sourceRun: { runId: string; projectId: string } | null = pendingPlanRun,
+  ) => {
     setBusy(true);
     appendLog(createLog("executeCommandPlan", "pending", plan.summary));
     try {
-      const result = await executeCommandPlan(plan, { approved });
+      const result = await executeCommandPlan(plan, { approved, persistProject: true });
+      const executedCommandIds = result.results.map((entry) => entry.commandId);
       appendLog(
         createLog(
           "executeCommandPlan",
           "success",
-          result.results.map((entry) => entry.commandId).join(", "),
+          executedCommandIds.join(", "),
         ),
       );
       setPendingPlan(null);
+      setPendingPlanRun(null);
+      if (sourceRun) {
+        const completedRun = await reportAgentCommandPlanResult(sourceRun.runId, {
+          projectId: sourceRun.projectId,
+          status: "success",
+          commandIds: executedCommandIds,
+          saved: executedCommandIds.includes("saveProject"),
+        });
+        if (completedRun) {
+          recordAgentRunUpdate(completedRun);
+        }
+      }
       const nextContext = await getAgentContext();
       setContextSnapshot(nextContext);
-      appendMessage(createMessage("assistant", `Executed: ${result.results.map((entry) => entry.commandId).join(", ")}`));
+      appendMessage(createMessage("assistant", `Executed: ${executedCommandIds.join(", ")}`));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       appendLog(createLog("executeCommandPlan", "error", message));
+      if (sourceRun) {
+        try {
+          const failedRun = await reportAgentCommandPlanResult(sourceRun.runId, {
+            projectId: sourceRun.projectId,
+            status: "error",
+            commandIds: plan.commands.map((entry) => entry.commandId),
+            error: message,
+          });
+          if (failedRun) {
+            recordAgentRunUpdate(failedRun);
+          }
+        } catch (reportError) {
+          appendLog(createLog("agentRun", "error", reportError instanceof Error ? reportError.message : String(reportError)));
+        }
+      }
       appendMessage(createMessage("assistant", message));
     } finally {
       setBusy(false);
     }
   };
 
-  const finishAgentPayload = async (payload: AgentChatResponse, options: { suppressMessage?: boolean } = {}) => {
+  const finishAgentPayload = async (
+    payload: AgentChatResponse,
+    options: { suppressMessage?: boolean; sourceRun?: AgentRun | null } = {},
+  ) => {
     if (payload.error) {
       throw new Error(payload.error);
     }
@@ -926,9 +963,14 @@ export const AgentSidebar = ({
     if (!plan) {
       return;
     }
+    const sourceRun =
+      options.sourceRun && options.sourceRun.projectId
+        ? { runId: options.sourceRun.id, projectId: options.sourceRun.projectId }
+        : null;
     setPendingPlan(plan);
+    setPendingPlanRun(sourceRun);
     if (!plan.requiresConfirmation) {
-      await runPlan(plan, true);
+      await runPlan(plan, true, sourceRun);
     }
   };
 
@@ -948,7 +990,7 @@ export const AgentSidebar = ({
     if (responseAlreadyVisible && !response.pendingCommandPlan) {
       return;
     }
-    await finishAgentPayload(response, { suppressMessage: responseAlreadyVisible });
+    await finishAgentPayload(response, { suppressMessage: responseAlreadyVisible, sourceRun: run });
   };
 
   const pauseForToolBudget = ({
@@ -2132,11 +2174,12 @@ export const AgentSidebar = ({
         busy={busy}
         onConfirm={() => {
           if (pendingPlan) {
-            void runPlan(pendingPlan, true);
+            void runPlan(pendingPlan, true, pendingPlanRun);
           }
         }}
         onCancel={() => {
           setPendingPlan(null);
+          setPendingPlanRun(null);
           appendLog(createLog("commandPlan", "success", "Cancelled"));
         }}
       />
