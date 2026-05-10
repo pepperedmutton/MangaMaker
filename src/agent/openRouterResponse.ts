@@ -82,14 +82,48 @@ const extractContentText = (value: unknown): string | null => {
   );
 };
 
+const getFirstChoice = (value: unknown) => {
+  if (!isRecord(value) || !Array.isArray(value.choices)) {
+    return null;
+  }
+  const firstChoice = value.choices[0];
+  return isRecord(firstChoice) ? firstChoice : null;
+};
+
+const getAssistantMessage = (choice: Record<string, unknown> | null) =>
+  isRecord(choice?.message) ? choice.message : null;
+
+export const getOpenRouterFinishReason = (value: unknown) => {
+  const choice = getFirstChoice(value);
+  return readString(choice?.finish_reason) ?? readString(choice?.native_finish_reason);
+};
+
+export const getOpenRouterReasoningLength = (value: unknown) => {
+  const message = getAssistantMessage(getFirstChoice(value));
+  const reasoning = readString(message?.reasoning);
+  return reasoning ? reasoning.length : 0;
+};
+
+export class OpenRouterEmptyAssistantContentError extends Error {
+  readonly finishReason: string | null;
+  readonly reasoningLength: number;
+
+  constructor(value: unknown) {
+    const description = describeOpenRouterResponse(value);
+    super(`OpenRouter assistant content was empty. ${description}`);
+    this.name = "OpenRouterEmptyAssistantContentError";
+    this.finishReason = getOpenRouterFinishReason(value);
+    this.reasoningLength = getOpenRouterReasoningLength(value);
+  }
+}
+
 export const describeOpenRouterResponse = (value: unknown) => {
   if (!isRecord(value)) {
     return `responseType=${typeof value}`;
   }
   const choices = value.choices;
-  const firstChoice = Array.isArray(choices) ? choices[0] : null;
-  const choice = isRecord(firstChoice) ? firstChoice : null;
-  const message = isRecord(choice?.message) ? choice.message : null;
+  const choice = getFirstChoice(value);
+  const message = getAssistantMessage(choice);
   const details = [
     `responseKeys=${describeKeys(value)}`,
     `choiceCount=${Array.isArray(choices) ? choices.length : "missing"}`,
@@ -163,5 +197,5 @@ export const extractOpenRouterAssistantContent = (value: unknown): string => {
   if (content?.trim()) {
     return content;
   }
-  throw new Error(`OpenRouter assistant content was empty. ${describeOpenRouterResponse(value)}`);
+  throw new OpenRouterEmptyAssistantContentError(value);
 };

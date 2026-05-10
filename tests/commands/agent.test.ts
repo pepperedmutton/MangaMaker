@@ -7,8 +7,11 @@ import {
 } from "../../src/agent/commandManifest";
 import { parseAgentModelJson, validateAgentChatResponse } from "../../src/agent/agentResponseSchema";
 import {
+  OpenRouterEmptyAssistantContentError,
   describeOpenRouterResponse,
   extractOpenRouterAssistantContent,
+  getOpenRouterFinishReason,
+  getOpenRouterReasoningLength,
   parseOpenRouterResponseJson,
 } from "../../src/agent/openRouterResponse";
 import {
@@ -297,6 +300,32 @@ describe("agent response validation", () => {
     ).toThrow(/finishReason=content_filter/);
 
     expect(describeOpenRouterResponse({ choices: [{ message: { content: null } }] })).toContain("contentType=object");
+  });
+
+  it("classifies empty length-truncated reasoning responses", () => {
+    const response = {
+      choices: [
+        {
+          finish_reason: "length",
+          message: {
+            role: "assistant",
+            content: null,
+            reasoning: "thinking ".repeat(100),
+            reasoning_details: [],
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 1200,
+        completion_tokens: 8192,
+        total_tokens: 9392,
+      },
+    };
+
+    expect(() => extractOpenRouterAssistantContent(response)).toThrow(OpenRouterEmptyAssistantContentError);
+    expect(() => extractOpenRouterAssistantContent(response)).toThrow(/finishReason=length/);
+    expect(getOpenRouterFinishReason(response)).toBe("length");
+    expect(getOpenRouterReasoningLength(response)).toBe("thinking ".repeat(100).length);
   });
 
   it("reports actionable OpenRouter non-JSON response details", () => {

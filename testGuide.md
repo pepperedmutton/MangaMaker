@@ -190,7 +190,7 @@ A valid completion report must say:
 
 Agent changes must verify both backend contract and user-visible behavior:
 
-1. `GET /__mangamaker__/agent/config` reports test mode, missing API key, configured model, context-window token budget, and vision status without exposing secrets. The default context window is `262144` for Kimi K2.6, and `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` or the Agent Config UI can lower it.
+1. `GET /__mangamaker__/agent/config` reports test mode, missing API key, configured model, context-window token budget, and vision status without exposing secrets. The default context window is `262144` for Kimi K2.6, and `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` or the Agent Config UI can lower it. OpenRouter Agent tests should also account for the default `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS=16384` and `MANGAMAKER_AGENT_REASONING_MAX_TOKENS=2048`, because reasoning tokens share the model output budget.
 2. Invalid model responses are rejected for invalid JSON, unknown `commandId`, and payloads that fail the command Zod schema.
 3. Local command metadata overrides any model-supplied `dangerLevel`.
 4. Confirmation is required for destructive plans, cross-page plans, and plans with multiple mutating commands.

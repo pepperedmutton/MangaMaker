@@ -33,8 +33,11 @@ import {
   normalizeAgentSystemPrompt,
 } from "./src/agent/systemPrompt";
 import {
+  OpenRouterEmptyAssistantContentError,
   OpenRouterNonJsonResponseError,
   extractOpenRouterAssistantContent,
+  getOpenRouterFinishReason,
+  getOpenRouterReasoningLength,
   parseOpenRouterResponseJson,
 } from "./src/agent/openRouterResponse";
 import {
@@ -78,6 +81,19 @@ const parsePositiveIntegerEnv = (value: string | undefined, fallback: number) =>
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 };
+const parseBooleanEnv = (value: string | undefined, fallback: boolean) => {
+  if (value === undefined) {
+    return fallback;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+};
 const parseBoundedNumberEnv = (
   value: string | undefined,
   fallback: number,
@@ -93,8 +109,13 @@ const parseBoundedNumberEnv = (
 const OPENROUTER_REQUEST_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.MANGAMAKER_OPENROUTER_TIMEOUT_MS, 120000);
 const OPENROUTER_MAX_TOKENS = parsePositiveIntegerEnv(
   process.env.MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS ?? process.env.MANGAMAKER_AGENT_MAX_TOKENS,
-  8192,
+  16384,
 );
+const OPENROUTER_REASONING_MAX_TOKENS = parsePositiveIntegerEnv(
+  process.env.MANGAMAKER_AGENT_REASONING_MAX_TOKENS,
+  2048,
+);
+const OPENROUTER_REASONING_EXCLUDE = parseBooleanEnv(process.env.MANGAMAKER_AGENT_REASONING_EXCLUDE, true);
 const OPENROUTER_TEMPERATURE = parseBoundedNumberEnv(process.env.MANGAMAKER_AGENT_TEMPERATURE, 0.1, 0, 2);
 const OPENROUTER_TOP_P = parseBoundedNumberEnv(process.env.MANGAMAKER_AGENT_TOP_P, 0.9, 0.01, 1);
 const AGENT_ENV_CONTEXT_WINDOW_TOKENS = parseAgentContextWindowTokens(
@@ -2667,6 +2688,11 @@ type AgentPromptBudget = {
 const clampInteger = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, Math.floor(value)));
 
+const createOpenRouterReasoningConfig = (reasoningMaxTokens: number) => ({
+  max_tokens: Math.max(1, Math.floor(reasoningMaxTokens)),
+  exclude: OPENROUTER_REASONING_EXCLUDE,
+});
+
 const createPromptBudget = (contextWindowTokens: number): AgentPromptBudget => {
   const safeWindow = Math.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS, Math.floor(contextWindowTokens));
   const reservedTokens = OPENROUTER_MAX_TOKENS + 4096;
@@ -3464,6 +3490,8 @@ const callOpenRouter = async (
       includeImage,
       timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
       maxTokens: OPENROUTER_MAX_TOKENS,
+      reasoningMaxTokens: OPENROUTER_REASONING_MAX_TOKENS,
+      reasoningExclude: OPENROUTER_REASONING_EXCLUDE,
       temperature: OPENROUTER_TEMPERATURE,
       topP: OPENROUTER_TOP_P,
       contextWindowTokens: contextWindow.contextWindowTokens,
@@ -3473,7 +3501,11 @@ const callOpenRouter = async (
       promptCharBudget: promptBudget.promptCharBudget,
     },
   });
-  const sendRequest = async (provider: OpenRouterProviderRouting, retryWarning?: string) => {
+  const sendRequest = async (
+    provider: OpenRouterProviderRouting,
+    reasoningMaxTokens: number,
+    retryWarning?: string,
+  ) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
@@ -3492,6 +3524,8 @@ const callOpenRouter = async (
           dynamicToolResults: payload.harness?.dynamicToolResults?.length ?? 0,
           contextWindowTokens: contextWindow.contextWindowTokens,
           promptCharBudget: promptBudget.promptCharBudget,
+          reasoningMaxTokens,
+          reasoningExclude: OPENROUTER_REASONING_EXCLUDE,
         },
       });
       response = await fetch(OPENROUTER_CHAT_URL, {
@@ -3508,6 +3542,7 @@ const callOpenRouter = async (
           temperature: OPENROUTER_TEMPERATURE,
           top_p: OPENROUTER_TOP_P,
           max_tokens: OPENROUTER_MAX_TOKENS,
+          reasoning: createOpenRouterReasoningConfig(reasoningMaxTokens),
           response_format: { type: "json_object" },
           messages: buildOpenRouterMessages(payload, includeImage, promptBudget),
         }),
@@ -3582,11 +3617,36 @@ const callOpenRouter = async (
       });
       throw error;
     }
-    const content = extractOpenRouterAssistantContent(parsed);
     const responseRecord = asRecord(parsed);
     const choices = Array.isArray(responseRecord.choices) ? responseRecord.choices : [];
     const firstChoice = asRecord(choices[0]);
     const usage = asRecord(responseRecord.usage);
+    let content = "";
+    try {
+      content = extractOpenRouterAssistantContent(parsed);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const finishReason = getOpenRouterFinishReason(parsed) ?? "unknown";
+      const reasoningLength = getOpenRouterReasoningLength(parsed);
+      trace = recordAgentTraceEvent(trace, "openrouter_empty_assistant_content", {
+        status: "error",
+        message,
+        error: message,
+        detail: {
+          finishReason,
+          reasoningLength,
+          promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null,
+          completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : null,
+          totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : null,
+        },
+      });
+      if (error instanceof OpenRouterEmptyAssistantContentError && error.finishReason === "length") {
+        throw new OpenRouterRetryableError(
+          `${message} The model exhausted the output budget before emitting Agent JSON; retrying with stricter reasoning budget.`,
+        );
+      }
+      throw error;
+    }
     trace = recordAgentTraceEvent(trace, "openrouter_assistant_content_extracted", {
       detail: {
         contentLength: content.length,
@@ -3632,15 +3692,20 @@ const callOpenRouter = async (
 
   const preferredProvider = getOpenRouterProviderRouting(config.model);
   const fallbackProvider = getOpenRouterFallbackProviderRouting(config.model);
-  const attempts: Array<{ provider: OpenRouterProviderRouting; warning?: string }> = [
-    { provider: preferredProvider },
+  const strictReasoningMaxTokens = Math.max(1, Math.min(OPENROUTER_REASONING_MAX_TOKENS, 1024));
+  const attempts: Array<{ provider: OpenRouterProviderRouting; reasoningMaxTokens: number; warning?: string }> = [
+    { provider: preferredProvider, reasoningMaxTokens: OPENROUTER_REASONING_MAX_TOKENS },
     {
       provider: fallbackProvider,
-      warning: "MangaMaker retried the request with fallback OpenRouter provider routing after a transient provider failure.",
+      reasoningMaxTokens: strictReasoningMaxTokens,
+      warning:
+        "MangaMaker retried the request with fallback OpenRouter provider routing and a stricter reasoning budget after a transient provider failure.",
     },
     {
       provider: fallbackProvider,
-      warning: "MangaMaker retried the request with fallback OpenRouter provider routing after repeated transient provider failures.",
+      reasoningMaxTokens: strictReasoningMaxTokens,
+      warning:
+        "MangaMaker retried the request with fallback OpenRouter provider routing and a stricter reasoning budget after repeated transient provider failures.",
     },
   ];
   let lastError: unknown = null;
@@ -3654,12 +3719,13 @@ const callOpenRouter = async (
           attempt: index + 1,
           maxAttempts: attempts.length,
           providerRouting: attempt.provider,
+          reasoningMaxTokens: attempt.reasoningMaxTokens,
         },
       });
     }
     try {
       return {
-        response: await sendRequest(attempt.provider, attempt.warning),
+        response: await sendRequest(attempt.provider, attempt.reasoningMaxTokens, attempt.warning),
         requestTrace: trace,
       };
     } catch (error) {
