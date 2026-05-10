@@ -240,6 +240,10 @@ const normalSideEffectCommandIds = new Set([
   "duplicateStoredProject",
 ]);
 
+const projectPersistenceOnlyCommandIds = new Set([
+  "saveProject",
+]);
+
 const projectReplacementCommandIds = new Set([
   "createProject",
   "loadProject",
@@ -311,6 +315,9 @@ const inferDangerLevel = (commandId: string, definition: CommandDefinition): Age
 
 const inferMutatesProject = (commandId: string, definition: CommandDefinition) => {
   if (sessionOnlyCommandIds.has(commandId)) {
+    return false;
+  }
+  if (projectPersistenceOnlyCommandIds.has(commandId)) {
     return false;
   }
   if (projectReplacementCommandIds.has(commandId)) {

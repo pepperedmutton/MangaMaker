@@ -136,7 +136,17 @@ export const executeCommandPlan = async (
       remainingHistoryCommands -= 1;
     }
   }
-  if (options.persistProject === true && historyCommands.length > 0) {
+  const lastHistoryCommandIndex = validatedPlan.commands.reduce(
+    (lastIndex, command, index) => (commandRecordsHistory(command.commandId) ? index : lastIndex),
+    -1,
+  );
+  const lastSaveCommandIndex = validatedPlan.commands.reduce(
+    (lastIndex, command, index) => (command.commandId === "saveProject" ? index : lastIndex),
+    -1,
+  );
+  const hasExplicitSaveAfterMutations =
+    lastSaveCommandIndex >= 0 && lastSaveCommandIndex > lastHistoryCommandIndex;
+  if (options.persistProject === true && historyCommands.length > 0 && !hasExplicitSaveAfterMutations) {
     results.push(
       await executeCommand({
         commandId: "saveProject",

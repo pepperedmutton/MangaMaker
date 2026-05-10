@@ -1249,7 +1249,7 @@ export const AgentSidebar = ({
       return;
     }
 
-    await finishAgentPayload(payload);
+    await finishAgentPayload(payload, { sourceRun: currentRun });
   };
 
   const continueAgentRun = async () => {

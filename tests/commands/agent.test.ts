@@ -3,6 +3,7 @@ import { getAgentConfigFromEnv } from "../../src/agent/config";
 import { filterAllowedAgentModels } from "../../src/agent/modelCatalog";
 import {
   commandPlanRequiresConfirmation,
+  getCommandManifestEntry,
   getCommandDangerLevel,
 } from "../../src/agent/commandManifest";
 import { parseAgentModelJson, validateAgentChatResponse } from "../../src/agent/agentResponseSchema";
@@ -504,6 +505,16 @@ describe("agent command plan policy", () => {
         { commandId: "selectObject", payload: { pageId: "p2", objectType: "text", objectId: "t1" } },
       ]),
     ).toBe(true);
+  });
+
+  it("does not count saveProject as a second content mutation", () => {
+    expect(getCommandManifestEntry("saveProject")?.mutatesProject).toBe(false);
+    expect(
+      commandPlanRequiresConfirmation([
+        { commandId: "createBubble", payload: { pageId: "p1", x: 0, y: 0, width: 100, height: 80 } },
+        { commandId: "saveProject", payload: {} },
+      ]),
+    ).toBe(false);
   });
 
   it("groups multiple history-recording Agent commands into one undo step", async () => {
