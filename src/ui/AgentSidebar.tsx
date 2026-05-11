@@ -166,6 +166,7 @@ const MAX_AGENT_TOOL_ROUNDS = 24;
 const MAX_AGENT_TOOL_CALLS = 72;
 const MAX_AGENT_TOOL_CALLS_PER_ROUND = 24;
 const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.";
+const AGENT_COMMAND_PLAN_NO_CHANGE_MESSAGE = "计划执行了但项目状态没有变化。";
 const RESTORABLE_RUN_STATUSES = new Set(["queued", "running", "waiting_for_tool", "waiting_for_confirmation"]);
 const CANCELLABLE_RUN_STATUSES = new Set<AgentRun["status"]>([
   "queued",
@@ -893,11 +894,15 @@ export const AgentSidebar = ({
     try {
       const result = await executeCommandPlan(plan, { approved, persistProject: true });
       const executedCommandIds = result.results.map((entry) => entry.commandId);
+      const noProjectChanges = !result.executionDiff.changed;
+      const executionDetail = noProjectChanges
+        ? AGENT_COMMAND_PLAN_NO_CHANGE_MESSAGE
+        : `${executedCommandIds.join(", ")}; ${result.executionDiff.summary}`;
       appendLog(
         createLog(
           "executeCommandPlan",
-          "success",
-          executedCommandIds.join(", "),
+          noProjectChanges ? "error" : "success",
+          executionDetail,
         ),
       );
       setPendingPlan(null);
@@ -905,9 +910,11 @@ export const AgentSidebar = ({
       if (sourceRun) {
         const completedRun = await reportAgentCommandPlanResult(sourceRun.runId, {
           projectId: sourceRun.projectId,
-          status: "success",
+          status: noProjectChanges ? "no_change" : "success",
           commandIds: executedCommandIds,
           saved: executedCommandIds.includes("saveProject"),
+          executionDiff: result.executionDiff,
+          ...(noProjectChanges ? { error: AGENT_COMMAND_PLAN_NO_CHANGE_MESSAGE } : {}),
         });
         if (completedRun) {
           recordAgentRunUpdate(completedRun);
@@ -915,7 +922,14 @@ export const AgentSidebar = ({
       }
       const nextContext = await getAgentContext();
       setContextSnapshot(nextContext);
-      appendMessage(createMessage("assistant", `Executed: ${executedCommandIds.join(", ")}`));
+      appendMessage(
+        createMessage(
+          "assistant",
+          noProjectChanges
+            ? AGENT_COMMAND_PLAN_NO_CHANGE_MESSAGE
+            : `Executed: ${executedCommandIds.join(", ")}. ${result.executionDiff.summary}`,
+        ),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       appendLog(createLog("executeCommandPlan", "error", message));

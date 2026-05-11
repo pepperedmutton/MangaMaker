@@ -538,4 +538,72 @@ describe("agent command plan policy", () => {
     await useEditorStore.getState().executeCommand("undo", {});
     expect(useEditorStore.getState().project.pages[0].panels).toHaveLength(0);
   });
+
+  it("returns a redacted project diff for Agent command plans", async () => {
+    useEditorStore.getState().resetProject();
+    await useEditorStore.getState().executeCommand("createProject", { title: "Agent Diff" });
+    const page = (await useEditorStore.getState().executeCommand("addPage", {})) as { id: string };
+
+    const createResult = await executeCommandPlan(
+      previewCommandPlan({
+        summary: "Create secret text",
+        commands: [
+          {
+            commandId: "createText",
+            payload: { pageId: page.id, x: 10, y: 20, content: "Secret line that must not leak" },
+          },
+        ],
+      }),
+      { approved: true },
+    );
+
+    expect(createResult.executionDiff).toMatchObject({
+      changed: true,
+      redacted: true,
+      changedPageIds: [page.id],
+    });
+    expect(createResult.executionDiff.affected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          pageId: page.id,
+          objectType: "text",
+          changeType: "created",
+          changedFields: expect.arrayContaining(["content"]),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(createResult.executionDiff)).not.toContain("Secret line");
+  });
+
+  it("reports no project-state changes when commands only touch timestamps or save", async () => {
+    useEditorStore.getState().resetProject();
+    await useEditorStore.getState().executeCommand("createProject", { title: "Agent No Change" });
+    const page = (await useEditorStore.getState().executeCommand("addPage", {})) as { id: string };
+    const text = (await useEditorStore.getState().executeCommand("createText", {
+      pageId: page.id,
+      x: 10,
+      y: 20,
+      content: "Same",
+    })) as { id: string };
+
+    const result = await executeCommandPlan(
+      previewCommandPlan({
+        summary: "No-op text update",
+        commands: [
+          {
+            commandId: "updateText",
+            payload: { pageId: page.id, textId: text.id, content: "Same" },
+          },
+        ],
+      }),
+      { approved: true },
+    );
+
+    expect(result.executionDiff).toMatchObject({
+      changed: false,
+      redacted: true,
+      summary: "计划执行了但项目状态没有变化。",
+      affected: [],
+    });
+  });
 });

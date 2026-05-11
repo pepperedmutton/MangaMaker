@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Project, ProjectType } from "../domain/schema";
 import { useI18n } from "../i18n/useI18n";
 import { PageThumbnail } from "./PageThumbnail";
@@ -29,6 +29,8 @@ type SidebarContextMenuState =
   | {
       x: number;
       y: number;
+      anchorClientX: number;
+      anchorClientY: number;
       target: SidebarContextTarget;
     }
   | null;
@@ -41,6 +43,10 @@ type SidebarContextAction = {
 };
 
 const SIDEBAR_CONTEXT_MENU_WIDTH = 220;
+const SIDEBAR_CONTEXT_MENU_MARGIN = 8;
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
 
 export const Sidebar = ({
   project,
@@ -80,12 +86,19 @@ export const Sidebar = ({
         setContextMenu(null);
       }
     };
+    const handleViewportChanged = () => {
+      setContextMenu(null);
+    };
 
     window.addEventListener("pointerdown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleViewportChanged);
+    window.addEventListener("scroll", handleViewportChanged, true);
     return () => {
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleViewportChanged);
+      window.removeEventListener("scroll", handleViewportChanged, true);
     };
   }, [contextMenu]);
 
@@ -126,11 +139,20 @@ export const Sidebar = ({
       return;
     }
     const x = Math.max(
-      8,
-      Math.min(event.clientX - sidebarRect.left, sidebarRect.width - SIDEBAR_CONTEXT_MENU_WIDTH - 8),
+      SIDEBAR_CONTEXT_MENU_MARGIN,
+      Math.min(
+        event.clientX - sidebarRect.left,
+        sidebarRect.width - SIDEBAR_CONTEXT_MENU_WIDTH - SIDEBAR_CONTEXT_MENU_MARGIN,
+      ),
     );
-    const y = Math.max(8, Math.min(event.clientY - sidebarRect.top, sidebarRect.height - 240));
-    setContextMenu({ x, y, target });
+    const y = Math.max(SIDEBAR_CONTEXT_MENU_MARGIN, event.clientY - sidebarRect.top);
+    setContextMenu({
+      x,
+      y,
+      anchorClientX: event.clientX,
+      anchorClientY: event.clientY,
+      target,
+    });
   };
 
   const closeContextMenu = () => {
@@ -204,6 +226,46 @@ export const Sidebar = ({
         ]
       : []),
   ];
+
+  useLayoutEffect(() => {
+    if (!contextMenu || !menuRef.current || !sidebarRef.current) {
+      return;
+    }
+    const menuRect = menuRef.current.getBoundingClientRect();
+    const sidebarRect = sidebarRef.current.getBoundingClientRect();
+    const bounds = {
+      left: Math.max(SIDEBAR_CONTEXT_MENU_MARGIN, sidebarRect.left + SIDEBAR_CONTEXT_MENU_MARGIN),
+      right: Math.min(window.innerWidth - SIDEBAR_CONTEXT_MENU_MARGIN, sidebarRect.right - SIDEBAR_CONTEXT_MENU_MARGIN),
+      top: Math.max(SIDEBAR_CONTEXT_MENU_MARGIN, sidebarRect.top + SIDEBAR_CONTEXT_MENU_MARGIN),
+      bottom: Math.min(window.innerHeight - SIDEBAR_CONTEXT_MENU_MARGIN, sidebarRect.bottom - SIDEBAR_CONTEXT_MENU_MARGIN),
+    };
+    const menuWidth = menuRect.width || SIDEBAR_CONTEXT_MENU_WIDTH;
+    const menuHeight = menuRect.height;
+    const leftMax = Math.max(bounds.left, bounds.right - menuWidth);
+    const topMax = Math.max(bounds.top, bounds.bottom - menuHeight);
+    const leftClient = clamp(contextMenu.anchorClientX, bounds.left, leftMax);
+    const opensDown = contextMenu.anchorClientY + menuHeight <= bounds.bottom;
+    const opensUp = contextMenu.anchorClientY - menuHeight >= bounds.top;
+    const topClient = opensDown
+      ? contextMenu.anchorClientY
+      : opensUp
+        ? contextMenu.anchorClientY - menuHeight
+        : clamp(contextMenu.anchorClientY, bounds.top, topMax);
+    const nextX = leftClient - sidebarRect.left;
+    const nextY = topClient - sidebarRect.top;
+    if (Math.abs(nextX - contextMenu.x) > 0.5 || Math.abs(nextY - contextMenu.y) > 0.5) {
+      setContextMenu((current) =>
+        current
+          ? {
+              ...current,
+              x: nextX,
+              y: nextY,
+            }
+          : current,
+      );
+    }
+  }, [contextMenu, contextMenuActions.length]);
+
   return (
     <aside
       ref={sidebarRef}

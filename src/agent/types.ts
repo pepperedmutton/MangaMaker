@@ -123,7 +123,30 @@ export type AgentRunStepKind =
   | "retry"
   | "error";
 
-export type AgentRunStepStatus = "pending" | "running" | "success" | "error" | "waiting";
+export type AgentRunStepStatus = "pending" | "running" | "success" | "error" | "waiting" | "no_change";
+
+export type AgentCommandPlanResultStatus = "success" | "error" | "no_change";
+
+export type AgentCommandPlanAffectedChange = {
+  pageId?: string;
+  pageName?: string;
+  pageNumber?: number;
+  objectType: "project" | "page" | "panel" | "text" | "bubble" | "element";
+  objectId?: string;
+  objectRef?: string;
+  changeType: "created" | "updated" | "deleted";
+  changedFields: string[];
+};
+
+export type AgentCommandPlanExecutionDiff = {
+  changed: boolean;
+  redacted: true;
+  summary: string;
+  changedPageIds: string[];
+  changedObjectRefs: string[];
+  changedFields: string[];
+  affected: AgentCommandPlanAffectedChange[];
+};
 
 export type AgentRunStep = {
   id: string;

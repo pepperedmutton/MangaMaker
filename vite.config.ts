@@ -1419,7 +1419,28 @@ type AgentRunStepKind =
   | "retry"
   | "error";
 
-type AgentRunStepStatus = "pending" | "running" | "success" | "error" | "waiting";
+type AgentRunStepStatus = "pending" | "running" | "success" | "error" | "waiting" | "no_change";
+
+type AgentCommandPlanAffectedChange = {
+  pageId?: string;
+  pageName?: string;
+  pageNumber?: number;
+  objectType: "project" | "page" | "panel" | "text" | "bubble" | "element";
+  objectId?: string;
+  objectRef?: string;
+  changeType: "created" | "updated" | "deleted";
+  changedFields: string[];
+};
+
+type AgentCommandPlanExecutionDiff = {
+  changed: boolean;
+  redacted: true;
+  summary: string;
+  changedPageIds: string[];
+  changedObjectRefs: string[];
+  changedFields: string[];
+  affected: AgentCommandPlanAffectedChange[];
+};
 
 type AgentRunStep = {
   id: string;
@@ -4019,6 +4040,77 @@ const startAgentRunModelStep = (
   })();
 };
 
+const readBoundedString = (value: unknown, maxLength = 160) =>
+  typeof value === "string" ? value.slice(0, maxLength) : undefined;
+
+const readBoundedStringArray = (value: unknown, maxItems = 80, maxLength = 120) =>
+  Array.isArray(value)
+    ? value
+        .filter((entry): entry is string => typeof entry === "string")
+        .slice(0, maxItems)
+        .map((entry) => entry.slice(0, maxLength))
+    : [];
+
+const sanitizeAgentCommandPlanExecutionDiff = (value: unknown): AgentCommandPlanExecutionDiff | null => {
+  const record = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  if (!record) {
+    return null;
+  }
+  const affected = Array.isArray(record.affected)
+    ? record.affected.slice(0, 120).flatMap((entry): AgentCommandPlanAffectedChange[] => {
+        const change = entry && typeof entry === "object" && !Array.isArray(entry)
+          ? entry as Record<string, unknown>
+          : null;
+        if (!change) {
+          return [];
+        }
+        const objectType = readBoundedString(change.objectType, 40);
+        const changeType = readBoundedString(change.changeType, 40);
+        if (
+          objectType !== "project" &&
+          objectType !== "page" &&
+          objectType !== "panel" &&
+          objectType !== "text" &&
+          objectType !== "bubble" &&
+          objectType !== "element"
+        ) {
+          return [];
+        }
+        if (changeType !== "created" && changeType !== "updated" && changeType !== "deleted") {
+          return [];
+        }
+        const pageNumber = typeof change.pageNumber === "number" && Number.isFinite(change.pageNumber)
+          ? Math.max(1, Math.floor(change.pageNumber))
+          : undefined;
+        const pageId = readBoundedString(change.pageId);
+        const pageName = readBoundedString(change.pageName);
+        const objectId = readBoundedString(change.objectId);
+        const objectRef = readBoundedString(change.objectRef, 240);
+        return [{
+          objectType,
+          changeType,
+          changedFields: readBoundedStringArray(change.changedFields, 80, 80),
+          ...(pageId ? { pageId } : {}),
+          ...(pageName ? { pageName } : {}),
+          ...(pageNumber ? { pageNumber } : {}),
+          ...(objectId ? { objectId } : {}),
+          ...(objectRef ? { objectRef } : {}),
+        }];
+      })
+    : [];
+  return {
+    changed: record.changed === true,
+    redacted: true,
+    summary: readBoundedString(record.summary, 240) ?? "Redacted command execution diff.",
+    changedPageIds: readBoundedStringArray(record.changedPageIds, 120, 160),
+    changedObjectRefs: readBoundedStringArray(record.changedObjectRefs, 120, 240),
+    changedFields: readBoundedStringArray(record.changedFields, 160, 80),
+    affected,
+  };
+};
+
 const attachWebAgentMiddleware = (
   middlewares: { use: (handler: (req: IncomingMessage, res: ServerResponse, next: () => void) => void) => void },
   loadAgentSchema: AgentSchemaLoader = createDynamicAgentSchemaLoader(),
@@ -4357,16 +4449,25 @@ const attachWebAgentMiddleware = (
             status?: unknown;
             commandIds?: unknown;
             saved?: unknown;
+            executionDiff?: unknown;
             error?: unknown;
           }>(req);
-          const status = body.status === "success" ? "success" : body.status === "error" ? "error" : null;
+          const status =
+            body.status === "success"
+              ? "success"
+              : body.status === "error"
+                ? "error"
+                : body.status === "no_change"
+                  ? "no_change"
+                  : null;
           if (!status) {
-            json(res, 400, { error: "status must be success or error." });
+            json(res, 400, { error: "status must be success, no_change, or error." });
             return;
           }
           const commandIds = Array.isArray(body.commandIds)
             ? body.commandIds.filter((entry): entry is string => typeof entry === "string")
             : [];
+          const executionDiff = sanitizeAgentCommandPlanExecutionDiff(body.executionDiff);
           const now = new Date().toISOString();
           const waitingPlanStep = [...run.steps].reverse().find((step) =>
             step.kind === "command_plan" && step.status === "waiting"
@@ -4381,17 +4482,20 @@ const attachWebAgentMiddleware = (
               "command_result",
               status === "success"
                 ? `Executed command plan: ${commandIds.join(", ") || "no commands reported"}`
-                : `Command plan execution failed: ${typeof body.error === "string" ? body.error : "Unknown error"}`,
+                : status === "no_change"
+                  ? "计划执行了但项目状态没有变化。"
+                  : `Command plan execution failed: ${typeof body.error === "string" ? body.error : "Unknown error"}`,
               status,
               {
                 commandIds,
                 saved: body.saved === true,
+                ...(executionDiff ? { executionDiff } : {}),
               },
             ),
             finishedAt: now,
             ...(status === "error" && typeof body.error === "string" ? { error: body.error } : {}),
           });
-          run.status = status === "success" ? "completed" : "failed";
+          run.status = status === "error" ? "failed" : "completed";
           run.pendingToolCalls = [];
           if (run.latestResponse && typeof run.latestResponse === "object") {
             run.latestResponse = {

@@ -3,6 +3,8 @@ import type {
   AgentAvailableModel,
   AgentChatRequest,
   AgentChatResponse,
+  AgentCommandPlanExecutionDiff,
+  AgentCommandPlanResultStatus,
   AgentConfig,
   AgentDebugSnapshot,
   AgentHarnessSnapshot,
@@ -523,9 +525,10 @@ export const reportAgentCommandPlanResult = async (
   runId: string,
   result: {
     projectId?: string | null;
-    status: "success" | "error";
+    status: AgentCommandPlanResultStatus;
     commandIds: string[];
     saved?: boolean;
+    executionDiff?: AgentCommandPlanExecutionDiff;
     error?: string;
   },
 ): Promise<AgentRun | null> => {
@@ -544,6 +547,7 @@ export const reportAgentCommandPlanResult = async (
       status: result.status,
       commandIds: result.commandIds,
       saved: result.saved === true,
+      ...(result.executionDiff ? { executionDiff: result.executionDiff } : {}),
       ...(result.error ? { error: result.error } : {}),
     }),
   });
