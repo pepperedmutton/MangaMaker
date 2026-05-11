@@ -632,6 +632,65 @@ test("agent prompt submits with Enter and keeps Shift+Enter as newline", async (
   });
 });
 
+test("agent clear context prevents stale visible context from reaching the model", async ({ page }) => {
+  let capturedPayload: {
+    messages?: Array<{ role: string; content: string }>;
+    conversationContextId?: string;
+    conversationContextFingerprint?: string;
+    agentContext?: { project?: { id?: string } };
+    activeRoleId?: string;
+  } | null = null;
+  await page.route("**/__mangamaker__/agent/runs", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    const payload = route.request().postDataJSON() as NonNullable<typeof capturedPayload>;
+    capturedPayload = payload;
+    const now = new Date().toISOString();
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "agent-run-e2e-cleared-context",
+        projectId: payload.agentContext?.project?.id ?? "project-e2e",
+        roleId: payload.activeRoleId ?? "assistant",
+        conversationContextId: payload.conversationContextId,
+        conversationContextFingerprint: payload.conversationContextFingerprint,
+        status: "completed",
+        createdAt: now,
+        updatedAt: now,
+        modelTurnIndex: 1,
+        steps: [],
+        trace: [],
+        pendingToolCalls: [],
+        latestResponse: {
+          message: "Cleared context payload received",
+          pendingCommandPlan: null,
+        },
+      }),
+    });
+  });
+
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Agent Cleared Context");
+  await openAgent(page);
+  await page.getByText("Agent Config", { exact: true }).click();
+  await page.getByLabel("Context message 1 content").fill("Old polluted context that must not be sent.");
+  await expect(page.getByLabel("Agent messages")).toContainText("Old polluted context");
+  await page.getByRole("button", { name: "Clear context" }).click();
+  await expect(page.getByLabel("Agent messages")).not.toContainText("Old polluted context");
+
+  await askAgent(page, "New request after clear");
+  await expect(page.getByLabel("Agent messages")).toContainText("Cleared context payload received");
+  expect(capturedPayload?.conversationContextId).toBeTruthy();
+  expect(capturedPayload?.conversationContextFingerprint).toBeTruthy();
+  expect(capturedPayload?.messages?.map((message) => message.content)).toEqual([
+    "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.",
+    "New request after clear",
+  ]);
+});
+
 test("agent conversation context switches with the active role", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Role Sessions");
@@ -777,6 +836,8 @@ test("agent prompt stays editable and exposes stop while a persisted run is runn
   await page.route("**/__mangamaker__/agent/runs**", async (route) => {
     const url = new URL(route.request().url());
     if (route.request().method() === "GET" && url.pathname === "/__mangamaker__/agent/runs") {
+      const conversationContextId = url.searchParams.get("conversationContextId") ?? "conversation-context-e2e";
+      const conversationContextFingerprint = url.searchParams.get("conversationContextFingerprint") ?? "ctx-v1:e2e";
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -786,6 +847,8 @@ test("agent prompt stays editable and exposes stop while a persisted run is runn
               id: "agent-run-e2e-running",
               projectId: url.searchParams.get("projectId") ?? "project-e2e",
               roleId: "assistant",
+              conversationContextId,
+              conversationContextFingerprint,
               status: "running",
               createdAt: now,
               updatedAt: now,
@@ -902,9 +965,11 @@ test("agent stop is clickable while the request is still preparing local context
   await expect(page.getByLabel("Agent messages")).not.toContainText("Waiting for model response");
 });
 
-test("agent document write completes after tool result without leaking document body into logs", async ({ page }) => {
+test("agent document write completes and exposes raw model debug output", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Document Write");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
+  await page.getByLabel("Project document files").getByText("production-plan.md").click();
   await openAgent(page);
 
   await askAgent(page, "write document");
@@ -912,7 +977,12 @@ test("agent document write completes after tool result without leaking document 
   await expect(page.getByLabel("Agent messages")).toContainText("I updated the durable Markdown document.");
   await expect(page.getByLabel("Agent messages")).toContainText("writeDocument");
   await expect(page.getByLabel("Agent messages")).toContainText("contentLength=");
-  await expect(page.getByLabel("Agent messages")).not.toContainText("The test Agent can write durable Markdown documents.");
+  await expect(page.getByLabel("Agent messages")).toContainText("modelResponse");
+  await expect(page.getByLabel("Agent messages")).toContainText("modelRequestedTools");
+  await expect(page.getByLabel("Agent messages")).toContainText("The test Agent can write durable Markdown documents.");
+  await expect(page.getByLabel("Project document workspace")).toContainText(
+    "The test Agent can write durable Markdown documents.",
+  );
   await expect
     .poll(async () =>
       page.evaluate(async () => {
@@ -926,6 +996,120 @@ test("agent document write completes after tool result without leaking document 
       }),
     )
     .toBe(true);
+});
+
+test("document editor rejects stale saves after backend document update", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Stale Document Guard");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
+  await page.getByLabel("Project document files").getByText("production-plan.md").click();
+  await page.getByLabel("Project document workspace").getByRole("button", { name: "Edit" }).click();
+  await page
+    .getByLabel("Markdown document editor")
+    .fill("# Production Plan\n\n## Local stale draft\n\nThis stale draft must not overwrite the backend update.\n");
+
+  await page.evaluate(async () => {
+    const projectId = window.mangaMaker!.project.get().id;
+    const response = await fetch("/__mangamaker__/agent/document", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId,
+        document: {
+          id: "production-plan",
+          title: "Production Plan",
+          role: "producer",
+          status: "draft",
+          path: "docs/production/production-plan.md",
+          relatedPageIds: [],
+          summary: "Backend update for stale editor guard.",
+          operationId: "e2e-stale-document-backend-update",
+          content: "# Production Plan\n\n## Backend Update\n\nBackend update wins.\n",
+        },
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+  });
+
+  await page.getByLabel("Project document workspace").getByRole("button", { name: "Save" }).click();
+  await expect(page.getByLabel("Project document workspace")).toContainText("changed on disk");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=production-plan`);
+        const document = (await response.json()) as { content?: string };
+        return document.content ?? "";
+      }),
+    )
+    .toContain("Backend update wins.");
+  const documentContent = await page.evaluate(async () => {
+    const projectId = window.mangaMaker!.project.get().id;
+    const response = await fetch(`/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=production-plan`);
+    const document = (await response.json()) as { content?: string };
+    return document.content ?? "";
+  });
+  expect(documentContent).not.toContain("Local stale draft");
+});
+
+test("document edit tools can render once before writeDocument", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Document Visual Evidence");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
+  await page.getByLabel("Project document files").getByText("production-plan.md").click();
+  await openAgent(page);
+
+  await askAgent(page, "document edit needs visual evidence");
+
+  await expect(page.getByLabel("Agent messages")).toContainText("renderPages");
+  await expect(page.getByLabel("Agent messages")).toContainText("writeDocument");
+  await expect(page.getByLabel("Agent messages")).toContainText("I updated the durable Markdown document after checking the render.");
+  await expect(page.getByLabel("Agent messages")).not.toContainText("document-write-required mode");
+  await expect(page.getByLabel("Project document workspace")).toContainText(
+    "The document edit used a rendered page before writing.",
+  );
+});
+
+test("agent repairs a document write claim that omitted writeDocument", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Document Write Debug");
+  await openAgent(page);
+
+  await askAgent(page, "pretend metadoc updated without write");
+
+  await expect(page.getByLabel("Agent messages")).toContainText("I integrated the requested changes into the metadoc.");
+  await expect(page.getByLabel("Agent messages")).toContainText("modelResponse");
+  await expect(page.getByLabel("Agent messages")).toContainText("writeDocument");
+  await expect(page.getByLabel("Agent messages")).toContainText("I updated the durable Markdown document.");
+  await expect(page.getByLabel("Agent messages")).not.toContainText("agentVerification");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/conversation-context?projectId=${encodeURIComponent(projectId)}&roleId=assistant`);
+        const context = (await response.json()) as { messages?: Array<{ role: string; content: string }> } | null;
+        return Boolean(
+          context?.messages?.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.content.includes("I integrated the requested changes into the metadoc."),
+          ),
+        );
+      }),
+    )
+    .toBe(false);
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=assistant-metadoc`);
+        const document = (await response.json()) as { content?: string };
+        return document.content ?? "";
+      }),
+    )
+    .toContain("repaired a response that claimed a metadoc update without calling writeDocument");
 });
 
 test("agent clears pending tool status when a metadoc read fails", async ({ page }) => {

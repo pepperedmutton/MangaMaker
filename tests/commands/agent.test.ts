@@ -145,6 +145,44 @@ describe("agent config", () => {
     });
   });
 
+  it("lets the Agent repetition penalty be configured and clamps unsafe values", () => {
+    const availableModels = [
+      {
+        id: "moonshotai/kimi-k2.6",
+        name: "MoonshotAI: Kimi K2.6",
+        contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+        inputModalities: ["text", "image"],
+        outputModalities: ["text"],
+      },
+    ];
+
+    expect(
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+          MANGAMAKER_AGENT_MODEL: "moonshotai/kimi-k2.6",
+          MANGAMAKER_AGENT_REPETITION_PENALTY: "1.2",
+        },
+        availableModels,
+      ),
+    ).toMatchObject({
+      repetitionPenalty: 1.2,
+    });
+
+    expect(
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+          MANGAMAKER_AGENT_MODEL: "moonshotai/kimi-k2.6",
+          MANGAMAKER_AGENT_REPETITION_PENALTY: "9",
+        },
+        availableModels,
+      ),
+    ).toMatchObject({
+      repetitionPenalty: 2,
+    });
+  });
+
   it("filters available models to DeepSeek or Kimi multimodal JSON-capable models", () => {
     const models = filterAllowedAgentModels([
       {

@@ -88,6 +88,8 @@ const summarizeRun = (run: AgentRun | null): AgentDebugSnapshot["activeRun"] =>
         modelTurnIndex: run.modelTurnIndex,
         stepCount: run.steps.length,
         updatedAt: run.updatedAt,
+        latestResponse: run.latestResponse,
+        recentSteps: run.steps.slice(-8),
         ...(run.error ? { error: run.error } : {}),
       }
     : null;

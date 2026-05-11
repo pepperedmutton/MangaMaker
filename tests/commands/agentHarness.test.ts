@@ -1,10 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAgentHarness, executeAgentHarnessToolCall } from "../../src/agent/harness";
+import {
+  createAgentConversationFingerprint,
+  isAgentHarnessDiagnosticContent,
+  isAgentMutationCompletionClaim,
+  sanitizeAgentConversationMessages,
+} from "../../src/agent/conversationSanitizer";
+import { migrateAgentSystemPrompt } from "../../src/agent/systemPrompt";
 import { AGENT_MAX_BATCH_READ_PAGES } from "../../src/agent/toolLimits";
 import {
   collectCompletedAgentToolCallKeys,
+  createCachedAgentToolResult,
+  createCompletedAgentToolCallIndex,
   createAgentToolCallKey,
   createDuplicateToolCallSkippedResult,
+  findReusableAgentToolResult,
   mergeAgentToolResults,
   selectAgentDynamicToolResultsForPrompt,
 } from "../../src/agent/toolCallPolicy";
@@ -328,19 +338,20 @@ describe("agent harness", () => {
     );
   });
 
-  it("identifies repeated tool calls and creates a corrective skipped result", () => {
+  it("identifies repeated tool calls and creates cached read results plus idempotent write skips", () => {
     const call = { toolName: "readDocument", input: { documentId: "story" } };
     const writeCall = {
       toolName: "writeDocument",
       input: { operationId: "op-1", id: "story", title: "Story", content: "new" },
     };
+    const reusableRead = {
+      toolName: "readDocument",
+      input: { documentId: "story" },
+      result: { id: "story", content: "body" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
     const completed = collectCompletedAgentToolCallKeys([
-      {
-        toolName: "readDocument",
-        input: { documentId: "story" },
-        result: { id: "story", content: "body" },
-        createdAt: "2026-01-01T00:00:00.000Z",
-      },
+      reusableRead,
       {
         toolName: "writeDocument",
         input: { operationId: "op-1", id: "story", title: "Story", content: "old" },
@@ -348,27 +359,205 @@ describe("agent harness", () => {
         createdAt: "2026-01-01T00:00:00.000Z",
       },
     ]);
-    const skipped = createDuplicateToolCallSkippedResult(call, "2026-01-01T00:00:01.000Z");
+    const cached = createCachedAgentToolResult(call, reusableRead, "2026-01-01T00:00:01.000Z");
     const skippedWrite = createDuplicateToolCallSkippedResult(writeCall, "2026-01-01T00:00:02.000Z");
+    const verifiedSkippedWrite = createDuplicateToolCallSkippedResult(
+      {
+        toolName: "writeDocument",
+        input: { operationId: "op-1", id: "story", title: "Story", content: "old" },
+      },
+      "2026-01-01T00:00:03.000Z",
+      {
+        toolName: "writeDocument",
+        input: { operationId: "op-1", id: "story", title: "Story", content: "old" },
+        result: { saved: true, verified: true, operationId: "op-1" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    );
 
     expect(completed.has(createAgentToolCallKey(call))).toBe(true);
-    expect(completed.has(createAgentToolCallKey(writeCall))).toBe(true);
-    expect(skipped).toMatchObject({
-      toolName: "toolCallSkipped",
-      input: call,
+    expect(completed.has(createAgentToolCallKey(writeCall))).toBe(false);
+    expect(
+      completed.has(createAgentToolCallKey({
+        toolName: "writeDocument",
+        input: { operationId: "op-1", id: "story", title: "Story", content: "old" },
+      })),
+    ).toBe(true);
+    expect(cached).toMatchObject({
+      toolName: "readDocument",
+      input: call.input,
       result: {
-        duplicate: true,
-        guidance: expect.stringContaining("pause instead of automatically resuming"),
+        id: "story",
+        content: "body",
+        cacheHit: true,
+        cachedFromCreatedAt: reusableRead.createdAt,
       },
     });
     expect(skippedWrite).toMatchObject({
       toolName: "toolCallSkipped",
       result: {
         duplicate: true,
-        alreadyApplied: true,
+        alreadyApplied: false,
         operationId: "op-1",
-        guidance: expect.stringContaining("report completion"),
+        guidance: expect.stringContaining("Do not report this write as completed"),
       },
     });
+    expect(verifiedSkippedWrite).toMatchObject({
+      toolName: "toolCallSkipped",
+      result: {
+        duplicate: true,
+        alreadyApplied: true,
+        guidance: expect.stringContaining("verified document write"),
+      },
+    });
+  });
+
+  it("uses stable duplicate keys and reuses browser render results only for the same project state", () => {
+    const renderCall = {
+      toolName: "renderPages",
+      input: { detail: "preview", pageIds: ["page-1", "page-2"] },
+    };
+    const sameRenderCallDifferentKeyOrder = {
+      toolName: "renderPages",
+      input: { pageIds: ["page-1", "page-2"], detail: "preview" },
+    };
+    const renderResult = {
+      toolName: "renderPages",
+      input: sameRenderCallDifferentKeyOrder.input,
+      result: {
+        projectUpdatedAt: context.project.updatedAt,
+        pageIds: ["page-1", "page-2"],
+        detail: "preview",
+        results: [],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    expect(createAgentToolCallKey(renderCall)).toBe(createAgentToolCallKey(sameRenderCallDifferentKeyOrder));
+    expect(findReusableAgentToolResult([renderResult], renderCall, {
+      projectUpdatedAt: context.project.updatedAt,
+      currentPageId: "page-2",
+    })).toBe(renderResult);
+    expect(findReusableAgentToolResult([renderResult], renderCall, {
+      projectUpdatedAt: "2026-01-01T00:00:01.000Z",
+      currentPageId: "page-2",
+    })).toBeNull();
+
+    const cached = createCachedAgentToolResult(renderCall, renderResult, "2026-01-01T00:00:02.000Z");
+    expect(cached).toMatchObject({
+      toolName: "renderPages",
+      input: renderCall.input,
+      result: {
+        cacheHit: true,
+        cachedFromCreatedAt: renderResult.createdAt,
+        projectUpdatedAt: context.project.updatedAt,
+      },
+    });
+  });
+
+  it("publishes a completed tool-call index in harness context", async () => {
+    const readPages = await executeAgentHarnessToolCall(context, {
+      toolName: "readPages",
+      input: { pageIds: ["page-1", "page-2"] },
+    });
+    expect(readPages.result).toMatchObject({
+      projectUpdatedAt: context.project.updatedAt,
+    });
+
+    const harness = buildAgentHarness(context, [readPages]);
+    expect(harness.completedToolCallIndex).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: "readPages",
+          input: { pageIds: ["page-1", "page-2"] },
+          projectUpdatedAt: context.project.updatedAt,
+          reusableInCurrentProjectState: true,
+          resultKeys: expect.arrayContaining(["pages", "projectUpdatedAt"]),
+        }),
+      ]),
+    );
+
+    expect(createCompletedAgentToolCallIndex([readPages], {
+      projectUpdatedAt: "2026-01-01T00:00:01.000Z",
+    })).toEqual([
+      expect.objectContaining({
+        toolName: "readPages",
+        reusableInCurrentProjectState: false,
+      }),
+    ]);
+  });
+
+  it("removes harness diagnostic messages from persisted conversation context", () => {
+    const messages = [
+      {
+        id: "m1",
+        role: "assistant" as const,
+        content: "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "m2",
+        role: "assistant" as const,
+        content:
+          "I need to inspect the page.\n\nMangaMaker suppressed additional tool requests (readPages) because this run is in final-answer-only mode after repeated duplicate tool calls.",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      },
+      {
+        id: "m3",
+        role: "assistant" as const,
+        content:
+          "The model kept repeating identical tool requests after MangaMaker supplied and indexed those results. I stopped this run instead of looping.",
+        createdAt: "2026-01-01T00:00:02.000Z",
+      },
+      {
+        id: "m4",
+        role: "user" as const,
+        content: "Please update the metadoc.",
+        createdAt: "2026-01-01T00:00:03.000Z",
+      },
+    ];
+
+    expect(isAgentHarnessDiagnosticContent(messages[1].content)).toBe(true);
+    expect(sanitizeAgentConversationMessages(messages).map((message) => message.id)).toEqual(["m1", "m4"]);
+    expect(createAgentConversationFingerprint(messages)).toBe(
+      createAgentConversationFingerprint(sanitizeAgentConversationMessages(messages)),
+    );
+  });
+
+  it("keeps copied creator instructions but removes unverified assistant mutation claims", () => {
+    const copiedCreatorInstruction =
+      "\u5df2\u6839\u636e\u65b0\u6e32\u67d3\u56fe\u91cd\u65b0\u7406\u89e3\u7b2c10-15\u9875\u5185\u5bb9\uff0c\u5c06\u8fd9\u4e2a\u6539\u52a8\u5199\u8fdb\u6587\u6863\u3002";
+    const unverifiedAssistantClaim =
+      "\u5df2\u5c06\u7b2c9-15\u9875\u914d\u6587\u65b9\u6848\u5199\u5165\u5c0f\u8bf4\u5bb6 metadoc\u3002";
+    const messages = [
+      {
+        id: "m1",
+        role: "user" as const,
+        content: copiedCreatorInstruction,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "m2",
+        role: "assistant" as const,
+        content: unverifiedAssistantClaim,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      },
+    ];
+
+    expect(isAgentMutationCompletionClaim(unverifiedAssistantClaim)).toBe(true);
+    expect(sanitizeAgentConversationMessages(messages).map((message) => message.id)).toEqual(["m1"]);
+  });
+
+  it("migrates stale tool-first system prompt instructions", () => {
+    const migrated = migrateAgentSystemPrompt([
+      "Custom creator instruction.",
+      "Do not assume all resources were included up front. Decide which project details you need, then request tools such as searchProject, readPage, readPages, listImageAssets, renderPage, renderPages, or listCommandManifest.",
+      "If you still need tool reads when the harness reports toolBudget.exhausted=true or remainingToolCalls=0, request the needed tools with reasons anyway; MangaMaker will pause for the creator to Continue or Stop. Do not invent final conclusions from incomplete evidence.",
+    ].join("\n"));
+
+    expect(migrated).toContain("Custom creator instruction.");
+    expect(migrated).toContain("Request tools only for missing evidence");
+    expect(migrated).toContain("stop requesting tools");
+    expect(migrated).not.toContain("request the needed tools with reasons anyway");
   });
 });

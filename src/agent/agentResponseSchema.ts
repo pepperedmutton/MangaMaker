@@ -58,6 +58,15 @@ const rawResponseSchema = z.object({
   warning: z.string().optional(),
   visionUnavailableReason: z.string().optional(),
   requestTrace: requestTraceSchema.optional(),
+  modelDebug: z.object({
+    rawAssistantContent: z.string().optional(),
+    parsedResponse: z.unknown().optional(),
+    finishReason: z.string().optional(),
+    promptTokens: z.number().nullable().optional(),
+    completionTokens: z.number().nullable().optional(),
+    totalTokens: z.number().nullable().optional(),
+    providerRouting: z.unknown().optional(),
+  }).optional(),
 });
 
 const allowedToolNames = new Set([
@@ -285,5 +294,6 @@ export const validateAgentChatResponse = (value: unknown): AgentChatResponse => 
     warning: parsed.warning,
     visionUnavailableReason: parsed.visionUnavailableReason,
     requestTrace: parsed.requestTrace,
+    modelDebug: parsed.modelDebug,
   };
 };

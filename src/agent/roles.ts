@@ -26,7 +26,7 @@ export const agentRoleDefinitionSchema = z.object({
     "writeDocument",
   ]),
   prompt: z.string().trim().min(1).default(
-    "Operate as this MangaMaker project role. Read your metadoc first, record durable output there, and use other documents only as needed.",
+    "Operate as this MangaMaker project role. Use the preloaded active metadoc first, record durable output there, and use other documents only as needed.",
   ),
   builtIn: z.boolean().default(false),
 });
@@ -43,7 +43,7 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     allowedCommandGroups: ["read", "document", "safeCurrentPageEdit"],
     preferredTools: ["readDocument", "searchProject", "readPage", "listDocuments"],
     prompt:
-      "Operate as the general MangaMaker assistant. Prefer durable project documents over chat memory. Read your metadoc first, then inspect only the pages, documents, and renders needed for the creator's request.",
+      "Operate as the general MangaMaker assistant. Prefer durable project documents over chat memory. Use the preloaded active metadoc first, then inspect only missing pages, documents, and renders needed for the creator's request.",
     builtIn: true,
   },
   {

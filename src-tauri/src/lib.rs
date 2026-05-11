@@ -34,6 +34,7 @@ struct AgentConfig {
     context_window_tokens: u32,
     context_window_max_tokens: Option<u32>,
     context_window_source: String,
+    repetition_penalty: f64,
     reason: Option<String>,
 }
 
@@ -48,6 +49,8 @@ struct AgentChatPayload {
     canvas_snapshot: Option<serde_json::Value>,
     #[allow(dead_code)]
     context_window_tokens: Option<u32>,
+    #[allow(dead_code)]
+    repetition_penalty: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -72,6 +75,8 @@ struct AgentChatMessage {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentConversationContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_id: Option<String>,
     project_id: String,
     #[serde(default = "default_agent_conversation_role_id")]
     role_id: String,
@@ -129,6 +134,7 @@ struct AgentDocumentInput {
     related_page_ids: Option<Vec<String>>,
     last_agent_run_id: Option<String>,
     summary: Option<String>,
+    expected_updated_at: Option<String>,
     content: String,
 }
 
@@ -221,12 +227,20 @@ fn agent_context_window_fields(model: Option<&str>, test_mode: bool) -> (u32, Op
     (clamped, model_max, source)
 }
 
+fn parse_agent_repetition_penalty() -> f64 {
+    let parsed = read_env_trimmed("MANGAMAKER_AGENT_REPETITION_PENALTY")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.05);
+    parsed.clamp(1.0, 2.0)
+}
+
 fn current_agent_config() -> AgentConfig {
     let test_mode = std::env::var("MANGAMAKER_AGENT_TEST_MODE").ok().as_deref() == Some("1");
     let model = read_env_trimmed("MANGAMAKER_AGENT_MODEL");
     let api_key_configured = read_env_trimmed("OPENROUTER_API_KEY").is_some();
     let (context_window_tokens, context_window_max_tokens, context_window_source) =
         agent_context_window_fields(model.as_deref(), test_mode);
+    let repetition_penalty = parse_agent_repetition_penalty();
 
     if test_mode {
         return AgentConfig {
@@ -239,6 +253,7 @@ fn current_agent_config() -> AgentConfig {
             context_window_tokens,
             context_window_max_tokens,
             context_window_source,
+            repetition_penalty,
             reason: None,
         };
     }
@@ -253,6 +268,7 @@ fn current_agent_config() -> AgentConfig {
         context_window_tokens,
         context_window_max_tokens,
         context_window_source,
+        repetition_penalty,
         reason: Some(
             "The desktop production Agent backend is not configured in this build. Use the Vite web backend or enable a native Agent proxy before chatting.".to_string(),
         ),
@@ -523,7 +539,7 @@ fn default_agent_roles_for_documents(documents: &[AgentDocumentMeta]) -> Vec<Age
         "confirmEveryMutation",
         vec!["read", "document", "safeCurrentPageEdit"],
         vec!["readDocument", "searchProject", "readPage", "listDocuments"],
-        "Operate as the general MangaMaker assistant. Read your metadoc first and inspect only resources needed for the request.",
+        "Operate as the general MangaMaker assistant. Use the preloaded active metadoc first, then inspect only missing resources needed for the request.",
     );
     push_role(
         "producer",
@@ -918,6 +934,21 @@ fn write_agent_document_file(project_id: &str, document: AgentDocumentInput) -> 
         .filter(|entry| !entry.is_empty())
         .ok_or_else(|| "Agent document id is required.".to_string())?;
     let existing = manifest.documents.iter().find(|entry| entry.id == id);
+    if let Some(expected_updated_at) = document
+        .expected_updated_at
+        .as_ref()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+    {
+        if let Some(current_updated_at) = existing.map(|entry| entry.updated_at.as_str()) {
+            if current_updated_at != expected_updated_at {
+                return Err(format!(
+                    "Agent document changed on disk since it was opened. Reopen {} before saving.",
+                    id
+                ));
+            }
+        }
+    }
     let role = document
         .role
         .clone()
@@ -1146,7 +1177,7 @@ fn create_agent_role_binding(project_id: &str, role_input: AgentRoleInput) -> Re
             .prompt
             .clone()
             .filter(|entry| !entry.trim().is_empty())
-            .unwrap_or_else(|| format!("Operate as {name}. Read your metadoc first and record durable output there.")),
+            .unwrap_or_else(|| format!("Operate as {name}. Use the preloaded active metadoc first and record durable output there. Request other documents or resources only when the creator's task needs missing evidence.")),
         built_in: false,
     };
     let mut roles = manifest.roles.clone();
@@ -1195,6 +1226,10 @@ fn resolve_agent_conversation_context_file(
 fn normalize_agent_conversation_context(
     mut context: AgentConversationContext,
 ) -> Result<AgentConversationContext, String> {
+    context.context_id = context
+        .context_id
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty());
     if context.project_id.trim().is_empty() {
         return Err("Agent conversation context projectId must be a non-empty string.".to_string());
     }

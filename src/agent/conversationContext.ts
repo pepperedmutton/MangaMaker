@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { z } from "zod";
+import { sanitizeAgentConversationMessages } from "./conversationSanitizer";
 import type { AgentChatMessage, AgentConversationContext } from "./types";
 
 const CONTEXT_KEY_PREFIX = "mangamaker:agent:conversation-context:v1:";
@@ -16,6 +17,7 @@ const messageSchema = z.object({
 });
 
 const contextSchema = z.object({
+  contextId: z.string().optional(),
   projectId: z.string(),
   roleId: z.string(),
   updatedAt: z.string(),
@@ -58,12 +60,22 @@ const normalizeConversationContext = (
   projectId: string,
   roleId: string,
   messages: AgentChatMessage[],
+  contextId?: string | null,
 ): AgentConversationContext =>
   contextSchema.parse({
+    ...(contextId ? { contextId } : {}),
     projectId,
     roleId,
     updatedAt: new Date().toISOString(),
-    messages: messages.slice(-MAX_STORED_MESSAGES),
+    messages: sanitizeAgentConversationMessages(messages).slice(-MAX_STORED_MESSAGES),
+  });
+
+const sanitizeLoadedConversationContext = (
+  context: AgentConversationContext,
+): AgentConversationContext =>
+  contextSchema.parse({
+    ...context,
+    messages: sanitizeAgentConversationMessages(context.messages).slice(-MAX_STORED_MESSAGES),
   });
 
 const loadLocalStorageContext = (
@@ -85,11 +97,11 @@ const loadLocalStorageContext = (
     const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
       : {};
-    return contextSchema.parse({
+    return sanitizeLoadedConversationContext(contextSchema.parse({
       ...record,
       projectId,
       roleId: typeof record.roleId === "string" ? record.roleId : roleId,
-    });
+    }));
   } catch (error) {
     console.warn(`Failed to load Agent conversation context for ${projectId}/${roleId}:`, error);
     return null;
@@ -132,13 +144,13 @@ export const loadAgentConversationContext = async (
         projectId,
         roleId,
       });
-      return context ? contextSchema.parse(context) : null;
+      return context ? sanitizeLoadedConversationContext(contextSchema.parse(context)) : null;
     }
     const response = await fetch(
       `${AGENT_API_BASE}/conversation-context?projectId=${encodeURIComponent(projectId)}&roleId=${encodeURIComponent(roleId)}`,
     );
     const context = await readJsonResponse<AgentConversationContext | null>(response);
-    return context ? contextSchema.parse(context) : null;
+    return context ? sanitizeLoadedConversationContext(contextSchema.parse(context)) : null;
   } catch (error) {
     console.warn(`Failed to load Agent conversation context for ${projectId}/${roleId}:`, error);
     const localContext = loadLocalStorageContext(projectId, roleId);
@@ -153,9 +165,10 @@ export const saveAgentConversationContext = async (
   projectId: string,
   roleId: string,
   messages: AgentChatMessage[],
+  contextId?: string | null,
 ): Promise<boolean> => {
   try {
-    const context = normalizeConversationContext(projectId, roleId, messages);
+    const context = normalizeConversationContext(projectId, roleId, messages, contextId);
     if (isTauriRuntime()) {
       await invoke("write_agent_conversation_context", { context });
     } else {
@@ -170,7 +183,7 @@ export const saveAgentConversationContext = async (
     return true;
   } catch (error) {
     console.warn(`Failed to save Agent conversation context for ${projectId}/${roleId}:`, error);
-    saveLocalStorageContext(normalizeConversationContext(projectId, roleId, messages));
+    saveLocalStorageContext(normalizeConversationContext(projectId, roleId, messages, contextId));
     return false;
   }
 };

@@ -55,6 +55,7 @@ export type AgentChatMessage = {
 };
 
 export type AgentConversationContext = {
+  contextId?: string;
   projectId: string;
   roleId: string;
   updatedAt: string;
@@ -168,6 +169,9 @@ export type AgentRun = {
   id: string;
   projectId: string;
   roleId: string;
+  conversationContextId?: string;
+  conversationContextFingerprint?: string;
+  conversationContextUpdatedAt?: string;
   status: AgentRunStatus;
   createdAt: string;
   updatedAt: string;
@@ -327,6 +331,7 @@ export type AgentConfig = {
   contextWindowTokens: number;
   contextWindowMaxTokens: number | null;
   contextWindowSource: "request" | "env" | "model" | "default" | "test";
+  repetitionPenalty: number;
   reason?: string;
 };
 
@@ -340,6 +345,9 @@ export type AgentAvailableModel = {
 
 export type AgentChatRequest = {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
+  conversationContextId?: string;
+  conversationContextFingerprint?: string;
+  conversationContextUpdatedAt?: string;
   systemPrompt?: string;
   agentContext: AgentContextSnapshot;
   activeRoleId?: AgentRoleId;
@@ -349,6 +357,8 @@ export type AgentChatRequest = {
   canvasSnapshot?: AgentCanvasSnapshot | null;
   approvedCommandPlan?: AgentCommandPlan | null;
   contextWindowTokens?: number;
+  repetitionPenalty?: number;
+  finalAnswerOnly?: boolean;
   requestTrace?: AgentRequestTraceMetadata;
 };
 
@@ -362,6 +372,15 @@ export type AgentChatResponse = {
   warning?: string;
   visionUnavailableReason?: string;
   requestTrace?: AgentRequestTrace;
+  modelDebug?: {
+    rawAssistantContent?: string;
+    parsedResponse?: unknown;
+    finishReason?: string;
+    promptTokens?: number | null;
+    completionTokens?: number | null;
+    totalTokens?: number | null;
+    providerRouting?: unknown;
+  };
 };
 
 export type AgentHarnessToolDefinition = {
@@ -380,6 +399,16 @@ export type AgentHarnessToolResult = {
   createdAt: string;
 };
 
+export type AgentCompletedToolCallIndexEntry = {
+  key: string;
+  toolName: string;
+  input: unknown;
+  createdAt: string;
+  projectUpdatedAt?: string | null;
+  resultKeys: string[];
+  reusableInCurrentProjectState: boolean;
+};
+
 export type AgentToolCallRequest = {
   toolName: string;
   input: unknown;
@@ -394,6 +423,7 @@ export type AgentHarnessSnapshot = {
   tools: AgentHarnessToolDefinition[];
   initialToolResults: AgentHarnessToolResult[];
   dynamicToolResults?: AgentHarnessToolResult[];
+  completedToolCallIndex?: AgentCompletedToolCallIndexEntry[];
   resourcePolicy: {
     allPagesReadable: boolean;
     assetsReadableOnDemand: boolean;
@@ -428,6 +458,8 @@ export type AgentDebugSnapshot = {
     stepCount: number;
     updatedAt: string;
     error?: string;
+    latestResponse?: AgentChatResponse;
+    recentSteps?: AgentRunStep[];
   } | null;
   activeToolCall: AgentToolLogEntry | null;
   pendingDurationMs: number | null;

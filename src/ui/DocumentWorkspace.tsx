@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { deleteProjectDocument, readProjectDocument, writeProjectDocument } from "../agent/documents";
 import {
   AGENT_DOCUMENT_ROLE_VALUES,
@@ -453,6 +453,9 @@ export const DocumentWorkspace = ({
   });
   const [renameDraft, setRenameDraft] = useState<RenameDocumentDraft | null>(null);
   const dirty = Boolean(document && content !== document.content);
+  const dirtyRef = useRef(false);
+  const loadedDocumentIdRef = useRef<string | null>(null);
+  const loadedDocumentRevisionRef = useRef<string | null>(null);
 
   const sortedDocuments = useMemo(
     () =>
@@ -467,16 +470,48 @@ export const DocumentWorkspace = ({
     () => new Map(roles.map((role) => [role.metadocId, role])),
     [roles],
   );
+  const selectedDocumentMeta = useMemo(
+    () => documents.find((entry) => entry.id === documentId) ?? null,
+    [documentId, documents],
+  );
+  const selectedDocumentRevision = selectedDocumentMeta
+    ? [
+        selectedDocumentMeta.id,
+        selectedDocumentMeta.updatedAt,
+        selectedDocumentMeta.path,
+        selectedDocumentMeta.title,
+        selectedDocumentMeta.summary ?? "",
+        selectedDocumentMeta.lastAgentRunId ?? "",
+      ].join("\u0000")
+    : "";
+
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
 
   useEffect(() => {
     let active = true;
-    setMode("preview");
+    const sameOpenDocument = loadedDocumentIdRef.current === documentId;
     if (!documentId) {
+      loadedDocumentIdRef.current = null;
+      loadedDocumentRevisionRef.current = null;
       setDocument(null);
       setContent("");
       setError(null);
       setLoading(false);
       return;
+    }
+    if (
+      sameOpenDocument &&
+      dirtyRef.current &&
+      loadedDocumentRevisionRef.current &&
+      loadedDocumentRevisionRef.current !== selectedDocumentRevision
+    ) {
+      setError("This document changed on disk, but the editor has unsaved local edits. Save or reopen the file to load the latest version.");
+      return;
+    }
+    if (!sameOpenDocument) {
+      setMode("preview");
     }
     setLoading(true);
     setError(null);
@@ -485,6 +520,8 @@ export const DocumentWorkspace = ({
         if (!active) {
           return;
         }
+        loadedDocumentIdRef.current = documentId;
+        loadedDocumentRevisionRef.current = selectedDocumentRevision;
         setDocument(nextDocument);
         setContent(nextDocument.content);
       })
@@ -504,7 +541,7 @@ export const DocumentWorkspace = ({
     return () => {
       active = false;
     };
-  }, [documentId, projectId]);
+  }, [documentId, projectId, selectedDocumentRevision]);
 
   useEffect(() => {
     if (!contextMenu) {
@@ -587,6 +624,7 @@ export const DocumentWorkspace = ({
       const saved = await writeProjectDocument(projectId, {
         ...document,
         content,
+        expectedUpdatedAt: document.updatedAt,
       });
       setDocument(saved);
       setContent(saved.content);
@@ -674,6 +712,7 @@ export const DocumentWorkspace = ({
         title,
         path,
         content: isOpenDocument ? content : source.content,
+        expectedUpdatedAt: source.updatedAt,
       });
       setDocument(saved);
       setContent(saved.content);

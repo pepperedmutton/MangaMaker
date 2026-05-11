@@ -8,6 +8,13 @@ import {
 export type AgentConfigEnv = Record<string, string | undefined>;
 
 const readFlag = (env: AgentConfigEnv, key: string) => env[key] === "1";
+const parseRepetitionPenalty = (value: string | undefined) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 1.05;
+  }
+  return Math.min(2, Math.max(1, parsed));
+};
 
 export const getAgentConfigFromEnv = (
   env: AgentConfigEnv,
@@ -19,6 +26,7 @@ export const getAgentConfigFromEnv = (
   const envContextWindowTokens = parseAgentContextWindowTokens(
     env.MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS ?? env.MANGAMAKER_AGENT_CONTEXT_WINDOW,
   );
+  const repetitionPenalty = parseRepetitionPenalty(env.MANGAMAKER_AGENT_REPETITION_PENALTY);
   const configuredModel = availableModels?.find((entry) => entry.id === model) ?? null;
   const contextWindow = resolveAgentContextWindowTokens({
     envTokens: envContextWindowTokens,
@@ -35,6 +43,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured,
       testMode: true,
       visionEnabled: true,
+      repetitionPenalty,
       ...contextWindow,
     };
   }
@@ -47,6 +56,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured: false,
       testMode: false,
       visionEnabled: false,
+      repetitionPenalty,
       ...contextWindow,
       reason: "OPENROUTER_API_KEY is not configured.",
     };
@@ -60,6 +70,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
+      repetitionPenalty,
       ...contextWindow,
       reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the multimodal Agent.",
     };
@@ -73,6 +84,7 @@ export const getAgentConfigFromEnv = (
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
+      repetitionPenalty,
       ...contextWindow,
       reason:
         "Configured model is not in the MangaMaker Agent allowlist. Use a DeepSeek or Kimi model that supports image input, text output, and JSON response_format.",
@@ -86,6 +98,7 @@ export const getAgentConfigFromEnv = (
     apiKeyConfigured: true,
     testMode: false,
     visionEnabled: true,
+    repetitionPenalty,
     ...contextWindow,
   };
 };

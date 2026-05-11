@@ -1737,6 +1737,7 @@ textarea {
   display: block;
   margin-top: 0.22rem;
   color: var(--muted);
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 

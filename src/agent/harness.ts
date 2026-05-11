@@ -19,6 +19,7 @@ import {
   AGENT_MAX_BATCH_READ_PAGES,
   AGENT_MAX_BATCH_RENDER_PAGES,
 } from "./toolLimits";
+import { createCompletedAgentToolCallIndex } from "./toolCallPolicy";
 
 const now = () => new Date().toISOString();
 const DEFAULT_SEARCH_LIMIT = 20;
@@ -399,7 +400,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "searchProject",
-    description: "Search page names, object text, descriptions, image prompts, panel ids, and image resource references before deciding what to read in detail.",
+    description: "Search page names, object text, descriptions, image prompts, panel ids, and image resource references when the supplied harness results do not already identify the needed page or object.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -419,7 +420,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "readPage",
-    description: "Read one page's full structured manga-editing context, including panels, image crops, text, bubbles, and layer order.",
+    description: "Read one page's full structured manga-editing context, including panels, image crops, text, bubbles, and layer order. Do not repeat the same pageId if readPage/readPages or a cacheHit result already supplied that page.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -432,7 +433,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "readPages",
-    description: "Read several pages' full structured context in one call. Use this when comparing a small sample of pages.",
+    description: "Read several pages' full structured context in one call when those pages are not already present in tool results. Do not repeat the same pageIds after readPages or cacheHit supplied them.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -460,7 +461,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "listImageAssets",
-    description: "List image resources referenced by panels, optionally filtered by pageId or query. Raw image data is not returned by this listing.",
+    description: "List image resources referenced by panels only when existing page/render results do not already include the needed asset references. Optionally filter by pageId or query. Raw image data is not returned by this listing.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -476,7 +477,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "renderCurrentPage",
-    description: "Read the current page visual render metadata and attached vision image status. Defaults to detail=\"preview\"; use detail=\"detail\" only when small text, faces, or fine line art must be inspected.",
+    description: "Read the current page visual render metadata and attached vision image status only when no suitable current-page render is already present. Defaults to detail=\"preview\"; use detail=\"detail\" only when small text, faces, or fine line art must be inspected.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -491,7 +492,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "renderPage",
-    description: "Render a specific page to a bounded visual screenshot so the multimodal model can inspect the final composed page result. Defaults to detail=\"preview\"; pass crop for a panel/region, and use detail=\"detail\" only for small text, faces, or fine line art.",
+    description: "Render a specific page to a bounded visual screenshot only when the final composed page result is needed and no suitable render/cacheHit is already present. Defaults to detail=\"preview\"; pass crop for a panel/region, and use detail=\"detail\" only for small text, faces, or fine line art.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -508,7 +509,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "renderPanel",
-    description: "Render one panel's bounded visual crop by pageId and panelId. A panel always belongs to exactly one page; use panelRef/pageId+panelId from readPage/readPages/listImageAssets.",
+    description: "Render one panel's bounded visual crop by pageId and panelId only when no suitable panel/page render is already present. A panel always belongs to exactly one page; use panelRef/pageId+panelId from readPage/readPages/listImageAssets.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -525,7 +526,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "renderPages",
-    description: "Render several pages to bounded visual screenshots in one call. Defaults to detail=\"preview\" and should be used for a small visual sample, not whole-project high-detail review.",
+    description: "Render several pages to bounded visual screenshots in one call only when those rendered page results are missing. Defaults to detail=\"preview\" and should be used for a small visual sample, not whole-project high-detail review. Do not repeat the same pageIds/detail after renderPages or cacheHit supplied them.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -546,7 +547,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "listCommandManifest",
-    description: "Read the command registry manifest and command payload schemas. Project mutations must use these command ids and schemas.",
+    description: "Read the command registry manifest and command payload schemas only before preparing an editor command plan when the schema is not already present. Project mutations must use these command ids and schemas.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     outputDescription: "Command manifest entries derived from the local command registry.",
     mutatesProject: false,
@@ -554,7 +555,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "listDocuments",
-    description: "List durable Markdown production documents in this project. Use this before reading or writing role-owned production state.",
+    description: "List durable Markdown production documents in this project when the needed document id is not already known. The active role metadoc is already supplied as readActiveRoleMetadoc.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     outputDescription: "Document ids, titles, optional role tags, status, paths, related pages, update times, summaries, and role metadoc bindings.",
     mutatesProject: false,
@@ -570,7 +571,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "readDocument",
-    description: "Read one project Markdown document by manifest id. The backend also accepts path, filename, or exact title as a fallback. If the document is not found, the result returns found=false with available documents instead of failing the run.",
+    description: "Read one project Markdown document by manifest id only when its content is not already present in readActiveRoleMetadoc, readDocument, or cacheHit results. The backend also accepts path, filename, or exact title as a fallback. If the document is not found, the result returns found=false with available documents instead of failing the run.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -588,7 +589,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "searchDocuments",
-    description: "Search durable Markdown production documents by title, summary, path, role, and content.",
+    description: "Search durable Markdown production documents by title, summary, path, role, and content only when the preloaded metadoc and known document ids are insufficient.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -604,7 +605,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "writeDocument",
-    description: "Create or update one durable Markdown production document. For role output, update the active role metadoc unless the creator explicitly asks for a new ordinary document.",
+    description: "Create or update one durable Markdown production document. This is the only successful completion path for document/metadoc edit requests. For role output, update the active role metadoc unless the creator explicitly asks for a new ordinary document.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -624,13 +625,13 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
         content: { type: "string" },
       },
     },
-    outputDescription: "Saved document metadata and content length.",
+    outputDescription: "Saved document metadata, verification status, changed/already-applied flags, and content length.",
     mutatesProject: true,
     requiresConfirmation: false,
   }),
   tool({
     name: "validateDocumentAgainstProject",
-    description: "Check whether page ids referenced by one Markdown document exist in the current project context. Prefer manifest id; path, filename, or exact title are accepted as fallback. Missing lookups return found=false.",
+    description: "Check whether page ids referenced by one Markdown document exist in the current project context only when validation is necessary. Prefer manifest id; path, filename, or exact title are accepted as fallback. Missing lookups return found=false.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -673,17 +674,24 @@ export const createAgentHarnessToolResult = (toolName: string, input: unknown, r
 
 const result = createAgentHarnessToolResult;
 
+const projectStateResult = (
+  context: AgentContextSnapshot,
+  toolName: string,
+  input: unknown,
+  resultValue: Record<string, unknown>,
+) =>
+  result(toolName, input, {
+    projectUpdatedAt: context.project.updatedAt,
+    ...resultValue,
+  });
+
 export const buildAgentHarness = (
   context: AgentContextSnapshot,
   dynamicToolResults: AgentHarnessToolResult[] = [],
-): AgentHarnessSnapshot => ({
-  mode: "tool-harness",
-  currentPageId: context.currentPage?.id ?? context.selectedPageId,
-  projectId: context.project.id,
-  currentPageMarkedBy: "isCurrent",
-  tools: AGENT_HARNESS_TOOLS,
-  initialToolResults: [
+): AgentHarnessSnapshot => {
+  const initialToolResults = [
     result("readProjectSummary", {}, {
+      projectUpdatedAt: context.project.updatedAt,
       project: context.project,
       selectedPageId: context.selectedPageId,
       currentPageId: context.currentPage?.id ?? null,
@@ -695,6 +703,7 @@ export const buildAgentHarness = (
     }),
     result("listPages", {}, context.pages.map(pageIndexEntry)),
     result("inspectSelection", {}, {
+      projectUpdatedAt: context.project.updatedAt,
       selection: context.selection,
       multiSelection: context.multiSelection,
       selectedObject: context.selectedObject,
@@ -705,19 +714,34 @@ export const buildAgentHarness = (
           }
         : null,
     }),
-  ],
-  dynamicToolResults,
-  resourcePolicy: {
-    allPagesReadable: true,
-    assetsReadableOnDemand: true,
-    documentsReadableOnDemand: true,
-    documentsWritableOnDemand: true,
-    inlineDataUrlsRedactedFromPrompt: true,
-    projectMutationPath: "commandPlanOnly",
-    pagePanelBoundary:
-      "A page is a top-level comic page. A panel is an object inside exactly one page. Refer to panels by pageId+panelId or panelRef.",
-  },
-});
+  ];
+  return {
+    mode: "tool-harness",
+    currentPageId: context.currentPage?.id ?? context.selectedPageId,
+    projectId: context.project.id,
+    currentPageMarkedBy: "isCurrent",
+    tools: AGENT_HARNESS_TOOLS,
+    initialToolResults,
+    dynamicToolResults,
+    completedToolCallIndex: createCompletedAgentToolCallIndex(
+      [...initialToolResults, ...dynamicToolResults],
+      {
+        projectUpdatedAt: context.project.updatedAt,
+        currentPageId: context.currentPage?.id ?? context.selectedPageId,
+      },
+    ),
+    resourcePolicy: {
+      allPagesReadable: true,
+      assetsReadableOnDemand: true,
+      documentsReadableOnDemand: true,
+      documentsWritableOnDemand: true,
+      inlineDataUrlsRedactedFromPrompt: true,
+      projectMutationPath: "commandPlanOnly",
+      pagePanelBoundary:
+        "A page is a top-level comic page. A panel is an object inside exactly one page. Refer to panels by pageId+panelId or panelRef.",
+    },
+  };
+};
 
 const getPageById = (context: AgentContextSnapshot, pageId: string) =>
   context.pages.find((page) => page.id === pageId) ?? null;
@@ -788,6 +812,7 @@ export const executeAgentHarnessToolCall = async (
 ): Promise<AgentHarnessToolResult> => {
   if (call.toolName === "readProjectSummary") {
     return result(call.toolName, call.input, {
+      projectUpdatedAt: context.project.updatedAt,
       project: context.project,
       selectedPageId: context.selectedPageId,
       currentPageId: context.currentPage?.id ?? null,
@@ -806,7 +831,7 @@ export const executeAgentHarnessToolCall = async (
     );
   }
   if (call.toolName === "searchProject") {
-    return result(call.toolName, call.input, searchProject(context, call.input as {
+    return projectStateResult(context, call.toolName, call.input, searchProject(context, call.input as {
       query?: string;
       pageId?: string;
       objectTypes?: string[];
@@ -815,11 +840,15 @@ export const executeAgentHarnessToolCall = async (
   }
   if (call.toolName === "readPage") {
     const pageId = (call.input as { pageId?: string }).pageId ?? "";
-    return result(call.toolName, call.input, getPageById(context, pageId));
+    const page = getPageById(context, pageId);
+    return result(call.toolName, call.input, page ? { ...page, projectUpdatedAt: context.project.updatedAt } : {
+      page: null,
+      projectUpdatedAt: context.project.updatedAt,
+    });
   }
   if (call.toolName === "readPages") {
     const pageIdInput = getPageIdsInput(call.input, AGENT_MAX_BATCH_READ_PAGES);
-    return result(call.toolName, call.input, {
+    return projectStateResult(context, call.toolName, call.input, {
       pageIds: pageIdInput.pageIds,
       requestedPageIdCount: pageIdInput.requestedPageIdCount,
       maxPageIds: pageIdInput.maxPageIds,
@@ -830,6 +859,7 @@ export const executeAgentHarnessToolCall = async (
   }
   if (call.toolName === "inspectSelection") {
     return result(call.toolName, call.input, {
+      projectUpdatedAt: context.project.updatedAt,
       selection: context.selection,
       multiSelection: context.multiSelection,
       selectedObject: context.selectedObject,
@@ -842,7 +872,7 @@ export const executeAgentHarnessToolCall = async (
     });
   }
   if (call.toolName === "listImageAssets") {
-    return result(call.toolName, call.input, listFilteredImageAssets(context, call.input as {
+    return projectStateResult(context, call.toolName, call.input, listFilteredImageAssets(context, call.input as {
       pageId?: string;
       query?: string;
       limit?: number;
@@ -857,7 +887,7 @@ export const executeAgentHarnessToolCall = async (
     const crop = getRenderCropInput(call.input);
     const page = getPageById(context, pageId);
     const canvasSnapshot = await renderPageSnapshot(pageId, { detail, crop });
-    return result(call.toolName, call.input, {
+    return projectStateResult(context, call.toolName, call.input, {
       pageId,
       pageName: page?.name ?? null,
       isCurrent: Boolean(page?.isCurrent),
@@ -881,7 +911,7 @@ export const executeAgentHarnessToolCall = async (
       ? { x: panel.x, y: panel.y, width: panel.width, height: panel.height }
       : undefined;
     const canvasSnapshot = await renderPageSnapshot(pageId, { detail, crop });
-    return result(call.toolName, call.input, {
+    return projectStateResult(context, call.toolName, call.input, {
       pageId,
       pageName: page?.name ?? null,
       pageNumber: page?.pageNumber ?? null,
@@ -918,7 +948,7 @@ export const executeAgentHarnessToolCall = async (
         canvasSnapshot,
       });
     }
-    return result(call.toolName, call.input, {
+    return projectStateResult(context, call.toolName, call.input, {
       pageIds: pageIdInput.pageIds,
       requestedPageIdCount: pageIdInput.requestedPageIdCount,
       maxPageIds: pageIdInput.maxPageIds,
@@ -976,18 +1006,19 @@ export const executeAgentHarnessToolCall = async (
       if (message.includes("was already applied with different document content")) {
         return result(call.toolName, call.input, {
           saved: false,
-          alreadyApplied: true,
+          alreadyApplied: false,
           operationId: input.operationId,
           conflict: true,
           reason: message,
           guidance:
-            "This operationId has already completed earlier with different content. Do not retry this write. Report the previous write as completed to the creator unless they explicitly request a new follow-up edit.",
+            "This operationId belongs to a different document payload. Do not report this edit as completed. Retry only with a fresh operationId and the intended full document content.",
         });
       }
       throw error;
     }
     return result(call.toolName, call.input, {
       saved: true,
+      verified: true,
       operationId: input.operationId,
       document: documentResultSummary(saved),
     });

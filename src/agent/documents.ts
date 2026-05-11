@@ -59,7 +59,11 @@ export const readProjectDocument = async (
 
 export const writeProjectDocument = async (
   projectId: string,
-  document: Partial<AgentDocumentMeta> & { content: string; operationId?: string },
+  document: Partial<AgentDocumentMeta> & {
+    content: string;
+    operationId?: string;
+    expectedUpdatedAt?: string;
+  },
 ): Promise<AgentDocument> => {
   if (isTauriRuntime()) {
     return agentDocumentSchema.parse(

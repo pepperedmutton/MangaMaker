@@ -17,11 +17,22 @@ import {
   loadAgentConversationContext,
   saveAgentConversationContext,
 } from "../agent/conversationContext";
+import {
+  createAgentConversationFingerprint,
+  isAgentHarnessDiagnosticContent,
+  isAgentMutationCompletionClaim,
+  sanitizeAgentConversationMessages,
+} from "../agent/conversationSanitizer";
 import { getAgentContext } from "../agent/context";
 import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
 import { createProjectRole, deleteProjectRole, readProjectDocument } from "../agent/documents";
 import { buildAgentHarness, createAgentHarnessToolResult, executeAgentHarnessToolCall } from "../agent/harness";
-import { createAgentToolCallKey } from "../agent/toolCallPolicy";
+import {
+  createAgentToolCallKey,
+  createCachedAgentToolResult,
+  createDuplicateToolCallSkippedResult,
+  findReusableAgentToolResult,
+} from "../agent/toolCallPolicy";
 import {
   DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS,
   MIN_AGENT_CONTEXT_WINDOW_TOKENS,
@@ -39,7 +50,7 @@ import {
   type AgentRoleDefinition,
   type AgentRoleId,
 } from "../agent/roles";
-import { DEFAULT_AGENT_SYSTEM_PROMPT } from "../agent/systemPrompt";
+import { DEFAULT_AGENT_SYSTEM_PROMPT, migrateAgentSystemPrompt } from "../agent/systemPrompt";
 import { executeCommandPlan, previewCommandPlan } from "../agent/tools";
 import type {
   AgentChatMessage,
@@ -89,6 +100,49 @@ const createLog = (
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value && typeof value === "object" && !Array.isArray(value));
 
+const stringifyAgentDebugValue = (value: unknown) => {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+const createModelDebugLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] => {
+  if ((step.kind !== "model_request" && step.kind !== "model_resume") || step.status !== "success") {
+    return [];
+  }
+  const output = isRecord(step.output) ? step.output : null;
+  if (!output) {
+    return [];
+  }
+  const logs: AgentToolLogEntry[] = [];
+  const modelDebug = isRecord(output.modelDebug) ? output.modelDebug : null;
+  const rawAssistantContent = typeof modelDebug?.rawAssistantContent === "string"
+    ? modelDebug.rawAssistantContent
+    : null;
+  const parsedResponse = modelDebug && "parsedResponse" in modelDebug
+    ? modelDebug.parsedResponse
+    : null;
+  const requestedToolCallsDetail = output.requestedToolCallsDetail;
+  if (rawAssistantContent || parsedResponse) {
+    logs.push(createLog(
+      "modelResponse",
+      "success",
+      rawAssistantContent ?? stringifyAgentDebugValue(parsedResponse),
+    ));
+  } else if (typeof output.message === "string" && output.message) {
+    logs.push(createLog("modelResponse", "success", output.message));
+  }
+  if (Array.isArray(requestedToolCallsDetail) && requestedToolCallsDetail.length > 0) {
+    logs.push(createLog("modelRequestedTools", "success", stringifyAgentDebugValue(requestedToolCallsDetail)));
+  }
+  return logs;
+};
+
 const createBackendToolLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] => {
   if (step.kind !== "tool_result" || step.status !== "success" || !step.summary.includes("backend")) {
     return [];
@@ -107,8 +161,34 @@ const createBackendToolLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] 
         : [];
       const keySummary = resultKeys.length > 0 ? `keys=${resultKeys.slice(0, 6).join(",")}` : null;
       return createLog(toolName, "success", [contentLength, keySummary].filter(Boolean).join("; ") || "Backend tool result");
-    });
+  });
 };
+
+const createErrorLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] => {
+  if (step.status !== "error") {
+    return [];
+  }
+  return [createLog(step.kind === "error" ? "agentRun" : step.kind, "error", step.error ?? step.summary)];
+};
+
+const stepIncludesBackendDocumentWrite = (step: AgentRunStep) => {
+  if (step.kind !== "tool_result" || step.status !== "success") {
+    return false;
+  }
+  const resultSummaries = Array.isArray(step.output) ? step.output : step.input;
+  return Array.isArray(resultSummaries) && resultSummaries.some((entry) => {
+    if (!isRecord(entry)) {
+      return false;
+    }
+    return entry.toolName === "writeDocument";
+  });
+};
+
+const stepIncludesCommandMutationResult = (step: AgentRunStep) =>
+  step.kind === "command_result" && (step.status === "success" || step.status === "no_change");
+
+const runHasVerifiedMutation = (run: AgentRun | null | undefined) =>
+  Boolean(run?.steps.some((step) => stepIncludesBackendDocumentWrite(step) || stepIncludesCommandMutationResult(step)));
 
 const hasToolBudgetPauseWarning = (payload: AgentChatResponse) =>
   Boolean(payload.requestedToolCalls?.length && payload.warning?.toLowerCase().includes("tool budget"));
@@ -165,8 +245,10 @@ const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPl
 const MAX_AGENT_TOOL_ROUNDS = 24;
 const MAX_AGENT_TOOL_CALLS = 72;
 const MAX_AGENT_TOOL_CALLS_PER_ROUND = 24;
+const MAX_DUPLICATE_TOOL_GUIDED_RETRIES = 4;
+const MAX_FINAL_ANSWER_ONLY_REPAIRS = 1;
 const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.";
-const AGENT_COMMAND_PLAN_NO_CHANGE_MESSAGE = "计划执行了但项目状态没有变化。";
+const AGENT_COMMAND_PLAN_NO_CHANGE_MESSAGE = "The plan executed, but the project state did not change.";
 const RESTORABLE_RUN_STATUSES = new Set(["queued", "running", "waiting_for_tool", "waiting_for_confirmation"]);
 const CANCELLABLE_RUN_STATUSES = new Set<AgentRun["status"]>([
   "queued",
@@ -185,11 +267,13 @@ const isOnlyDefaultAgentGreeting = (messages: AgentChatMessage[]) =>
   messages[0].role === "assistant" &&
   messages[0].content === DEFAULT_AGENT_GREETING;
 
+const isAgentHarnessDiagnosticMessage = isAgentHarnessDiagnosticContent;
+
 const toAgentWireMessages = (
   messages: AgentChatMessage[],
   internalNotice?: string,
 ): Array<{ role: "user" | "assistant"; content: string }> => [
-  ...messages.map(({ role, content }) => ({ role, content })),
+  ...sanitizeAgentConversationMessages(messages).map(({ role, content }) => ({ role, content })),
   ...(internalNotice ? [{ role: "user" as const, content: internalNotice }] : []),
 ];
 
@@ -197,6 +281,8 @@ type AgentContinuationState = {
   id: string;
   run: AgentRun | null;
   messages: AgentChatMessage[];
+  conversationContextId: string | null;
+  conversationContextFingerprint: string;
   systemPrompt: string;
   context: AgentContextSnapshot;
   activeRole: AgentRoleDefinition;
@@ -216,6 +302,86 @@ type ConversationContextScope = {
 
 const readRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+const toolReuseOptionsForContext = (context: AgentContextSnapshot) => ({
+  projectUpdatedAt: context.project.updatedAt,
+  currentPageId: context.currentPage?.id ?? context.selectedPageId,
+});
+
+const runMatchesConversationContext = (
+  run: AgentRun | null | undefined,
+  contextId: string | null,
+  fingerprint: string,
+) =>
+  Boolean(
+    run &&
+    contextId &&
+    run.conversationContextId === contextId &&
+    run.conversationContextFingerprint === fingerprint,
+  );
+
+const isDuplicateToolCallSkippedResult = (result: AgentHarnessToolResult) =>
+  result.toolName === "toolCallSkipped" && readRecord(result.result).duplicate === true;
+
+const isCachedToolResult = (result: AgentHarnessToolResult) =>
+  readRecord(result.result).cacheHit === true;
+
+const createDuplicateToolGuidanceNotice = (toolResults: AgentHarnessToolResult[]) => {
+  const skippedTools = toolResults
+    .filter(isDuplicateToolCallSkippedResult)
+    .map((entry) => readRecord(entry.input).toolName)
+    .filter((toolName): toolName is string => typeof toolName === "string" && toolName.length > 0);
+  const cachedTools = toolResults
+    .filter(isCachedToolResult)
+    .map((entry) => entry.toolName)
+    .filter((toolName) => toolName.length > 0);
+  const uniqueTools = Array.from(new Set([...skippedTools, ...cachedTools]));
+  return [
+    "MangaMaker internal harness notice: your previous requested tool calls were exact duplicates of results already supplied in this run.",
+    uniqueTools.length > 0 ? `Duplicate tools satisfied from cache: ${uniqueTools.join(", ")}.` : "Duplicate tool calls were satisfied from cache.",
+    "Use the existing dynamicToolResults and completedToolCallIndex. Do not request the same toolName/input again.",
+    "Complete the creator's task now by returning either a final answer or a pendingCommandPlan. requestedToolCalls should be empty unless a genuinely different missing tool is required.",
+  ].join("\n");
+};
+
+const createFinalAnswerOnlyNotice = (toolResults: AgentHarnessToolResult[]) => [
+  createDuplicateToolGuidanceNotice(toolResults),
+  "Final-answer-only mode is now active.",
+  "Return JSON with requestedToolCalls: []. Do not request read, render, search, or document tools again.",
+  "Answer from the cached tool results already supplied. If the available evidence is insufficient, state the limitation directly and identify the smallest manual next step for the creator.",
+].join("\n");
+
+const createFinalAnswerOnlyRepairNotice = (payload: AgentChatResponse) => {
+  const toolNames = Array.from(new Set((payload.requestedToolCalls ?? []).map((call) => call.toolName))).join(", ");
+  return [
+    "MangaMaker rejected your previous response because it still requested tools in final-answer-only mode.",
+    toolNames ? `Rejected requestedToolCalls: ${toolNames}.` : "Rejected requestedToolCalls were present.",
+    "Do not say you need to inspect/read/render anything. The cached tool results are already available in Agent harness JSON.",
+    "Return a concrete final answer now with requestedToolCalls: []. If the cached evidence is insufficient, state the limitation directly and stop.",
+  ].join("\n");
+};
+
+const coerceFinalAnswerOnlyPayload = (payload: AgentChatResponse): AgentChatResponse => {
+  if (!payload.requestedToolCalls?.length) {
+    return payload;
+  }
+  const toolNames = Array.from(new Set(payload.requestedToolCalls.map((call) => call.toolName))).join(", ");
+  const rawMessage = payload.message.trim();
+  const looksLikeToolPrelude =
+    /need to|inspect|read|render|tool|查看|读取|渲染|需要先|让我/.test(rawMessage.toLowerCase());
+  const baseMessage = rawMessage.length > 0 && !looksLikeToolPrelude
+    ? payload.message.trim()
+    : "The model still tried to request tools instead of producing a final answer. MangaMaker stopped tool execution and kept the run from looping.";
+  return {
+    ...payload,
+    message: [
+      baseMessage,
+      `MangaMaker suppressed additional tool requests (${toolNames}) because this run is in final-answer-only mode after repeated duplicate tool calls. This answer is based only on the cached results already supplied.`,
+    ].join("\n\n"),
+    requestedToolCalls: [],
+    warning: undefined,
+  };
+};
 
 const describeToolCallForLog = (call: { toolName: string; input: unknown }) => {
   const input = readRecord(call.input);
@@ -246,30 +412,44 @@ const runtimeConfigKeyForProject = (projectId: string) => `${RUNTIME_CONFIG_KEY_
 type AgentRuntimeConfig = {
   systemPrompt: string;
   contextWindowTokens: number | null;
+  repetitionPenalty: number | null;
+};
+
+const parseRepetitionPenaltyInput = (value: unknown) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return Math.min(2, Math.max(1, parsed));
 };
 
 const loadRuntimeConfig = (projectId: string): AgentRuntimeConfig => {
   try {
     const raw = window.localStorage.getItem(runtimeConfigKeyForProject(projectId));
     if (!raw) {
-      return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null };
+      return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null, repetitionPenalty: null };
     }
-    const parsed = JSON.parse(raw) as { systemPrompt?: unknown; contextWindowTokens?: unknown };
+    const parsed = JSON.parse(raw) as {
+      systemPrompt?: unknown;
+      contextWindowTokens?: unknown;
+      repetitionPenalty?: unknown;
+    };
     return {
       systemPrompt:
         typeof parsed.systemPrompt === "string" && parsed.systemPrompt.trim().length > 0
-          ? parsed.systemPrompt
+          ? migrateAgentSystemPrompt(parsed.systemPrompt)
           : DEFAULT_AGENT_SYSTEM_PROMPT,
       contextWindowTokens: parseAgentContextWindowTokens(parsed.contextWindowTokens),
+      repetitionPenalty: parseRepetitionPenaltyInput(parsed.repetitionPenalty),
     };
   } catch {
-    return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null };
+    return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null, repetitionPenalty: null };
   }
 };
 
 const saveRuntimeConfig = (
   projectId: string,
-  config: { systemPrompt: string; contextWindowTokens: number | null },
+  config: { systemPrompt: string; contextWindowTokens: number | null; repetitionPenalty: number | null },
 ) => {
   try {
     window.localStorage.setItem(
@@ -277,6 +457,7 @@ const saveRuntimeConfig = (
       JSON.stringify({
         systemPrompt: config.systemPrompt,
         contextWindowTokens: config.contextWindowTokens,
+        repetitionPenalty: config.repetitionPenalty,
         updatedAt: new Date().toISOString(),
       }),
     );
@@ -313,10 +494,13 @@ export const AgentSidebar = ({
   const [configError, setConfigError] = useState<string | null>(null);
   const [lastWarning, setLastWarning] = useState<string | null>(null);
   const [conversationContextScope, setConversationContextScope] = useState<ConversationContextScope | null>(null);
+  const [conversationContextId, setConversationContextId] = useState<string | null>(null);
+  const [conversationContextUpdatedAt, setConversationContextUpdatedAt] = useState<string | null>(null);
   const [conversationContextLoaded, setConversationContextLoaded] = useState(false);
   const [activeRoleId, setActiveRoleId] = useState<AgentRoleId>(DEFAULT_AGENT_ROLE_ID);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_AGENT_SYSTEM_PROMPT);
   const [contextWindowInput, setContextWindowInput] = useState(String(DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS));
+  const [repetitionPenaltyInput, setRepetitionPenaltyInput] = useState("1.05");
   const [configPanelOpen, setConfigPanelOpen] = useState(false);
   const [roleDialogOpen, setRoleDialogOpen] = useState(false);
   const [roleSaving, setRoleSaving] = useState(false);
@@ -329,12 +513,16 @@ export const AgentSidebar = ({
   const [toolBudgetActionRunId, setToolBudgetActionRunId] = useState<string | null>(null);
   const handledRunResponsesRef = useRef(new Set<string>());
   const handledRunStepLogIdsRef = useRef(new Set<string>());
+  const handledDocumentWriteStepIdsRef = useRef(new Set<string>());
   const localRunControlRef = useRef(false);
   const reconnectingRunRef = useRef<string | null>(null);
   const suppressCompletedRunRestoreRef = useRef(false);
   const continuingToolBudgetRunRef = useRef<{ runId: string; previousModelTurnIndex: number } | null>(null);
   const toolBudgetActionRunIdRef = useRef<string | null>(null);
   const currentAgentOperationRef = useRef<AgentLocalOperation | null>(null);
+  const conversationContextTouchedRef = useRef(false);
+  const conversationContextIdRef = useRef<string | null>(null);
+  const conversationFingerprintRef = useRef("");
   const [newRole, setNewRole] = useState({
     name: "",
     title: "",
@@ -353,6 +541,14 @@ export const AgentSidebar = ({
         .map((entry) => entry.message),
     [conversationEntries],
   );
+  const conversationFingerprint = useMemo(
+    () => createAgentConversationFingerprint(messages),
+    [messages],
+  );
+  useEffect(() => {
+    conversationContextIdRef.current = conversationContextId;
+    conversationFingerprintRef.current = conversationFingerprint;
+  }, [conversationContextId, conversationFingerprint]);
   const effectiveDocumentManifest = localDocumentManifest ?? documentManifest;
 
   useEffect(() => {
@@ -421,6 +617,12 @@ export const AgentSidebar = ({
   };
 
   const recordAgentRunUpdate = (run: AgentRun, _event?: AgentRunEvent) => {
+    if (
+      activeRun?.id !== run.id &&
+      !runMatchesConversationContext(run, conversationContextIdRef.current, conversationFingerprintRef.current)
+    ) {
+      return;
+    }
     const continuingRun = continuingToolBudgetRunRef.current;
     if (
       continuingRun?.runId === run.id &&
@@ -438,15 +640,26 @@ export const AgentSidebar = ({
     }
     setActiveRun(run);
     for (const step of run.steps) {
+      if (
+        !handledDocumentWriteStepIdsRef.current.has(step.id) &&
+        stepIncludesBackendDocumentWrite(step)
+      ) {
+        handledDocumentWriteStepIdsRef.current.add(step.id);
+        onDocumentsChanged?.();
+      }
       if (handledRunStepLogIdsRef.current.has(step.id)) {
         continue;
       }
-      const backendLogs = createBackendToolLogsFromStep(step);
-      if (backendLogs.length === 0) {
+      const stepLogs = [
+        ...createModelDebugLogsFromStep(step),
+        ...createBackendToolLogsFromStep(step),
+        ...createErrorLogsFromStep(step),
+      ];
+      if (stepLogs.length === 0) {
         continue;
       }
       handledRunStepLogIdsRef.current.add(step.id);
-      for (const log of backendLogs) {
+      for (const log of stepLogs) {
         appendLog(log);
       }
     }
@@ -473,9 +686,24 @@ export const AgentSidebar = ({
     stage: string,
     operationId?: string,
   ) => {
+    const requestMessages = request.messages.map(({ role, content }) => ({ role, content }));
     const result = await startAgentRunTurn({
       ...request,
+      messages: requestMessages,
+      ...(request.conversationContextId
+        ? { conversationContextId: request.conversationContextId }
+        : conversationContextId
+          ? { conversationContextId }
+          : {}),
+      conversationContextFingerprint:
+        request.conversationContextFingerprint ?? createAgentConversationFingerprint(requestMessages),
+      ...(request.conversationContextUpdatedAt
+        ? { conversationContextUpdatedAt: request.conversationContextUpdatedAt }
+        : conversationContextUpdatedAt
+          ? { conversationContextUpdatedAt }
+          : {}),
       contextWindowTokens: effectiveContextWindowTokens,
+      repetitionPenalty: effectiveRepetitionPenalty,
       requestTrace: createAgentRequestTraceMetadata(stage),
     }, (run, event) => {
       if (operationId && isAgentOperationCancelled(operationId)) {
@@ -528,6 +756,7 @@ export const AgentSidebar = ({
           contextWindowTokens: DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS,
           contextWindowMaxTokens: null,
           contextWindowSource: "default",
+          repetitionPenalty: 1.05,
           reason: message,
         });
         setConfigError(message);
@@ -540,8 +769,11 @@ export const AgentSidebar = ({
           configResult.status === "fulfilled"
             ? configResult.value.contextWindowTokens
             : DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS;
+        const backendRepetitionPenalty =
+          configResult.status === "fulfilled" ? configResult.value.repetitionPenalty : 1.05;
         setSystemPrompt(runtimeConfig.systemPrompt);
         setContextWindowInput(String(runtimeConfig.contextWindowTokens ?? backendContextWindow));
+        setRepetitionPenaltyInput(String(runtimeConfig.repetitionPenalty ?? backendRepetitionPenalty));
       }
     });
     return () => {
@@ -573,8 +805,9 @@ export const AgentSidebar = ({
     saveRuntimeConfig(conversationContextScope.projectId, {
       systemPrompt,
       contextWindowTokens: parseAgentContextWindowTokens(contextWindowInput),
+      repetitionPenalty: parseRepetitionPenaltyInput(repetitionPenaltyInput),
     });
-  }, [contextWindowInput, conversationContextLoaded, conversationContextScope, systemPrompt]);
+  }, [contextWindowInput, conversationContextLoaded, conversationContextScope, repetitionPenaltyInput, systemPrompt]);
 
   useEffect(() => {
     if (busy) {
@@ -619,22 +852,30 @@ export const AgentSidebar = ({
     parseAgentContextWindowTokens(contextWindowInput) ??
     config?.contextWindowTokens ??
     DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS;
+  const effectiveRepetitionPenalty =
+    parseRepetitionPenaltyInput(repetitionPenaltyInput) ??
+    config?.repetitionPenalty ??
+    1.05;
 
   const configSummary = useMemo(() => {
     if (!config) {
       return "Checking Agent configuration...";
     }
     const contextLabel = `context ${formatTokenCount(effectiveContextWindowTokens)} tokens`;
+    const repetitionLabel = `repetition penalty ${effectiveRepetitionPenalty.toFixed(2)}`;
+    const modeLabel = config.testMode
+      ? "Test mode"
+      : `OpenRouter - ${config.model ?? "model not set"}`;
     if (config.testMode) {
-      return `Test mode · ${config.visionEnabled ? "vision enabled" : "vision unavailable"} · ${contextLabel}`;
+      return `${modeLabel} - ${config.visionEnabled ? "vision enabled" : "vision unavailable"} - ${contextLabel} - ${repetitionLabel}`;
     }
     if (!config.enabled) {
       return config.reason ?? "Agent backend is not configured.";
     }
-    return `OpenRouter · ${config.model ?? "model not set"} · ${
+    return `${modeLabel} - ${
       config.visionEnabled ? "vision enabled" : "vision unavailable"
-    } · ${contextLabel}`;
-  }, [config, effectiveContextWindowTokens]);
+    } - ${contextLabel} - ${repetitionLabel}`;
+  }, [config, effectiveContextWindowTokens, effectiveRepetitionPenalty]);
   const activeRole = useMemo(
     () => (availableRoles.length > 0 ? getAgentRole(activeRoleId, availableRoles) : null),
     [activeRoleId, availableRoles],
@@ -665,27 +906,46 @@ export const AgentSidebar = ({
     if (!projectId || !roleId) {
       setConversationContextLoaded(false);
       setConversationContextScope(null);
+      setConversationContextId(null);
+      setConversationContextUpdatedAt(null);
       return;
     }
 
     let active = true;
     suppressCompletedRunRestoreRef.current = false;
+    conversationContextTouchedRef.current = false;
+    const provisionalContextId = createId("conversation-context");
+    const provisionalUpdatedAt = new Date().toISOString();
+    conversationContextIdRef.current = provisionalContextId;
+    conversationFingerprintRef.current = createAgentConversationFingerprint(createDefaultAgentMessages());
     setConversationContextLoaded(false);
     setConversationEntries(createDefaultConversationEntries());
+    setConversationContextScope({ projectId, roleId });
+    setConversationContextId(provisionalContextId);
+    setConversationContextUpdatedAt(provisionalUpdatedAt);
+    setConversationContextLoaded(true);
     setPendingPlan(null);
     setLastWarning(null);
     setPendingContinuation(null);
     void loadAgentConversationContext(projectId, roleId).then((storedContext) => {
-      if (!active) {
+      if (!active || conversationContextTouchedRef.current) {
         return;
       }
       setConversationEntries(
         (storedContext && storedContext.messages.length > 0
-          ? storedContext.messages
+          ? sanitizeAgentConversationMessages(storedContext.messages)
           : createDefaultAgentMessages()
         ).map(createMessageEntry),
       );
       setConversationContextScope({ projectId, roleId });
+      const loadedContextId = storedContext?.contextId ?? provisionalContextId;
+      const loadedMessages = storedContext && storedContext.messages.length > 0
+        ? sanitizeAgentConversationMessages(storedContext.messages)
+        : createDefaultAgentMessages();
+      conversationContextIdRef.current = loadedContextId;
+      conversationFingerprintRef.current = createAgentConversationFingerprint(loadedMessages);
+      setConversationContextId(loadedContextId);
+      setConversationContextUpdatedAt(storedContext?.updatedAt ?? provisionalUpdatedAt);
       setConversationContextLoaded(true);
     });
 
@@ -695,7 +955,7 @@ export const AgentSidebar = ({
   }, [contextSnapshot?.project.id, activeRole?.id]);
 
   useEffect(() => {
-    if (!conversationContextLoaded || !conversationContextScope || !activeRole) {
+    if (!conversationContextLoaded || !conversationContextScope || !conversationContextId || !activeRole) {
       return;
     }
     if (conversationContextScope.roleId !== activeRole.id) {
@@ -707,9 +967,10 @@ export const AgentSidebar = ({
     void saveAgentConversationContext(
       conversationContextScope.projectId,
       conversationContextScope.roleId,
-      messages,
+      sanitizeAgentConversationMessages(messages),
+      conversationContextId,
     );
-  }, [activeRole, conversationContextLoaded, conversationContextScope, messages]);
+  }, [activeRole, conversationContextId, conversationContextLoaded, conversationContextScope, messages]);
 
   const appendLog = (log: AgentToolLogEntry) => {
     setConversationEntries((current) => {
@@ -752,6 +1013,7 @@ export const AgentSidebar = ({
   };
 
   const appendMessage = (message: AgentChatMessage) => {
+    conversationContextTouchedRef.current = true;
     setConversationEntries((current) => [...current, createMessageEntry(message)]);
   };
 
@@ -759,14 +1021,24 @@ export const AgentSidebar = ({
     const projectId = contextSnapshot?.project.id ?? conversationContextScope?.projectId;
     const roleId = activeRole?.id ?? conversationContextScope?.roleId;
     suppressCompletedRunRestoreRef.current = true;
+    conversationContextTouchedRef.current = true;
+    cancelCurrentAgentOperation();
+    if (activeRun && !activeRun.id.startsWith("agent-run-tauri")) {
+      void cancelAgentRun(activeRun.id, { projectId: activeRun.projectId }).catch(() => undefined);
+    }
     if (projectId && roleId) {
       void deleteAgentConversationContext(projectId, roleId);
     }
+    const nextContextId = createId("conversation-context");
+    conversationContextIdRef.current = nextContextId;
+    conversationFingerprintRef.current = createAgentConversationFingerprint(createDefaultAgentMessages());
     setConversationEntries(createDefaultConversationEntries());
     setActiveRun(null);
     if (projectId && roleId) {
       setConversationContextScope({ projectId, roleId });
     }
+    setConversationContextId(nextContextId);
+    setConversationContextUpdatedAt(new Date().toISOString());
     setConversationContextLoaded(Boolean(projectId && roleId));
     setPendingPlan(null);
     setLastWarning(null);
@@ -859,6 +1131,7 @@ export const AgentSidebar = ({
     messageId: string,
     patch: Partial<Pick<AgentChatMessage, "role" | "content">>,
   ) => {
+    conversationContextTouchedRef.current = true;
     setConversationEntries((current) =>
       current.map((entry) =>
         entry.kind === "message" && entry.message.id === messageId
@@ -875,12 +1148,14 @@ export const AgentSidebar = ({
   };
 
   const deleteMessage = (messageId: string) => {
+    conversationContextTouchedRef.current = true;
     setConversationEntries((current) =>
       current.filter((entry) => entry.kind !== "message" || entry.message.id !== messageId),
     );
   };
 
   const addContextMessage = (role: AgentChatMessage["role"]) => {
+    conversationContextTouchedRef.current = true;
     setConversationEntries((current) => [...current, createMessageEntry(createMessage(role, ""))]);
   };
 
@@ -963,11 +1238,23 @@ export const AgentSidebar = ({
     }
     appendLog(createLog("agentChat", "success", payload.usedVision === false ? "Responded without visual input" : "Model response received"));
     const warning = payload.warning ?? payload.visionUnavailableReason ?? null;
-    if (warning) {
+    if (warning && !isAgentHarnessDiagnosticMessage(warning)) {
       setLastWarning(warning);
       appendLog(createLog("agentWarning", "error", warning));
     }
-    if (!options.suppressMessage) {
+    const isHarnessDiagnostic = isAgentHarnessDiagnosticMessage(payload.message);
+    const unverifiedMutationClaim =
+      !isHarnessDiagnostic &&
+      isAgentMutationCompletionClaim(payload.message) &&
+      !runHasVerifiedMutation(options.sourceRun);
+    if (unverifiedMutationClaim) {
+      appendLog(createLog(
+        "agentVerification",
+        "error",
+        "The model claimed a document or project change, but this run has no verified writeDocument result or command execution result. The raw modelResponse is shown for debugging and was not saved into Conversation Context.",
+      ));
+    }
+    if (!options.suppressMessage && !isHarnessDiagnostic && !unverifiedMutationClaim) {
       appendMessage(createMessage("assistant", payload.message));
     }
     for (const log of payload.toolLogs ?? []) {
@@ -989,6 +1276,12 @@ export const AgentSidebar = ({
   };
 
   const finishRunResponse = async (run: AgentRun) => {
+    if (
+      activeRun?.id !== run.id &&
+      !runMatchesConversationContext(run, conversationContextIdRef.current, conversationFingerprintRef.current)
+    ) {
+      return;
+    }
     const response = run.latestResponse;
     if (!response) {
       return;
@@ -1009,6 +1302,8 @@ export const AgentSidebar = ({
 
   const pauseForToolBudget = ({
     messages,
+    conversationContextId: runConversationContextId,
+    conversationContextFingerprint: runConversationContextFingerprint,
     systemPromptSnapshot,
     context,
     activeRoleSnapshot,
@@ -1022,6 +1317,8 @@ export const AgentSidebar = ({
     pauseReason,
   }: {
     messages: AgentChatMessage[];
+    conversationContextId: string | null;
+    conversationContextFingerprint: string;
     systemPromptSnapshot: string;
     context: AgentContextSnapshot;
     activeRoleSnapshot: AgentRoleDefinition;
@@ -1053,6 +1350,8 @@ export const AgentSidebar = ({
       id: createId("continuation"),
       run,
       messages,
+      conversationContextId: runConversationContextId,
+      conversationContextFingerprint: runConversationContextFingerprint,
       systemPrompt: systemPromptSnapshot,
       context,
       activeRole: activeRoleSnapshot,
@@ -1079,6 +1378,8 @@ export const AgentSidebar = ({
     initialPayload,
     initialRun,
     messages,
+    conversationContextId: runConversationContextId,
+    conversationContextFingerprint: runConversationContextFingerprint,
     systemPromptSnapshot,
     context,
     activeRoleSnapshot,
@@ -1091,6 +1392,8 @@ export const AgentSidebar = ({
     initialPayload: AgentChatResponse;
     initialRun?: AgentRun | null;
     messages: AgentChatMessage[];
+    conversationContextId: string | null;
+    conversationContextFingerprint: string;
     systemPromptSnapshot: string;
     context: AgentContextSnapshot;
     activeRoleSnapshot: AgentRoleDefinition;
@@ -1104,12 +1407,17 @@ export const AgentSidebar = ({
     let currentRun = initialRun ?? null;
     let dynamicToolResults = initialDynamicToolResults;
     let segmentExecutedToolCallCount = 0;
+    let duplicateOnlyRoundCount = 0;
     let shouldContinueBackendBudgetSegment = continueBackendBudgetSegment === true;
+    let finalAnswerOnlyMode = false;
+    let finalAnswerOnlyRepairCount = 0;
     const completedToolCalls = new Set(completedToolCallKeys ?? []);
 
     if (hasToolBudgetPauseWarning(payload)) {
       pauseForToolBudget({
         messages,
+        conversationContextId: runConversationContextId,
+        conversationContextFingerprint: runConversationContextFingerprint,
         systemPromptSnapshot,
         context,
         activeRoleSnapshot,
@@ -1128,9 +1436,57 @@ export const AgentSidebar = ({
     }
 
     for (let round = 0; round < MAX_AGENT_TOOL_ROUNDS && payload.requestedToolCalls?.length; round += 1) {
+      if (finalAnswerOnlyMode) {
+        if (finalAnswerOnlyRepairCount < MAX_FINAL_ANSWER_ONLY_REPAIRS) {
+          finalAnswerOnlyRepairCount += 1;
+          appendLog(createLog("agentChat", "pending", "Repairing final-answer-only response without executing tools"));
+          const harness = buildAgentHarness(context, dynamicToolResults);
+          const repairRequest = {
+            messages: toAgentWireMessages(messages, createFinalAnswerOnlyRepairNotice(payload)),
+            ...(runConversationContextId ? { conversationContextId: runConversationContextId } : {}),
+            conversationContextFingerprint: runConversationContextFingerprint,
+            ...(conversationContextUpdatedAt ? { conversationContextUpdatedAt } : {}),
+            systemPrompt: systemPromptSnapshot,
+            agentContext: context,
+            activeRoleId: activeRoleSnapshot.id,
+            activeRole: activeRoleSnapshot,
+            activeDocumentId,
+            harness,
+            canvasSnapshot: context.canvasSnapshot,
+            finalAnswerOnly: true,
+          };
+          if (currentRun && !currentRun.id.startsWith("agent-run-tauri")) {
+            const result = await resumeAgentRunTurn(
+              currentRun.id,
+              currentRun.modelTurnIndex,
+              {
+                conversationContextId: runConversationContextId,
+                conversationContextFingerprint: runConversationContextFingerprint,
+                harness,
+                toolResults: [],
+                dynamicToolResults,
+                finalAnswerOnly: true,
+              },
+              recordAgentRunUpdate,
+            );
+            currentRun = result.run;
+            payload = result.response;
+          } else {
+            const result = await sendAgentRunRequest(repairRequest, "final-answer-only-repair");
+            currentRun = result.run;
+            payload = result.response;
+          }
+          continue;
+        }
+        payload = coerceFinalAnswerOnlyPayload(payload);
+        appendLog(createLog("agentToolCalls", "success", "Suppressed tool requests after final-answer-only repair limit"));
+        break;
+      }
       if (hasToolBudgetPauseWarning(payload)) {
         pauseForToolBudget({
           messages,
+          conversationContextId: runConversationContextId,
+          conversationContextFingerprint: runConversationContextFingerprint,
           systemPromptSnapshot,
           context,
           activeRoleSnapshot,
@@ -1168,17 +1524,21 @@ export const AgentSidebar = ({
       }
       appendLog(createLog("agentToolCalls", "pending", requestedCalls.map((call) => call.toolName).join(", ")));
       const toolResults: AgentHarnessToolResult[] = [];
+      let duplicateToolCallCount = 0;
       for (const call of executableCalls) {
+        const reusableResult = findReusableAgentToolResult(
+          [...dynamicToolResults, ...toolResults],
+          call,
+          toolReuseOptionsForContext(context),
+        );
         const toolCallKey = createAgentToolCallKey(call);
-        if (completedToolCalls.has(toolCallKey)) {
-          const skipped = createAgentHarnessToolResult("toolCallSkipped", {
-            toolName: call.toolName,
-            input: call.input,
-          }, {
-            reason: "Duplicate tool call skipped; the previous result is already present in the harness.",
-          });
-          toolResults.push(skipped);
-          appendLog(createLog(call.toolName, "success", "Skipped duplicate tool call"));
+        if (reusableResult) {
+          const duplicateResult = call.toolName === "writeDocument"
+            ? createDuplicateToolCallSkippedResult(call, undefined, reusableResult)
+            : createCachedAgentToolResult(call, reusableResult);
+          toolResults.push(duplicateResult);
+          duplicateToolCallCount += 1;
+          appendLog(createLog(call.toolName, "success", "Reused cached tool result"));
           continue;
         }
         appendLog(createLog(call.toolName, "pending", call.reason));
@@ -1191,6 +1551,10 @@ export const AgentSidebar = ({
         segmentExecutedToolCallCount += 1;
         appendLog(createLog(call.toolName, "success", describeToolCallForLog(call)));
       }
+      const duplicateOnly =
+        executableCalls.length > 0 &&
+        deferredCalls.length === 0 &&
+        duplicateToolCallCount === executableCalls.length;
       dynamicToolResults = [
         ...dynamicToolResults,
         ...toolResults,
@@ -1204,10 +1568,25 @@ export const AgentSidebar = ({
         }),
       ];
       appendLog(createLog("agentToolCalls", "success", `${toolResults.length} tool result(s)`));
+      if (duplicateOnly) {
+        duplicateOnlyRoundCount += 1;
+        appendLog(createLog("agentToolCalls", "success", "Reused cached duplicate tool results; asking the model to continue"));
+      } else {
+        duplicateOnlyRoundCount = 0;
+      }
+      const forceFinalAnswerOnly = duplicateOnlyRoundCount >= MAX_DUPLICATE_TOOL_GUIDED_RETRIES;
       appendLog(createLog("agentChat", "pending", `Waiting for model response after ${toolResults.length} tool result(s)`));
       const harness = buildAgentHarness(context, dynamicToolResults);
+      const duplicateGuidanceNotice = forceFinalAnswerOnly
+        ? createFinalAnswerOnlyNotice(toolResults)
+        : duplicateOnly
+          ? createDuplicateToolGuidanceNotice(toolResults)
+          : undefined;
       const nextRequest = {
-        messages: toAgentWireMessages(messages),
+        messages: toAgentWireMessages(messages, duplicateGuidanceNotice),
+        ...(runConversationContextId ? { conversationContextId: runConversationContextId } : {}),
+        conversationContextFingerprint: runConversationContextFingerprint,
+        ...(conversationContextUpdatedAt ? { conversationContextUpdatedAt } : {}),
         systemPrompt: systemPromptSnapshot,
         agentContext: context,
         activeRoleId: activeRoleSnapshot.id,
@@ -1215,16 +1594,20 @@ export const AgentSidebar = ({
         activeDocumentId,
         harness,
         canvasSnapshot: context.canvasSnapshot,
+        finalAnswerOnly: forceFinalAnswerOnly,
       };
       if (currentRun && !currentRun.id.startsWith("agent-run-tauri")) {
         const result = await resumeAgentRunTurn(
           currentRun.id,
           currentRun.modelTurnIndex,
           {
+            conversationContextId: runConversationContextId,
+            conversationContextFingerprint: runConversationContextFingerprint,
             harness,
             toolResults,
             dynamicToolResults,
             continueBudgetSegment: shouldContinueBackendBudgetSegment,
+            finalAnswerOnly: forceFinalAnswerOnly,
           },
           recordAgentRunUpdate,
         );
@@ -1236,6 +1619,7 @@ export const AgentSidebar = ({
         currentRun = result.run;
         payload = result.response;
       }
+      finalAnswerOnlyMode = forceFinalAnswerOnly;
     }
 
     if (payload.error) {
@@ -1248,6 +1632,8 @@ export const AgentSidebar = ({
           : "Agent reached the current tool-round budget. It paused instead of answering from incomplete evidence.";
       pauseForToolBudget({
         messages,
+        conversationContextId: runConversationContextId,
+        conversationContextFingerprint: runConversationContextFingerprint,
         systemPromptSnapshot,
         context,
         activeRoleSnapshot,
@@ -1295,6 +1681,8 @@ export const AgentSidebar = ({
           requestedToolCalls: continuation.requestedToolCalls,
         },
         messages: continuation.messages,
+        conversationContextId: continuation.conversationContextId,
+        conversationContextFingerprint: continuation.conversationContextFingerprint,
         systemPromptSnapshot: continuation.systemPrompt,
         context: continuation.context,
         activeRoleSnapshot: continuation.activeRole,
@@ -1358,6 +1746,9 @@ export const AgentSidebar = ({
     );
     appendLog(createLog("agentToolBudget", "success", "Continuing persisted run with a new tool budget segment"));
     try {
+      if (!runMatchesConversationContext(activeRun, conversationContextId, conversationFingerprint)) {
+        throw new Error("This persisted run belongs to an older Conversation Context. Start a new Agent request from the visible context.");
+      }
       const context = await getAgentContext();
       setContextSnapshot(context);
       await runAgentToolLoop({
@@ -1368,6 +1759,8 @@ export const AgentSidebar = ({
         },
         initialRun: activeRun,
         messages,
+        conversationContextId,
+        conversationContextFingerprint: conversationFingerprint,
         systemPromptSnapshot: systemPrompt,
         context,
         activeRoleSnapshot: activeRole,
@@ -1408,6 +1801,9 @@ export const AgentSidebar = ({
     setBusy(true);
     appendLog(createLog("agentRun", "pending", `Resuming ${activeRun.id}`));
     try {
+      if (!runMatchesConversationContext(activeRun, conversationContextId, conversationFingerprint)) {
+        throw new Error("This persisted run belongs to an older Conversation Context. Start a new Agent request from the visible context.");
+      }
       if (activeRun.status === "queued" || activeRun.status === "running") {
         const completedRun = await waitForExistingAgentRunTurn(
           activeRun.id,
@@ -1437,6 +1833,8 @@ export const AgentSidebar = ({
         },
         initialRun: activeRun,
         messages,
+        conversationContextId,
+        conversationContextFingerprint: conversationFingerprint,
         systemPromptSnapshot: systemPrompt,
         context,
         activeRoleSnapshot: activeRole,
@@ -1536,16 +1934,24 @@ export const AgentSidebar = ({
   useEffect(() => {
     const projectId = contextSnapshot?.project.id;
     const roleId = activeRole?.id;
-    if (!conversationContextLoaded || !projectId || !roleId || busy) {
+    if (!conversationContextLoaded || !projectId || !roleId || !conversationContextId || busy) {
       return;
     }
     let active = true;
-    void listAgentRuns(projectId, { roleId, limit: 5 })
+    void listAgentRuns(projectId, {
+      roleId,
+      limit: 5,
+      conversationContextId,
+      conversationContextFingerprint: conversationFingerprint,
+    })
       .then(async (runs) => {
         if (!active || runs.length === 0) {
           return;
         }
         const candidate = runs.find((run) => {
+          if (!runMatchesConversationContext(run, conversationContextId, conversationFingerprint)) {
+            return false;
+          }
           if (RESTORABLE_RUN_STATUSES.has(run.status)) {
             return true;
           }
@@ -1556,6 +1962,8 @@ export const AgentSidebar = ({
           return Boolean(
             run.status === "completed" &&
               responseMessage &&
+              !isAgentHarnessDiagnosticMessage(responseMessage) &&
+              (!isAgentMutationCompletionClaim(responseMessage) || runHasVerifiedMutation(run)) &&
               !messages.some((message) => message.role === "assistant" && message.content === responseMessage),
           );
         });
@@ -1579,7 +1987,7 @@ export const AgentSidebar = ({
     return () => {
       active = false;
     };
-  }, [activeRole?.id, busy, contextSnapshot?.project.id, conversationContextLoaded, messages]);
+  }, [activeRole?.id, busy, contextSnapshot?.project.id, conversationContextId, conversationContextLoaded, conversationFingerprint, messages]);
 
   useEffect(() => {
     if (
@@ -1636,8 +2044,17 @@ export const AgentSidebar = ({
     localRunControlRef.current = true;
     const operationId = createId("agent-operation");
     currentAgentOperationRef.current = { id: operationId, cancelled: false };
+    const effectiveConversationContextId = conversationContextId ?? createId("conversation-context");
+    if (!conversationContextId) {
+      setConversationContextId(effectiveConversationContextId);
+    }
     const userMessage = createMessage("user", trimmed);
     const nextMessages = [...messages, userMessage];
+    const nextConversationFingerprint = createAgentConversationFingerprint(nextMessages);
+    let nextConversationContextUpdatedAt = conversationContextUpdatedAt;
+    conversationContextIdRef.current = effectiveConversationContextId;
+    conversationFingerprintRef.current = nextConversationFingerprint;
+    conversationContextTouchedRef.current = true;
     setConversationEntries((current) => [...current, createMessageEntry(userMessage)]);
     setBusy(true);
     appendLog(createLog("readContext", "pending"));
@@ -1653,6 +2070,12 @@ export const AgentSidebar = ({
         return;
       }
       setContextSnapshot(context);
+      nextConversationContextUpdatedAt = new Date().toISOString();
+      await saveAgentConversationContext(context.project.id, activeRole.id, nextMessages, effectiveConversationContextId);
+      if (isAgentOperationCancelled(operationId)) {
+        return;
+      }
+      setConversationContextUpdatedAt(nextConversationContextUpdatedAt);
       appendLog(
         createLog(
           "readContext",
@@ -1703,6 +2126,9 @@ export const AgentSidebar = ({
       appendLog(createLog("agentChat", "pending", "Waiting for model response"));
       const initialRunResult = await sendAgentRunRequest({
         messages: toAgentWireMessages(nextMessages),
+        conversationContextId: effectiveConversationContextId,
+        conversationContextFingerprint: nextConversationFingerprint,
+        ...(nextConversationContextUpdatedAt ? { conversationContextUpdatedAt: nextConversationContextUpdatedAt } : {}),
         systemPrompt,
         agentContext: context,
         activeRoleId: activeRole.id,
@@ -1721,6 +2147,8 @@ export const AgentSidebar = ({
         initialPayload: initialRunResult.response,
         initialRun: initialRunResult.run,
         messages: nextMessages,
+        conversationContextId: effectiveConversationContextId,
+        conversationContextFingerprint: nextConversationFingerprint,
         systemPromptSnapshot: systemPrompt,
         context,
         activeRoleSnapshot: activeRole,
@@ -1782,6 +2210,8 @@ export const AgentSidebar = ({
   const agentPromptDisabled = config?.enabled !== true || !activeRole;
   const agentSendDisabled =
     agentPromptDisabled ||
+    !conversationContextLoaded ||
+    !conversationContextId ||
     busy ||
     pendingContinuationBlocksInput ||
     activeRunBlocksInput ||
@@ -1874,6 +2304,21 @@ export const AgentSidebar = ({
             Effective {formatTokenCount(effectiveContextWindowTokens)} tokens; backend default{" "}
             {formatTokenCount(config?.contextWindowTokens)} tokens, model max{" "}
             {formatTokenCount(config?.contextWindowMaxTokens)}.
+          </p>
+          <label>
+            <span>Repetition penalty</span>
+            <input
+              aria-label="Agent repetition penalty"
+              type="number"
+              min={1}
+              max={2}
+              step={0.01}
+              value={repetitionPenaltyInput}
+              onChange={(event) => setRepetitionPenaltyInput(event.currentTarget.value)}
+            />
+          </label>
+          <p className="agent-muted">
+            Effective {effectiveRepetitionPenalty.toFixed(2)}. Higher values reduce repeated phrasing and repeated tool-call patterns; too high can make responses less coherent.
           </p>
           <div className="agent-context-editor" aria-label="Agent conversation context editor">
             <div className="agent-context-editor-header">

@@ -316,6 +316,9 @@ const createSyntheticCompletedRun = (
   id: createId("agent-run-tauri"),
   projectId: request.agentContext.project.id,
   roleId: request.activeRoleId ?? "assistant",
+  ...(request.conversationContextId ? { conversationContextId: request.conversationContextId } : {}),
+  ...(request.conversationContextFingerprint ? { conversationContextFingerprint: request.conversationContextFingerprint } : {}),
+  ...(request.conversationContextUpdatedAt ? { conversationContextUpdatedAt: request.conversationContextUpdatedAt } : {}),
   status: response.requestedToolCalls?.length
     ? "waiting_for_tool"
     : response.pendingCommandPlan?.requiresConfirmation
@@ -336,7 +339,12 @@ const createAgentRunEventSource = (runId: string) =>
 
 export const listAgentRuns = async (
   projectId: string,
-  options: { roleId?: string | null; limit?: number } = {},
+  options: {
+    roleId?: string | null;
+    limit?: number;
+    conversationContextId?: string | null;
+    conversationContextFingerprint?: string | null;
+  } = {},
 ): Promise<AgentRun[]> => {
   if (isTauriRuntime()) {
     return [];
@@ -347,6 +355,12 @@ export const listAgentRuns = async (
   });
   if (options.roleId) {
     params.set("roleId", options.roleId);
+  }
+  if (options.conversationContextId) {
+    params.set("conversationContextId", options.conversationContextId);
+  }
+  if (options.conversationContextFingerprint) {
+    params.set("conversationContextFingerprint", options.conversationContextFingerprint);
   }
   const response = await fetch(`${AGENT_API_BASE}/runs?${params.toString()}`);
   const payload = await readJsonResponse<{ runs?: AgentRun[] }>(response);
@@ -476,10 +490,13 @@ export const resumeAgentRunTurn = async (
   runId: string,
   previousModelTurnIndex: number,
   payload: {
+    conversationContextId?: string | null;
+    conversationContextFingerprint?: string;
     harness: AgentHarnessSnapshot;
     toolResults: AgentHarnessToolResult[];
     dynamicToolResults: AgentHarnessToolResult[];
     continueBudgetSegment?: boolean;
+    finalAnswerOnly?: boolean;
   },
   onRunUpdate?: (run: AgentRun, event: AgentRunEvent) => void,
 ): Promise<{ run: AgentRun; response: AgentChatResponse }> => {
