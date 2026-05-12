@@ -19,7 +19,7 @@ type RibbonBarProps = {
   canUndo: boolean;
   canRedo: boolean;
   canExport: boolean;
-  workspaceMode: "canvas" | "docs";
+  workspaceMode: "canvas" | "docs" | "sysml";
   pageFormat?: PageFormatState;
   onSetTool: (tool: ToolMode) => void;
   onSave: () => void;
@@ -29,7 +29,7 @@ type RibbonBarProps = {
   onRedo: () => void;
   onZoomChange: (zoom: number) => void;
   onSetLocale: (locale: Locale) => void;
-  onSetWorkspaceMode: (mode: "canvas" | "docs") => void;
+  onSetWorkspaceMode: (mode: "canvas" | "docs" | "sysml") => void;
 };
 
 const Divider = () => <span className="ribbon-divider" aria-hidden="true" />;
@@ -152,6 +152,7 @@ export const RibbonBar = ({
         <div className="ribbon-group-row">
           <RibbonButton label="Comic" active={workspaceMode === "canvas"} onClick={() => onSetWorkspaceMode("canvas")} />
           <RibbonButton label="Docs" active={workspaceMode === "docs"} onClick={() => onSetWorkspaceMode("docs")} />
+          <RibbonButton label="SysML" active={workspaceMode === "sysml"} onClick={() => onSetWorkspaceMode("sysml")} />
         </div>
       </div>
 

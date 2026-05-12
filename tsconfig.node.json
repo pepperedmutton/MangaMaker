@@ -20,6 +20,12 @@
     "src/agent/roles.ts",
     "src/agent/systemPrompt.ts",
     "src/agent/toolCallPolicy.ts",
-    "src/agent/toolLimits.ts"
+    "src/agent/toolLimits.ts",
+    "src/sysml/config.ts",
+    "src/sysml/mangaModel.ts",
+    "src/sysml/pilotAdapter.ts",
+    "src/sysml/repository.ts",
+    "src/sysml/standardReference.ts",
+    "src/sysml/types.ts"
   ]
 }

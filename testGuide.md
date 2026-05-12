@@ -213,5 +213,8 @@ Agent changes must verify both backend contract and user-visible behavior:
 21. Agent Config UI tests should verify that the creator can edit the system prompt, context-window token budget, and conversation context, including both user messages and Agent replies, and that the edited values are sent in the next Agent run request.
 22. Agent UI tests should verify that tool call status appears inline in the conversation, that no standalone Tool Log panel is rendered, and that clearing Conversation Context does not add a context-delete event to tool logs.
 23. Document write tests must verify that `writeDocument` requires `operationId`, that identical retries are idempotent, and that conflicting reuse of an operation id fails clearly.
+24. SysML/MBSE tests must verify `GET /__mangamaker__/sysml/config`, project SysML repository initialization, `GET/POST/DELETE /__mangamaker__/sysml/file`, and `POST /__mangamaker__/sysml/validate`.
+25. SysML validation tests must use the official SysML v2 Pilot Implementation when configured, must pass for the default MangaMaker MBSE seed model, must fail with clear diagnostics for invalid SysML, and must include a non-R18 sample manga MBSE model.
+26. Agent harness tests must verify that SysML tools are available on demand, that the initial Agent prompt preloads only the compact SysML standard overview and does not preload all SysML file bodies, that `readSysmlStandardReference` exposes focused SysML v2/KerML/Pilot topics, and that model-facing guidance tells the Agent to validate SysML changes before claiming completion.
 
 Use `MANGAMAKER_AGENT_TEST_MODE=1` for deterministic tests. Real `OPENROUTER_API_KEY` values must not be committed or written to test fixtures.

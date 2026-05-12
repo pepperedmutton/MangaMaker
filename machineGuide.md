@@ -57,6 +57,7 @@ agent 必须把以下层面视为一个系统：
 - `src/state`: session state and history behavior
 - `src/storage`: persistence, `projects/` integration, and local draft behavior
 - `src/agent`: built-in creator assistance Agent config, harness, tools, roles, documents, and response validation
+- `src/sysml`: official SysML v2 Pilot adapter, project SysML repository, MBSE model defaults, and validation types
 - `src/ui`: human-facing behavior
 - `src/automation/api.ts`: browser automation bridge
 - `vite.config.ts`: web persistence middleware, `/projects` serving, and allowed share hosts
@@ -296,6 +297,9 @@ Durable document rules:
 - A document may be ordinary and unbound to any role. A role may read and write documents beyond its own metadoc.
 - Creating a role must either create its metadoc automatically or bind an existing ordinary document as the role metadoc. Deleting a metadoc must remove the role. Deleting a role must keep its metadoc as an ordinary document.
 - The Agent harness must expose roles and documents as tools: it may preload only the active role metadoc, and it must expose list roles, list documents, read one document, search documents, and write one document on demand. It must not preload all document bodies into the initial prompt.
+- The Agent harness must expose SysML as an explicit standard-aware tool surface. `readSysmlStandardOverview` must be preloaded as a compact SysML v2/KerML/Pilot rule index, and `readSysmlStandardReference` must let any role read focused standard topics before changing unfamiliar MBSE semantics. Project model tools remain on demand: `getSysmlStatus`, `listSysmlFiles`, `readSysmlFile`, `writeSysmlFile`, and `validateSysmlModel`. It must not preload all SysML files into the initial prompt.
+- When SysML is enabled, formal engineering constraints belong in `projects/<project-folder>/sysml/` and must be validated by the official SysML v2 Pilot Implementation. Markdown remains the human-readable production record, but SysML is the formal MBSE model.
+- The center workspace must include `Comic`, `Docs`, and `SysML` modes. The SysML mode must list project SysML/KerML files, allow bounded edits, and expose validation diagnostics without hiding Pilot errors.
 - Role prompts must describe the Agent as a producer, director, storyboard designer, script designer, art supervisor, continuity supervisor, prompt engineer, or custom assisting production role. These roles read and write documents and may prepare bounded command plans, but they do not become the human creator or claim final authorship.
 - Other local agents should be able to inspect project documents by reading `projects/<project-folder>/docs/` and the document API without scraping chat messages.
 
@@ -322,7 +326,7 @@ Command-plan rules:
 Context rules:
 
 - The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information when those details are requested.
-- The initial model prompt must not include every page's full resources, every asset metadata record, or a screenshot by default. It should include a lightweight project summary, page index, current-page marker, selection summary, and tool catalog.
+- The initial model prompt must not include every page's full resources, every asset metadata record, every SysML file body, or a screenshot by default. It should include a lightweight project summary, page index, current-page marker, selection summary, compact SysML standard overview, and tool catalog.
 - The Agent must be able to read all project pages on demand, not only the currently selected page. The creator's current page must be marked with `isCurrent=true` in the page index and detailed page reads.
 - The Agent harness should present project reading as local tools such as project summary, page listing, project search, single-page and batch page reading, selection inspection, filtered image asset listing, single-page and batch page rendering, role listing, Markdown document listing/reading/searching/writing, and command manifest reading.
 - The Agent must be able to close the multimodal loop for a page: request a screenshot/render tool for a specific page, receive the composed visual result as a vision attachment, and receive the same page's structured resources so it can compare resource-level state with rendered outcome.

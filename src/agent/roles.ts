@@ -24,14 +24,25 @@ export const agentRoleDefinitionSchema = z.object({
     "readDocument",
     "searchDocuments",
     "writeDocument",
+    "readSysmlStandardReference",
+    "getSysmlStatus",
+    "validateSysmlModel",
   ]),
   prompt: z.string().trim().min(1).default(
-    "Operate as this MangaMaker project role. Use the preloaded active metadoc first, record durable output there, and use other documents only as needed.",
+    "Operate as this MangaMaker project role. Use the preloaded active metadoc first, record durable output there, use other documents only as needed, and use the SysML standard reference/model tools when MBSE constraints are relevant.",
   ),
   builtIn: z.boolean().default(false),
 });
 
 export type AgentRoleDefinition = z.infer<typeof agentRoleDefinitionSchema>;
+
+const withSysmlPreferredTools = (tools: string[]) =>
+  Array.from(new Set([
+    ...tools,
+    "readSysmlStandardReference",
+    "getSysmlStatus",
+    "validateSysmlModel",
+  ]));
 
 export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
   {
@@ -41,9 +52,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "assistant-metadoc",
     defaultAutonomy: "confirmEveryMutation",
     allowedCommandGroups: ["read", "document", "safeCurrentPageEdit"],
-    preferredTools: ["readDocument", "searchProject", "readPage", "listDocuments"],
+    preferredTools: withSysmlPreferredTools(["readDocument", "searchProject", "readPage", "listDocuments"]),
     prompt:
-      "Operate as the general MangaMaker assistant. Prefer durable project documents over chat memory. Use the preloaded active metadoc first, then inspect only missing pages, documents, and renders needed for the creator's request.",
+      "Operate as the general MangaMaker assistant. Prefer durable project documents over chat memory. Use the preloaded active metadoc first, then inspect only missing pages, documents, renders, and SysML reference/model files needed for the creator's request.",
     builtIn: true,
   },
   {
@@ -53,9 +64,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "production-plan",
     defaultAutonomy: "adviseOnly",
     allowedCommandGroups: ["read", "document"],
-    preferredTools: ["listDocuments", "readDocument", "writeDocument", "searchDocuments"],
+    preferredTools: withSysmlPreferredTools(["listDocuments", "readDocument", "writeDocument", "searchDocuments"]),
     prompt:
-      "Operate as the producer. Maintain the production metadoc with goals, constraints, task order, acceptance criteria, and unresolved decisions. Do not make canvas edits unless explicitly asked.",
+      "Operate as the producer. Maintain the production metadoc with goals, constraints, task order, acceptance criteria, and unresolved decisions. When constraints need MBSE rigor, consult the SysML standard reference and project model. Do not make canvas edits unless explicitly asked.",
     builtIn: true,
   },
   {
@@ -65,9 +76,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "story-architecture",
     defaultAutonomy: "confirmEveryMutation",
     allowedCommandGroups: ["read", "document", "safeCurrentPageEdit", "visualReview"],
-    preferredTools: ["readDocument", "readPage", "renderPage", "writeDocument", "listCommandManifest"],
+    preferredTools: withSysmlPreferredTools(["readDocument", "readPage", "renderPage", "writeDocument", "listCommandManifest"]),
     prompt:
-      "Operate as the director. Maintain the story architecture metadoc. Focus on page intent, visual rhythm, shot order, reader attention, and whether rendered pages serve the documented plan.",
+      "Operate as the director. Maintain the story architecture metadoc. Focus on page intent, visual rhythm, shot order, reader attention, and whether rendered pages serve the documented plan. Use SysML reference/model tools when formal constraints or verification are part of the task.",
     builtIn: true,
   },
   {
@@ -77,9 +88,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "storyboard-overview",
     defaultAutonomy: "autoSafeCurrentPage",
     allowedCommandGroups: ["read", "document", "safeCurrentPageEdit", "layout"],
-    preferredTools: ["readDocument", "readPage", "renderPage", "writeDocument", "listCommandManifest"],
+    preferredTools: withSysmlPreferredTools(["readDocument", "readPage", "renderPage", "writeDocument", "listCommandManifest"]),
     prompt:
-      "Operate as the storyboard designer. Maintain storyboard Markdown with page beats, panel count, shot size, composition, and execution notes. Prepare bounded page/panel command plans grounded in the metadoc.",
+      "Operate as the storyboard designer. Maintain storyboard Markdown with page beats, panel count, shot size, composition, and execution notes. Prepare bounded page/panel command plans grounded in the metadoc, and use SysML tools when page/panel structure is governed by formal MBSE constraints.",
     builtIn: true,
   },
   {
@@ -89,9 +100,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "script-dialogue",
     defaultAutonomy: "autoSafeCurrentPage",
     allowedCommandGroups: ["read", "document", "safeCurrentPageEdit", "text"],
-    preferredTools: ["readDocument", "readPage", "searchProject", "writeDocument", "listCommandManifest"],
+    preferredTools: withSysmlPreferredTools(["readDocument", "readPage", "searchProject", "writeDocument", "listCommandManifest"]),
     prompt:
-      "Operate as the script designer. Maintain dialogue and caption Markdown. Keep manga text concise, map wording to page/panel/object ids when possible, and prepare text/bubble command plans only through the command manifest.",
+      "Operate as the script designer. Maintain dialogue and caption Markdown. Keep manga text concise, map wording to page/panel/object ids when possible, prepare text/bubble command plans only through the command manifest, and check SysML constraints when dialogue or captions are formally constrained.",
     builtIn: true,
   },
   {
@@ -101,9 +112,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "art-supervision",
     defaultAutonomy: "confirmEveryMutation",
     allowedCommandGroups: ["read", "document", "visualReview"],
-    preferredTools: ["listImageAssets", "readPage", "renderPage", "writeDocument"],
+    preferredTools: withSysmlPreferredTools(["listImageAssets", "readPage", "renderPage", "writeDocument"]),
     prompt:
-      "Operate as the art supervisor. Maintain art-direction Markdown, compare resources with rendered pages, and identify style, crop, composition, and asset issues. Prefer review notes unless the user asks for concrete editor changes.",
+      "Operate as the art supervisor. Maintain art-direction Markdown, compare resources with rendered pages, and identify style, crop, composition, and asset issues. Use SysML tools when style, asset, or review obligations are formal constraints. Prefer review notes unless the user asks for concrete editor changes.",
     builtIn: true,
   },
   {
@@ -113,9 +124,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "continuity-check",
     defaultAutonomy: "confirmEveryMutation",
     allowedCommandGroups: ["read", "document", "visualReview"],
-    preferredTools: ["listPages", "readPages", "renderPages", "writeDocument", "searchDocuments"],
+    preferredTools: withSysmlPreferredTools(["listPages", "readPages", "renderPages", "writeDocument", "searchDocuments"]),
     prompt:
-      "Operate as the continuity supervisor. Maintain continuity Markdown. Check page order, object state, dialogue continuity, and unresolved issues across pages. Request only bounded page samples unless the creator narrows the scope.",
+      "Operate as the continuity supervisor. Maintain continuity Markdown. Check page order, object state, dialogue continuity, and unresolved issues across pages. Use SysML tools for formal cross-page traceability and verification. Request only bounded page samples unless the creator narrows the scope.",
     builtIn: true,
   },
   {
@@ -125,9 +136,9 @@ export const AGENT_DEFAULT_ROLE_DEFINITIONS: AgentRoleDefinition[] = [
     metadocId: "image-prompts",
     defaultAutonomy: "adviseOnly",
     allowedCommandGroups: ["read", "document"],
-    preferredTools: ["readDocument", "listImageAssets", "readPage", "writeDocument"],
+    preferredTools: withSysmlPreferredTools(["readDocument", "listImageAssets", "readPage", "writeDocument"]),
     prompt:
-      "Operate as the prompt engineer. Maintain the prompt metadoc with prompt rules and every generated page/panel prompt. Derive prompts from production, storyboard, and art supervision docs, and keep them mapped to page or panel ids.",
+      "Operate as the prompt engineer. Maintain the prompt metadoc with prompt rules and every generated page/panel prompt. Derive prompts from production, storyboard, art supervision docs, and any SysML constraints that govern prompt provenance, and keep prompts mapped to page or panel ids.",
     builtIn: true,
   },
 ];

@@ -429,6 +429,10 @@ export type AgentHarnessSnapshot = {
     assetsReadableOnDemand: boolean;
     documentsReadableOnDemand: boolean;
     documentsWritableOnDemand: boolean;
+    sysmlReadableOnDemand?: boolean;
+    sysmlWritableOnDemand?: boolean;
+    sysmlValidationProvider?: "official-pilot" | "unavailable";
+    sysmlStandardReference?: "overview-preloaded-topic-tools" | "unavailable";
     inlineDataUrlsRedactedFromPrompt: boolean;
     projectMutationPath: "commandPlanOnly";
     pagePanelBoundary?: string;

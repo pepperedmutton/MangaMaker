@@ -7,6 +7,7 @@
   "scripts": {
     "sync:fonts": "node scripts/syncBundledFonts.mjs",
     "sync:projects": "node scripts/forceProjectsFromGit.mjs",
+    "setup:sysml": "node scripts/setupSysmlPilot.mjs",
     "predev": "pnpm sync:fonts",
     "prebuild": "pnpm sync:fonts",
     "dev": "node scripts/launch.mjs --dev-server",

@@ -143,6 +143,7 @@ describe("agent harness", () => {
       "readProjectSummary",
       "listPages",
       "inspectSelection",
+      "readSysmlStandardOverview",
     ]);
     expect(pageReads).toHaveLength(0);
     expect(listPages?.result).toEqual([
@@ -205,7 +206,21 @@ describe("agent harness", () => {
       assetsReadableOnDemand: true,
       documentsReadableOnDemand: true,
       documentsWritableOnDemand: true,
+      sysmlReadableOnDemand: true,
+      sysmlWritableOnDemand: true,
+      sysmlValidationProvider: "official-pilot",
+      sysmlStandardReference: "overview-preloaded-topic-tools",
       projectMutationPath: "commandPlanOnly",
+    });
+    expect(harness.initialToolResults.find((entry) => entry.toolName === "readSysmlStandardOverview")?.result).toMatchObject({
+      version: expect.stringContaining("SysML v2"),
+      topics: expect.arrayContaining([
+        expect.objectContaining({ id: "pilot-validation-workflow" }),
+      ]),
+    });
+    expect(harness.tools.find((entry) => entry.name === "readSysmlStandardReference")).toMatchObject({
+      mutatesProject: false,
+      requiresConfirmation: false,
     });
     expect(harness.tools.find((entry) => entry.name === "proposeCommandPlan")).toMatchObject({
       mutatesProject: true,
@@ -221,6 +236,32 @@ describe("agent harness", () => {
       inputSchema: expect.objectContaining({
         required: expect.arrayContaining(["operationId"]),
       }),
+    });
+    expect(harness.tools.find((entry) => entry.name === "writeSysmlFile")).toMatchObject({
+      mutatesProject: true,
+      requiresConfirmation: false,
+      inputSchema: expect.objectContaining({
+        required: expect.arrayContaining(["operationId", "path", "content"]),
+      }),
+    });
+    expect(harness.tools.find((entry) => entry.name === "validateSysmlModel")).toMatchObject({
+      mutatesProject: false,
+      requiresConfirmation: false,
+    });
+  });
+
+  it("lets the model read focused SysML standard reference topics", async () => {
+    const reference = await executeAgentHarnessToolCall(context, {
+      toolName: "readSysmlStandardReference",
+      input: { topic: "requirements-verification-traceability" },
+    });
+
+    expect(reference.result).toMatchObject({
+      id: "requirements-verification-traceability",
+      title: expect.stringContaining("Requirements"),
+      guidance: expect.arrayContaining([
+        expect.stringContaining("requirement"),
+      ]),
     });
   });
 

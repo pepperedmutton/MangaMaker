@@ -27,6 +27,7 @@ import { Inspector } from "./Inspector";
 import { FirstRunGuide } from "./Onboarding";
 import { RibbonBar } from "./RibbonBar";
 import { Sidebar } from "./Sidebar";
+import { SysmlWorkspace } from "./SysmlWorkspace";
 import { WelcomeScreen } from "./WelcomeScreen";
 
 const isTextEditingElement = (target: EventTarget | null) => {
@@ -188,7 +189,7 @@ export const App = () => {
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(220);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(300);
   const [rightSidebarMode, setRightSidebarMode] = useState<"inspector" | "agent">("inspector");
-  const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "docs">("canvas");
+  const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "docs" | "sysml">("canvas");
   const [documentManifest, setDocumentManifest] = useState<AgentDocumentManifest | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [isLayoutResizing, setIsLayoutResizing] = useState(false);
@@ -468,7 +469,7 @@ export const App = () => {
     await handleSaveProject();
   };
 
-  const handleSetWorkspaceMode = (mode: "canvas" | "docs") => {
+  const handleSetWorkspaceMode = (mode: "canvas" | "docs" | "sysml") => {
     setWorkspaceMode(mode);
   };
 
@@ -956,6 +957,12 @@ export const App = () => {
                   onSelectDocument={setSelectedDocumentId}
                   onDocumentSaved={refreshProjectDocuments}
                 />
+              </div>
+              <div
+                className={`workspace-pane${workspaceMode === "sysml" ? " active" : ""}`}
+                aria-hidden={workspaceMode !== "sysml"}
+              >
+                <SysmlWorkspace projectId={project.id} />
               </div>
             </div>
             <div className="status-bar">

@@ -411,6 +411,12 @@ describe("agent response validation", () => {
           { toolName: "listDocuments", input: {}, reason: "Inspect durable docs" },
           { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
           { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
+          { toolName: "readSysmlStandardOverview", input: {}, reason: "Inspect SysML reference index" },
+          {
+            toolName: "readSysmlStandardReference",
+            input: { topic: "pilot-validation-workflow" },
+            reason: "Inspect SysML validation workflow",
+          },
           { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
           { toolName: "renderPanel", input: { pageId: "p1", panelId: "panel-1", detail: "preview" }, reason: "Inspect one panel" },
           {
@@ -428,6 +434,12 @@ describe("agent response validation", () => {
       { toolName: "listDocuments", input: {}, reason: "Inspect durable docs" },
       { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
       { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
+      { toolName: "readSysmlStandardOverview", input: {}, reason: "Inspect SysML reference index" },
+      {
+        toolName: "readSysmlStandardReference",
+        input: { topic: "pilot-validation-workflow" },
+        reason: "Inspect SysML validation workflow",
+      },
       { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
       { toolName: "renderPanel", input: { pageId: "p1", panelId: "panel-1", detail: "preview" }, reason: "Inspect one panel" },
       {
@@ -452,6 +464,14 @@ describe("agent response validation", () => {
         pendingCommandPlan: null,
       }),
     ).toThrow(/requestedToolCalls\[0\] renderPage: detail/);
+
+    expect(() =>
+      validateAgentChatResponse({
+        message: "Bad SysML topic",
+        requestedToolCalls: [{ toolName: "readSysmlStandardReference", input: { topic: "not-a-topic" } }],
+        pendingCommandPlan: null,
+      }),
+    ).toThrow(/readSysmlStandardReference: topic/);
 
     expect(
       validateAgentChatResponse({

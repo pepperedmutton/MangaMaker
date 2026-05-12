@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { commandRegistry } from "../commands/registry";
+import { SYSML_STANDARD_REFERENCE_TOPIC_IDS } from "../sysml/standardReference";
 import { commandPlanRequiresConfirmation, getCommandDangerLevel } from "./commandManifest";
 import { agentDocumentStatusSchema } from "./documentSchema";
 import {
@@ -88,6 +89,13 @@ const allowedToolNames = new Set([
   "searchDocuments",
   "writeDocument",
   "validateDocumentAgainstProject",
+  "readSysmlStandardOverview",
+  "readSysmlStandardReference",
+  "getSysmlStatus",
+  "listSysmlFiles",
+  "readSysmlFile",
+  "writeSysmlFile",
+  "validateSysmlModel",
   "proposeCommandPlan",
 ]);
 
@@ -225,6 +233,36 @@ const validateRequestedToolCalls = (
           summary: z.string().optional(),
           content: z.string(),
         }).strict().parse(call.input);
+        return { toolName: call.toolName, input: parsed, reason: call.reason };
+      }
+      if (call.toolName === "readSysmlStandardOverview") {
+        const parsed = z.object({}).strict().parse(call.input ?? {});
+        return { toolName: call.toolName, input: parsed, reason: call.reason };
+      }
+      if (call.toolName === "readSysmlStandardReference") {
+        const parsed = z.object({
+          topic: z.enum(SYSML_STANDARD_REFERENCE_TOPIC_IDS),
+        }).strict().parse(call.input);
+        return { toolName: call.toolName, input: parsed, reason: call.reason };
+      }
+      if (call.toolName === "readSysmlFile") {
+        const parsed = z.object({
+          path: z.string().min(1),
+        }).strict().parse(call.input);
+        return { toolName: call.toolName, input: parsed, reason: call.reason };
+      }
+      if (call.toolName === "writeSysmlFile") {
+        const parsed = z.object({
+          operationId: z.string().min(1),
+          path: z.string().min(1),
+          content: z.string(),
+        }).strict().parse(call.input);
+        return { toolName: call.toolName, input: parsed, reason: call.reason };
+      }
+      if (call.toolName === "validateSysmlModel") {
+        const parsed = z.object({
+          paths: z.array(z.string().min(1)).optional(),
+        }).strict().parse(call.input ?? {});
         return { toolName: call.toolName, input: parsed, reason: call.reason };
       }
       if (call.toolName === "proposeCommandPlan") {

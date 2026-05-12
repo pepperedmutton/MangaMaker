@@ -16,6 +16,18 @@ import {
   writeProjectDocument,
 } from "./documents";
 import {
+  getSysmlConfig,
+  listSysmlProjectFiles,
+  readSysmlProjectFile,
+  validateSysmlProject,
+  writeSysmlProjectFile,
+} from "../sysml/client";
+import {
+  SYSML_STANDARD_REFERENCE_TOPIC_IDS,
+  getSysmlStandardOverview,
+  readSysmlStandardReferenceTopic,
+} from "../sysml/standardReference";
+import {
   AGENT_MAX_BATCH_READ_PAGES,
   AGENT_MAX_BATCH_RENDER_PAGES,
 } from "./toolLimits";
@@ -648,6 +660,89 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     requiresConfirmation: false,
   }),
   tool({
+    name: "readSysmlStandardOverview",
+    description: "Read the built-in SysML v2/KerML/Pilot reference overview and topic index. This short overview is already supplied in the initial harness.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputDescription: "Mandatory SysML harness rules and available reference topics.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "readSysmlStandardReference",
+    description: "Read one built-in SysML v2 reference topic before writing or repairing unfamiliar MBSE model semantics.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["topic"],
+      properties: {
+        topic: { type: "string", enum: [...SYSML_STANDARD_REFERENCE_TOPIC_IDS] },
+      },
+    },
+    outputDescription: "Focused SysML v2/KerML/Pilot guidance for the requested topic.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "getSysmlStatus",
+    description: "Read whether the official SysML v2 Pilot validator is configured. Use this before SysML/MBSE work if no SysML status is already present.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputDescription: "SysML backend status, official Pilot availability, and configuration reason if unavailable.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "listSysmlFiles",
+    description: "List project SysML/KerML model files. This does not read full file contents.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputDescription: "SysML file paths, sizes, hashes, and update times.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "readSysmlFile",
+    description: "Read one SysML/KerML model file by path when the model content is needed for MBSE reasoning or editing.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      properties: { path: { type: "string" } },
+    },
+    outputDescription: "One SysML file with content and hash.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "writeSysmlFile",
+    description: "Create or update one SysML/KerML model file. Use this for durable MBSE model changes, then validateSysmlModel.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "path", "content"],
+      properties: {
+        operationId: { type: "string" },
+        path: { type: "string" },
+        content: { type: "string" },
+      },
+    },
+    outputDescription: "Saved SysML file metadata, idempotency status, changed flag, and content hash.",
+    mutatesProject: true,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "validateSysmlModel",
+    description: "Validate the project's SysML model with the official SysML v2 Pilot implementation. Optionally validate only named paths; omit paths for the full model.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        paths: { type: "array", items: { type: "string" } },
+      },
+    },
+    outputDescription: "Official Pilot validation result, diagnostics, source hash, and validated files.",
+    mutatesProject: false,
+    requiresConfirmation: false,
+  }),
+  tool({
     name: "proposeCommandPlan",
     description: "Prepare a command plan for validation and possible execution by MangaMaker. This is the only mutation path available to the Agent.",
     inputSchema: {
@@ -714,6 +809,7 @@ export const buildAgentHarness = (
           }
         : null,
     }),
+    result("readSysmlStandardOverview", {}, getSysmlStandardOverview()),
   ];
   return {
     mode: "tool-harness",
@@ -735,6 +831,10 @@ export const buildAgentHarness = (
       assetsReadableOnDemand: true,
       documentsReadableOnDemand: true,
       documentsWritableOnDemand: true,
+      sysmlReadableOnDemand: true,
+      sysmlWritableOnDemand: true,
+      sysmlValidationProvider: "official-pilot",
+      sysmlStandardReference: "overview-preloaded-topic-tools",
       inlineDataUrlsRedactedFromPrompt: true,
       projectMutationPath: "commandPlanOnly",
       pagePanelBoundary:
@@ -1025,6 +1125,50 @@ export const executeAgentHarnessToolCall = async (
   }
   if (call.toolName === "validateDocumentAgainstProject") {
     return result(call.toolName, call.input, await validateDocumentAgainstProject(context, call.input as { documentId?: string }));
+  }
+  if (call.toolName === "readSysmlStandardOverview") {
+    return result(call.toolName, call.input, getSysmlStandardOverview());
+  }
+  if (call.toolName === "readSysmlStandardReference") {
+    const topic = (call.input as { topic?: string }).topic ?? "";
+    if (!SYSML_STANDARD_REFERENCE_TOPIC_IDS.includes(topic as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number])) {
+      throw new Error(`Unsupported SysML standard reference topic: ${topic}`);
+    }
+    return result(
+      call.toolName,
+      call.input,
+      readSysmlStandardReferenceTopic(topic as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number]),
+    );
+  }
+  if (call.toolName === "getSysmlStatus") {
+    return result(call.toolName, call.input, await getSysmlConfig());
+  }
+  if (call.toolName === "listSysmlFiles") {
+    return result(call.toolName, call.input, await listSysmlProjectFiles(context.project.id));
+  }
+  if (call.toolName === "readSysmlFile") {
+    const filePath = (call.input as { path?: string }).path ?? "";
+    return result(call.toolName, call.input, await readSysmlProjectFile(context.project.id, filePath));
+  }
+  if (call.toolName === "writeSysmlFile") {
+    const input = call.input as { operationId?: string; path?: string; content?: string };
+    return result(call.toolName, call.input, await writeSysmlProjectFile(context.project.id, {
+      path: input.path ?? "",
+      content: input.content ?? "",
+      operationId: input.operationId,
+    }));
+  }
+  if (call.toolName === "validateSysmlModel") {
+    const paths = Array.isArray((call.input as { paths?: unknown }).paths)
+      ? ((call.input as { paths: unknown[] }).paths).filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const files = paths.length > 0
+      ? await Promise.all(paths.map((filePath) => readSysmlProjectFile(context.project.id, filePath).then((file) => ({
+          path: file.path,
+          content: file.content,
+        }))))
+      : undefined;
+    return result(call.toolName, call.input, await validateSysmlProject(context.project.id, files));
   }
   if (call.toolName === "proposeCommandPlan") {
     return result(call.toolName, call.input, {

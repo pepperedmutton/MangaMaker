@@ -66,6 +66,22 @@ import {
   isAgentMutationCompletionClaim,
   sanitizeAgentConversationMessages,
 } from "./src/agent/conversationSanitizer";
+import { resolveSysmlPilotRuntimeConfig, toPublicSysmlConfig } from "./src/sysml/config";
+import { validateSysmlWithPilot } from "./src/sysml/pilotAdapter";
+import {
+  deleteSysmlFile,
+  ensureSysmlRepository,
+  listSysmlFiles,
+  readAllSysmlValidationFiles,
+  readSysmlFile,
+  writeSysmlFile,
+} from "./src/sysml/repository";
+import {
+  getSysmlStandardOverview,
+  readSysmlStandardReferenceTopic,
+  SYSML_STANDARD_REFERENCE_TOPIC_IDS,
+} from "./src/sysml/standardReference";
+import type { SysmlValidationFileInput } from "./src/sysml/types";
 
 const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projects";
 const PROJECT_META_FILE = ".latest_project";
@@ -81,6 +97,7 @@ const AGENT_RUNS_DIR = "agent-runs";
 const AGENT_RUN_FILE = "run.json";
 const API_BASE = "/__mangamaker__/persistence";
 const AGENT_API_BASE = "/__mangamaker__/agent";
+const SYSML_API_BASE = "/__mangamaker__/sysml";
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const AGENT_TEST_MODE = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
@@ -2153,6 +2170,13 @@ const SERVER_EXECUTABLE_AGENT_TOOLS = new Set([
   "searchDocuments",
   "writeDocument",
   "validateDocumentAgainstProject",
+  "readSysmlStandardOverview",
+  "readSysmlStandardReference",
+  "getSysmlStatus",
+  "listSysmlFiles",
+  "readSysmlFile",
+  "writeSysmlFile",
+  "validateSysmlModel",
   "proposeCommandPlan",
 ]);
 
@@ -2733,6 +2757,49 @@ const executeServerAgentToolCall = async (
       call.input,
       await validateAgentDocumentAgainstPayloadProject(projectId, context, { documentId: asString(input.documentId) }),
     );
+  }
+  if (call.toolName === "readSysmlStandardOverview") {
+    return createAgentHarnessToolResult(call.toolName, call.input, getSysmlStandardOverview());
+  }
+  if (call.toolName === "readSysmlStandardReference") {
+    const topicId = asString(input.topic);
+    if (!SYSML_STANDARD_REFERENCE_TOPIC_IDS.includes(topicId as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number])) {
+      throw new Error(`Unsupported SysML standard reference topic: ${topicId}`);
+    }
+    return createAgentHarnessToolResult(
+      call.toolName,
+      call.input,
+      readSysmlStandardReferenceTopic(topicId as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number]),
+    );
+  }
+  if (call.toolName === "getSysmlStatus") {
+    return createAgentHarnessToolResult(call.toolName, call.input, toPublicSysmlConfig(resolveSysmlPilotRuntimeConfig()));
+  }
+  if (call.toolName === "listSysmlFiles") {
+    return createAgentHarnessToolResult(call.toolName, call.input, await ensureSysmlRepository(projectId));
+  }
+  if (call.toolName === "readSysmlFile") {
+    return createAgentHarnessToolResult(call.toolName, call.input, await readSysmlFile(projectId, asString(input.path)));
+  }
+  if (call.toolName === "writeSysmlFile") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    return createAgentHarnessToolResult(call.toolName, call.input, await writeSysmlFile(projectId, {
+      path: asString(input.path),
+      content: typeof input.content === "string" ? input.content : "",
+      operationId,
+    }));
+  }
+  if (call.toolName === "validateSysmlModel") {
+    const requestedPaths = Array.isArray(input.paths)
+      ? input.paths.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      : [];
+    const files = requestedPaths.length > 0
+      ? await Promise.all(requestedPaths.map((entry) => readSysmlFile(projectId, entry).then((file) => ({
+          path: file.path,
+          content: file.content,
+        }))))
+      : await readAllSysmlValidationFiles(projectId);
+    return createAgentHarnessToolResult(call.toolName, call.input, await validateSysmlWithPilot(files));
   }
   if (call.toolName === "proposeCommandPlan") {
     return createAgentHarnessToolResult(call.toolName, call.input, {
@@ -3590,6 +3657,11 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   const hasDocumentRead = harnessResults.some((entry) => entry.toolName === "readDocument");
   const hasDocumentWrite = harnessResults.some((entry) => entry.toolName === "writeDocument");
   const hasDocumentWriteRequiredNotice = harnessResults.some((entry) => entry.toolName === "documentWriteRequired");
+  const hasSysmlReference = harnessResults.some((entry) => entry.toolName === "readSysmlStandardReference");
+  const hasSysmlStatus = harnessResults.some((entry) => entry.toolName === "getSysmlStatus");
+  const hasSysmlList = harnessResults.some((entry) => entry.toolName === "listSysmlFiles");
+  const hasSysmlWrite = harnessResults.some((entry) => entry.toolName === "writeSysmlFile");
+  const hasSysmlValidation = harnessResults.some((entry) => entry.toolName === "validateSysmlModel");
   const hasMissingDocumentWriteRepairNotice =
     hasDocumentWriteRequiredNotice ||
     normalizedUserHistory.includes("previous response did not execute a verified writedocument") ||
@@ -3634,6 +3706,104 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
           reason: "Persist the metadoc edit that the previous response claimed without a tool call.",
         },
       ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (normalized.includes("sysml") || normalized.includes("mbse")) {
+    if (!hasSysmlReference) {
+      return {
+        message: "I need to load the relevant SysML v2 harness reference before doing MBSE work.",
+        requestedToolCalls: [
+          {
+            toolName: "readSysmlStandardReference",
+            input: { topic: "pilot-validation-workflow" },
+            reason: "Use the built-in SysML v2/Pilot workflow reference before reading, writing, or validating the model.",
+          },
+        ],
+        pendingCommandPlan: null,
+        usedVision: hasVisionInput,
+      };
+    }
+    if (!hasSysmlStatus) {
+      return {
+        message: "I need to check the SysML v2 Pilot validator status first.",
+        requestedToolCalls: [
+          {
+            toolName: "getSysmlStatus",
+            input: {},
+            reason: "Confirm that the official SysML v2 Pilot validator is configured.",
+          },
+        ],
+        pendingCommandPlan: null,
+        usedVision: hasVisionInput,
+      };
+    }
+    if (!hasSysmlList) {
+      return {
+        message: "I need to list the project SysML model files.",
+        requestedToolCalls: [
+          {
+            toolName: "listSysmlFiles",
+            input: {},
+            reason: "Find project SysML/KerML model files before reading or validating.",
+          },
+        ],
+        pendingCommandPlan: null,
+        usedVision: hasVisionInput,
+      };
+    }
+    if ((normalized.includes("write") || normalized.includes("edit")) && !hasSysmlWrite) {
+      return {
+        message: "I will write a small valid SysML MBSE sample file, then validate the model.",
+        requestedToolCalls: [
+          {
+            toolName: "writeSysmlFile",
+            input: {
+              operationId: "test-agent-write-sysml-mbse-sample",
+              path: "samples/test-agent-mbse.sysml",
+              content: [
+                "package TestAgentMbseSample {",
+                "\tprivate import Parts::*;",
+                "\tprivate import Requirements::*;",
+                "\tprivate import MangaMakerDomain::*;",
+                "",
+                "\tpart testAgentSample: MangaProject {",
+                "\t\tpart page001: ComicPage;",
+                "\t}",
+                "",
+                "\trequirement def TestAgentTraceabilityRequirement :> MangaRequirement;",
+                "}",
+                "",
+              ].join("\n"),
+            },
+            reason: "Persist a bounded SysML MBSE model update.",
+          },
+        ],
+        pendingCommandPlan: null,
+        usedVision: hasVisionInput,
+      };
+    }
+    if (!hasSysmlValidation) {
+      return {
+        message: "I will validate the SysML model with the official Pilot.",
+        requestedToolCalls: [
+          {
+            toolName: "validateSysmlModel",
+            input: {},
+            reason: "Validate the project SysML model after listing or editing.",
+          },
+        ],
+        pendingCommandPlan: null,
+        usedVision: hasVisionInput,
+      };
+    }
+    return {
+      message: hasSysmlWrite
+        ? "I wrote the SysML MBSE model update and ran official Pilot validation."
+        : "I ran official Pilot validation for the project SysML model.",
+      requestedToolCalls: [],
       pendingCommandPlan: null,
       usedVision: hasVisionInput,
     };
@@ -5466,10 +5636,145 @@ const attachWebAgentMiddleware = (
   middlewares.use(handler);
 };
 
+const getRequiredProjectId = (url: URL) => {
+  const projectId = url.searchParams.get("projectId")?.trim();
+  if (!projectId) {
+    throw new Error("projectId query parameter is required.");
+  }
+  return projectId;
+};
+
+const readSysmlFileRequestBody = async (req: IncomingMessage) => {
+  const body = await readJsonBody<{
+    projectId?: unknown;
+    path?: unknown;
+    content?: unknown;
+    operationId?: unknown;
+  }>(req);
+  if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
+    throw new Error("projectId is required.");
+  }
+  if (typeof body.path !== "string" || body.path.trim().length === 0) {
+    throw new Error("path is required.");
+  }
+  return {
+    projectId: body.projectId.trim(),
+    path: body.path.trim(),
+    content: typeof body.content === "string" ? body.content : "",
+    operationId: typeof body.operationId === "string" ? body.operationId.trim() : undefined,
+  };
+};
+
+const attachWebSysmlMiddleware = (
+  middlewares: { use: (handler: (req: IncomingMessage, res: ServerResponse, next: () => void) => void) => void },
+) => {
+  const handler = async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    const method = req.method?.toUpperCase() ?? "GET";
+    const host = req.headers.host;
+    const url = new URL(req.url ?? "/", host ? `http://${host}` : "http://localhost");
+    const pathname = url.pathname;
+
+    if (!pathname.startsWith(SYSML_API_BASE)) {
+      next();
+      return;
+    }
+
+    try {
+      if (method === "GET" && pathname === `${SYSML_API_BASE}/config`) {
+        json(res, 200, toPublicSysmlConfig(resolveSysmlPilotRuntimeConfig()));
+        return;
+      }
+
+      if (method === "POST" && pathname === `${SYSML_API_BASE}/init`) {
+        const body = await readJsonBody<{ projectId?: unknown }>(req);
+        if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
+          json(res, 400, { error: "projectId is required." });
+          return;
+        }
+        json(res, 200, await ensureSysmlRepository(body.projectId.trim()));
+        return;
+      }
+
+      if (method === "GET" && pathname === `${SYSML_API_BASE}/files`) {
+        const projectId = getRequiredProjectId(url);
+        const shouldInitialize = url.searchParams.get("init") !== "0";
+        json(res, 200, shouldInitialize ? await ensureSysmlRepository(projectId) : await listSysmlFiles(projectId));
+        return;
+      }
+
+      if (method === "GET" && pathname === `${SYSML_API_BASE}/file`) {
+        const projectId = getRequiredProjectId(url);
+        const filePath = url.searchParams.get("path")?.trim();
+        if (!filePath) {
+          json(res, 400, { error: "path query parameter is required." });
+          return;
+        }
+        json(res, 200, await readSysmlFile(projectId, filePath));
+        return;
+      }
+
+      if (method === "POST" && pathname === `${SYSML_API_BASE}/file`) {
+        const body = await readSysmlFileRequestBody(req);
+        json(res, 200, await writeSysmlFile(body.projectId, body));
+        return;
+      }
+
+      if (method === "DELETE" && pathname === `${SYSML_API_BASE}/file`) {
+        const projectId = getRequiredProjectId(url);
+        const filePath = url.searchParams.get("path")?.trim();
+        if (!filePath) {
+          json(res, 400, { error: "path query parameter is required." });
+          return;
+        }
+        json(res, 200, await deleteSysmlFile(projectId, filePath));
+        return;
+      }
+
+      if (method === "POST" && pathname === `${SYSML_API_BASE}/validate`) {
+        const body = await readJsonBody<{
+          projectId?: unknown;
+          files?: unknown;
+        }>(req);
+        const projectId = typeof body.projectId === "string" ? body.projectId.trim() : "";
+        if (!projectId) {
+          json(res, 400, { error: "projectId is required." });
+          return;
+        }
+        const files: SysmlValidationFileInput[] = Array.isArray(body.files)
+          ? body.files
+              .map((entry): SysmlValidationFileInput | null => {
+                if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                  return null;
+                }
+                const record = entry as Record<string, unknown>;
+                return typeof record.path === "string" && typeof record.content === "string"
+                  ? { path: record.path, content: record.content }
+                  : null;
+              })
+              .filter((entry): entry is SysmlValidationFileInput => entry !== null)
+          : await readAllSysmlValidationFiles(projectId);
+        json(res, 200, await validateSysmlWithPilot(files));
+        return;
+      }
+
+      text(res, 404, "Not Found");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      json(res, 500, { error: message });
+    }
+  };
+
+  middlewares.use(handler);
+};
+
 const requestExpectsJson = (req: IncomingMessage, pathname: string) => {
   const accept = String(req.headers.accept ?? "").toLowerCase();
   const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
-  return pathname.startsWith(API_BASE) || pathname.startsWith(AGENT_API_BASE) || accept.includes("application/json") || contentType.includes("application/json");
+  return pathname.startsWith(API_BASE) ||
+    pathname.startsWith(AGENT_API_BASE) ||
+    pathname.startsWith(SYSML_API_BASE) ||
+    accept.includes("application/json") ||
+    contentType.includes("application/json");
 };
 
 const parseCookies = (req: IncomingMessage) => {
@@ -6028,8 +6333,18 @@ const webAgentPlugin = () => ({
   },
 });
 
+const webSysmlPlugin = () => ({
+  name: "mangamaker-sysml-pilot",
+  configureServer(server: ViteDevServer) {
+    attachWebSysmlMiddleware(server.middlewares);
+  },
+  configurePreviewServer(server: PreviewServer) {
+    attachWebSysmlMiddleware(server.middlewares);
+  },
+});
+
 export default defineConfig({
-  plugins: [react(), webAuthPlugin(), webAgentPlugin(), webPersistencePlugin()],
+  plugins: [react(), webAuthPlugin(), webSysmlPlugin(), webAgentPlugin(), webPersistencePlugin()],
   server: {
     allowedHosts: ALLOWED_HOSTS,
   },
