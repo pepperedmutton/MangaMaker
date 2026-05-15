@@ -99,6 +99,8 @@ import {
 import { compileAgentCurrentTaskPacket, type AgentCurrentTaskPacket } from "./src/agent/contextCompiler";
 
 const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projects";
+const PROJECT_SYNC_TOKEN = process.env.MANGAMAKER_PROJECT_SYNC_TOKEN?.trim() || "";
+const PROJECT_SYNC_TOKEN_HEADER = "x-mangamaker-sync-token";
 const PROJECT_META_FILE = ".latest_project";
 const PROJECT_JSON_FILE = "project.json";
 const PROJECT_ASSETS_DIR = "assets";
@@ -431,6 +433,120 @@ const resolvePathInsideRoot = (root: string, relative: string) => {
     return null;
   }
   return candidate;
+};
+
+const normalizeProjectSyncRelativePath = (value: string) => {
+  const normalized = path.posix.normalize(value.trim().replace(/\\/g, "/").replace(/^\/+/, ""));
+  if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+    return null;
+  }
+  if (normalized.includes("\0")) {
+    return null;
+  }
+  return normalized;
+};
+
+const timingSafeStringEqual = (left: string, right: string) => {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(leftBuffer, rightBuffer);
+};
+
+const getRequestHeader = (req: IncomingMessage, headerName: string) => {
+  const value = req.headers[headerName.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+  return typeof value === "string" ? value : "";
+};
+
+const hasValidProjectSyncToken = (req: IncomingMessage) =>
+  Boolean(PROJECT_SYNC_TOKEN) &&
+  timingSafeStringEqual(getRequestHeader(req, PROJECT_SYNC_TOKEN_HEADER).trim(), PROJECT_SYNC_TOKEN);
+
+const isProjectSyncApiPath = (pathname: string) => pathname.startsWith(`${API_BASE}/project-sync`);
+
+const removeProjectsRootContents = async (root: string) => {
+  const entries = await fsp.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    await fsp.rm(path.join(root, entry.name), { recursive: true, force: true });
+  }
+};
+
+const writeRequestBodyToFile = async (req: IncomingMessage, filePath: string) => {
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  const tempFile = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.upload`,
+  );
+  let bytes = 0;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs.createWriteStream(tempFile);
+      req.on("data", (chunk: Buffer | string) => {
+        bytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+      });
+      req.on("error", reject);
+      stream.on("error", reject);
+      stream.on("finish", resolve);
+      req.pipe(stream);
+    });
+    await fsp.rename(tempFile, filePath);
+  } catch (error) {
+    await fsp.rm(tempFile, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  return bytes;
+};
+
+const collectProjectsSummary = async (root: string) => {
+  let fileCount = 0;
+  let totalBytes = 0;
+  const projects: string[] = [];
+
+  const visit = async (directory: string, depth: number) => {
+    const entries = await fsp.readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (depth === 0) {
+          const projectFile = path.join(entryPath, PROJECT_JSON_FILE);
+          const projectStats = await fsp.stat(projectFile).catch(() => null);
+          if (projectStats?.isFile()) {
+            projects.push(entry.name);
+          }
+        }
+        await visit(entryPath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const stats = await fsp.stat(entryPath).catch(() => null);
+      if (!stats?.isFile()) {
+        continue;
+      }
+      fileCount += 1;
+      totalBytes += stats.size;
+    }
+  };
+
+  await visit(root, 0);
+  const latestProject = await fsp.readFile(path.join(root, PROJECT_META_FILE), "utf8")
+    .then((value) => value.trim())
+    .catch(() => null);
+
+  projects.sort((left, right) => left.localeCompare(right));
+  return {
+    fileCount,
+    totalBytes,
+    projectCount: projects.length,
+    projects,
+    latestProject,
+  };
 };
 
 const copyReferencedProjectAssets = async (
@@ -7506,6 +7622,11 @@ const attachWebAuthMiddleware = (
       return;
     }
 
+    if (isProjectSyncApiPath(pathname) && hasValidProjectSyncToken(req)) {
+      next();
+      return;
+    }
+
     if (AUTH_DISABLED) {
       next();
       return;
@@ -7616,6 +7737,59 @@ const attachWebPersistenceMiddleware = (
 
       if (method === "GET" && pathname === `${API_BASE}/health`) {
         json(res, 200, { ok: true });
+        return;
+      }
+
+      if (isProjectSyncApiPath(pathname)) {
+        if (!hasValidProjectSyncToken(req)) {
+          json(res, 403, { error: "Project sync token is missing or invalid." });
+          return;
+        }
+
+        if (method === "GET" && pathname === `${API_BASE}/project-sync/status`) {
+          json(res, 200, {
+            enabled: Boolean(PROJECT_SYNC_TOKEN),
+            root,
+            summary: await collectProjectsSummary(root),
+          });
+          return;
+        }
+
+        if (method === "POST" && pathname === `${API_BASE}/project-sync/begin`) {
+          await removeProjectsRootContents(root);
+          json(res, 200, {
+            ok: true,
+            cleared: true,
+            summary: await collectProjectsSummary(root),
+          });
+          return;
+        }
+
+        if (method === "PUT" && pathname === `${API_BASE}/project-sync/file`) {
+          const relativePath = normalizeProjectSyncRelativePath(url.searchParams.get("path") ?? "");
+          if (!relativePath) {
+            json(res, 400, { error: "A safe relative path query parameter is required." });
+            return;
+          }
+          const targetPath = resolvePathInsideRoot(root, relativePath);
+          if (!targetPath) {
+            json(res, 403, { error: "File path is outside the projects root." });
+            return;
+          }
+          const bytes = await writeRequestBodyToFile(req, targetPath);
+          json(res, 200, { ok: true, path: relativePath, bytes });
+          return;
+        }
+
+        if (method === "POST" && pathname === `${API_BASE}/project-sync/finish`) {
+          json(res, 200, {
+            ok: true,
+            summary: await collectProjectsSummary(root),
+          });
+          return;
+        }
+
+        text(res, 404, "Not Found");
         return;
       }
 
