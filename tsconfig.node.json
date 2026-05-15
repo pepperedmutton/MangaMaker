@@ -13,19 +13,16 @@
     "vite.config.ts",
     "playwright.config.ts",
     "src/agent/documentSchema.ts",
+    "src/agent/contextCompiler.ts",
     "src/agent/contextWindow.ts",
     "src/agent/conversationSanitizer.ts",
+    "src/agent/documentEditTools.ts",
     "src/agent/openRouterProviderRouting.ts",
     "src/agent/openRouterResponse.ts",
+    "src/agent/documentWriteScope.ts",
     "src/agent/roles.ts",
     "src/agent/systemPrompt.ts",
     "src/agent/toolCallPolicy.ts",
-    "src/agent/toolLimits.ts",
-    "src/sysml/config.ts",
-    "src/sysml/mangaModel.ts",
-    "src/sysml/pilotAdapter.ts",
-    "src/sysml/repository.ts",
-    "src/sysml/standardReference.ts",
-    "src/sysml/types.ts"
+    "src/agent/toolLimits.ts"
   ]
 }

@@ -66,6 +66,10 @@ export type AgentDefaultDocumentDefinition = {
   body: string;
 };
 
+export const AGENT_PRIME_DIRECTIVE_DOCUMENT_ID = "prime-directive";
+export const AGENT_PRIME_DIRECTIVE_DOCUMENT_TITLE = "Prime Directive";
+export const AGENT_PRIME_DIRECTIVE_DOCUMENT_PATH = "docs/PrimeDirective.md";
+
 const WINDOWS_RESERVED_FILE_STEMS = new Set([
   "con",
   "prn",
@@ -112,29 +116,108 @@ export const createAgentRoleMetadocDocumentId = (roleName: string, fallback = "r
 export const createAgentRoleMetadocPath = (roleName: string, fallback = "role") =>
   `docs/roles/${normalizeAgentRoleMetadocFileStem(roleName, fallback)}.md`;
 
+export const createAgentRoleMetadocPathForRole = (
+  role: Pick<AgentRoleDefinition, "id" | "name">,
+) => createAgentRoleMetadocPath(role.name, role.id);
+
+export const normalizeAgentDocumentFileStem = (title: string, fallback = "document") =>
+  normalizeAgentRoleMetadocFileStem(title, fallback);
+
+export const createAgentDocumentFileNameFromTitle = (title: string, fallback = "document") =>
+  `${normalizeAgentDocumentFileStem(title, fallback)}.md`;
+
+export const normalizeAgentDocumentDirectoryPath = (directory: string, fallback = "general") => {
+  const trimmed = directory.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  const underDocs = trimmed.startsWith("docs/") ? trimmed : `docs/${trimmed || fallback}`;
+  const parts = underDocs
+    .split("/")
+    .filter((part) => part.length > 0 && part !== ".");
+  if (parts[0] !== "docs" || parts.some((part) => part === "..")) {
+    return `docs/${normalizeAgentDocumentFileStem(fallback, "general")}`;
+  }
+  return parts.join("/");
+};
+
+export const createUniqueAgentDocumentPathFromTitle = (
+  title: string,
+  directory: string,
+  documents: Array<Pick<AgentDocumentMeta, "id" | "path">>,
+  ignoreDocumentId?: string | null,
+  fallback = "document",
+) => {
+  const normalizedDirectory = normalizeAgentDocumentDirectoryPath(directory);
+  const stem = normalizeAgentDocumentFileStem(title, fallback);
+  const usedPaths = new Set(
+    documents
+      .filter((document) => document.id !== ignoreDocumentId)
+      .map((document) => document.path.toLowerCase()),
+  );
+  let candidate = `${normalizedDirectory}/${stem}.md`;
+  let index = 2;
+  while (usedPaths.has(candidate.toLowerCase())) {
+    candidate = `${normalizedDirectory}/${stem} ${index}.md`;
+    index += 1;
+  }
+  return candidate;
+};
+
 export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[] = [
+  {
+    id: AGENT_PRIME_DIRECTIVE_DOCUMENT_ID,
+    title: AGENT_PRIME_DIRECTIVE_DOCUMENT_TITLE,
+    path: AGENT_PRIME_DIRECTIVE_DOCUMENT_PATH,
+    summary:
+      "Project-level prime directive that defines the work type, target form, operating constraints, and all-Agent priorities.",
+    body: [
+      "# Prime Directive",
+      "",
+      "## Project Form",
+      "",
+      "Define what this project is. Examples: manga, CG set, illustrated light novel, storyboard pack, prompt book, or another concrete form.",
+      "",
+      "## Creator Intent",
+      "",
+      "State what the human creator wants this project to become, including audience, tone, format, and delivery target.",
+      "",
+      "## Agent Operating Directive",
+      "",
+      "- This document is project-level direction for every Agent role.",
+      "- Agents must interpret role metadocs, page evidence, scripts, prompts, and ordinary documents through this directive.",
+      "- If a role metadoc or chat instruction conflicts with this document, follow this document and report the conflict.",
+      "- Role metadocs are role prompts and role definitions only. Agent work output belongs in that role's working directory.",
+      "- Agents cannot rewrite this directive through Agent document tools.",
+      "",
+      "## Project-Specific Rules",
+      "",
+      "- Work type:",
+      "- Must preserve:",
+      "- Must avoid:",
+      "- Definition of done:",
+      "",
+    ].join("\n"),
+  },
   {
     id: "assistant-metadoc",
     title: "Assistant Metadoc",
     role: "assistant",
-    path: "docs/agent/assistant-metadoc.md",
-    summary: "General assistant role definition, operating notes, and durable assistance output.",
+    path: "docs/roles/Assistant.md",
+    summary: "General assistant role prompt/definition. Durable assistance output belongs under the assistant working directory.",
     body: [
       "# Assistant Metadoc",
       "",
       "## Role",
       "",
-      "Assist the human creator with project inspection, suggestions, bounded command plans, and durable documentation updates.",
+      "Assist the human creator with project inspection, suggestions, manual edit guidance, and durable documentation updates.",
       "",
       "## Operating Rules",
       "",
       "- Read only the documents, pages, assets, and renders needed for the current request.",
       "- Do not treat conversation context as production state.",
-      "- Record durable output in Markdown documents when it should survive the session.",
+      "- Record durable output under `docs/work/assistant/`.",
       "",
-      "## Output Log",
+      "## Context Priority",
       "",
-      "Record durable assistance notes here when no more specific role document owns them.",
+      "Pinned context is the system prompt, `docs/PrimeDirective.md`, and this role prompt. Working output can be evicted from the model window and reread on demand.",
       "",
     ].join("\n"),
   },
@@ -142,32 +225,20 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
     id: "production-plan",
     title: "Production Plan",
     role: "producer",
-    path: "docs/production/production-plan.md",
-    summary: "Producer-owned project goals, deliverables, constraints, and task order.",
+    path: "docs/roles/Producer.md",
+    summary: "Producer role prompt/definition. Producer output belongs under docs/work/producer/.",
     body: [
       "# Production Plan",
       "",
-      "## Goal",
+      "## Role",
       "",
-      "Describe the manga project's creative target, audience, format, and delivery scope.",
+      "Plan production work, scope, acceptance criteria, unresolved decisions, and task order for the human creator.",
       "",
-      "## Constraints",
+      "## Operating Rules",
       "",
-      "- Pages:",
-      "- Style:",
-      "- Deadline:",
-      "- Must not change:",
-      "",
-      "## Task Board",
-      "",
-      "- [ ] Story/script pass",
-      "- [ ] Storyboard pass",
-      "- [ ] Page execution",
-      "- [ ] Continuity review",
-      "",
-      "## Producer Notes",
-      "",
-      "Record decisions that other roles should treat as project-level direction.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      "- Put producer output under `docs/work/producer/`.",
+      "- Do not modify comic pages directly.",
       "",
     ].join("\n"),
   },
@@ -175,8 +246,8 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
     id: "story-architecture",
     title: "Story Architecture",
     role: "director",
-    path: "docs/director/story-architecture.md",
-    summary: "Director metadoc for story structure, page flow, supervision decisions, and scene intent.",
+    path: "docs/roles/Director.md",
+    summary: "Director role prompt/definition. Director output belongs under docs/work/director/.",
     body: [
       "# Story Architecture",
       "",
@@ -184,13 +255,11 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
       "",
       "The director supervises page intent, rhythm, shot order, reader attention, and whether execution serves the documented story plan.",
       "",
-      "## Story Structure",
+      "## Operating Rules",
       "",
-      "Record the current story architecture, scene order, dramatic beats, and unresolved direction questions.",
-      "",
-      "## Direction Notes",
-      "",
-      "Record durable direction decisions and review output here.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      "- Put story architecture, direction decisions, and supervision notes under `docs/work/director/`.",
+      "- Use page/render evidence only when it is needed for the current request.",
       "",
     ].join("\n"),
   },
@@ -198,22 +267,20 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
     id: "storyboard-overview",
     title: "Storyboard Overview",
     role: "storyboardDesigner",
-    path: "docs/storyboard/storyboard-overview.md",
-    summary: "Storyboard structure, page beats, panels, visual flow, and execution notes.",
+    path: "docs/roles/Storyboard Designer.md",
+    summary: "Storyboard designer role prompt/definition. Storyboard output belongs under docs/work/storyboardDesigner/.",
     body: [
       "# Storyboard Overview",
       "",
-      "## Page Beats",
+      "## Role",
       "",
-      "List each page's dramatic purpose and visual reading order.",
+      "Design page beats, panel structure, camera distance, composition, and reading flow.",
       "",
-      "## Panel Plan",
+      "## Operating Rules",
       "",
-      "Use one section per page. Include panel count, camera distance, composition, and important props.",
-      "",
-      "## Execution Notes",
-      "",
-      "When this document drives canvas edits, describe the intended panel/text/bubble changes clearly.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      "- Put storyboard output under `docs/work/storyboardDesigner/`.",
+      "- Record proposed page/panel edits in Markdown instead of executing them directly.",
       "",
     ].join("\n"),
   },
@@ -221,22 +288,20 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
     id: "script-dialogue",
     title: "Script and Dialogue",
     role: "scriptDesigner",
-    path: "docs/script/script-dialogue.md",
-    summary: "Dialogue, captions, narration, tone, and text placement notes.",
+    path: "docs/roles/Script Designer.md",
+    summary: "Script designer role prompt/definition. Script output belongs under docs/work/scriptDesigner/.",
     body: [
       "# Script and Dialogue",
       "",
-      "## Voice Rules",
+      "## Role",
       "",
-      "Define tone, speech style, and terminology.",
+      "Design dialogue, captions, narration, tone, and text-placement notes.",
       "",
-      "## Page Text",
+      "## Operating Rules",
       "",
-      "Use page and panel headings. Keep text short enough for manga bubbles.",
-      "",
-      "## Revision Notes",
-      "",
-      "Track wording decisions that should be reflected in text objects or bubbles.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      "- Put script and dialogue output under `docs/work/scriptDesigner/`.",
+      "- Keep manga text concise and map wording to page/panel/object ids when available.",
       "",
     ].join("\n"),
   },
@@ -244,18 +309,20 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
     id: "art-supervision",
     title: "Art Supervision",
     role: "artSupervisor",
-    path: "docs/art/art-supervision.md",
-    summary: "Visual style, rendering consistency, assets, and art-direction checks.",
+    path: "docs/roles/Art Supervisor.md",
+    summary: "Art supervisor role prompt/definition. Art supervision output belongs under docs/work/artSupervisor/.",
     body: [
       "# Art Supervision",
       "",
-      "## Style Guide",
+      "## Role",
       "",
-      "Record line, tone, palette, framing, and visual consistency rules.",
+      "Review visual style, rendering consistency, image assets, crops, composition, and art-direction risks.",
       "",
-      "## Asset Notes",
+      "## Operating Rules",
       "",
-      "List image assets, prompts, crops, and issues that require replacement or correction.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      "- Put art supervision output under `docs/work/artSupervisor/`.",
+      "- Compare resources with rendered pages only when the task needs visual evidence.",
       "",
     ].join("\n"),
   },
@@ -263,21 +330,20 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
     id: "continuity-check",
     title: "Continuity Check",
     role: "continuitySupervisor",
-    path: "docs/continuity/continuity-check.md",
-    summary: "Cross-page continuity, object placement, reading order, and unresolved issues.",
+    path: "docs/roles/Continuity Supervisor.md",
+    summary: "Continuity supervisor role prompt/definition. Continuity output belongs under docs/work/continuitySupervisor/.",
     body: [
       "# Continuity Check",
       "",
-      "## Checks",
+      "## Role",
       "",
-      "- Character state:",
-      "- Props:",
-      "- Page order:",
-      "- Dialogue continuity:",
+      "Check page order, character state, props, dialogue continuity, reading order, and unresolved continuity issues.",
       "",
-      "## Issues",
+      "## Operating Rules",
       "",
-      "Record issues with page ids and proposed fixes.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      "- Put continuity output under `docs/work/continuitySupervisor/`.",
+      "- Request bounded page samples unless the creator narrows the scope.",
       "",
     ].join("\n"),
   },
@@ -285,18 +351,20 @@ export const AGENT_DEFAULT_DOCUMENT_DEFINITIONS: AgentDefaultDocumentDefinition[
     id: "image-prompts",
     title: "Image Prompts",
     role: "promptEngineer",
-    path: "docs/prompts/image-prompts.md",
-    summary: "Panel and asset prompts derived from production, storyboard, and art direction.",
+    path: "docs/roles/Prompt Engineer.md",
+    summary: "Prompt engineer role prompt/definition. Prompt output belongs under docs/work/promptEngineer/.",
     body: [
       "# Image Prompts",
       "",
-      "## Prompt Rules",
+      "## Role",
       "",
-      "Define style tags, negative constraints, and asset naming conventions.",
+      "Design image prompts, prompt rules, negative constraints, and page/panel prompt records.",
       "",
-      "## Page Prompts",
+      "## Operating Rules",
       "",
-      "Use page/panel ids where possible so prompts can be mapped back to panels.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      "- Put prompt rules and generated prompts under `docs/work/promptEngineer/`.",
+      "- Keep prompts mapped to page or panel ids when possible.",
       "",
     ].join("\n"),
   },

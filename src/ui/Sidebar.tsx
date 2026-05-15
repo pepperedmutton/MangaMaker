@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Project, ProjectType } from "../domain/schema";
+import { getPageDisplayName } from "../domain/pageNaming";
 import { useI18n } from "../i18n/useI18n";
 import { PageThumbnail } from "./PageThumbnail";
 
@@ -60,7 +61,7 @@ export const Sidebar = ({
   onRenameProject,
   onSetProjectType,
 }: SidebarProps) => {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const [titleInput, setTitleInput] = useState(project.title);
   const [contextMenu, setContextMenu] = useState<SidebarContextMenuState>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
@@ -308,38 +309,41 @@ export const Sidebar = ({
         {project.pages.length === 0 ? (
           <div className="empty-pages">{t("sidebar.emptyPages")}</div>
         ) : (
-          project.pages.map((page, index) => (
-            <div
-              key={page.id}
-              className={page.id === selectedPageId ? "page-card active" : "page-card"}
-              role="button"
-              tabIndex={0}
-              onClick={() => onSelectPage(page.id)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  onSelectPage(page.id);
+          project.pages.map((page, index) => {
+            const displayName = getPageDisplayName(locale, index);
+            return (
+              <div
+                key={page.id}
+                className={page.id === selectedPageId ? "page-card active" : "page-card"}
+                role="button"
+                tabIndex={0}
+                onClick={() => onSelectPage(page.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelectPage(page.id);
+                  }
+                }}
+                onContextMenu={(event) =>
+                  openContextMenu(event, {
+                    kind: "page",
+                    pageId: page.id,
+                  })
                 }
-              }}
-              onContextMenu={(event) =>
-                openContextMenu(event, {
-                  kind: "page",
-                  pageId: page.id,
-                })
-              }
-            >
-              <PageThumbnail page={page} />
-              <div className="page-meta">
-                <strong>{t("defaults.pageName", { index: index + 1 })}</strong>
-                <span>
-                  {t("sidebar.pageSummary", {
-                    panels: page.panels.length,
-                    dialogue: page.texts.length + page.bubbles.length,
-                  })}
-                </span>
+              >
+                <PageThumbnail page={page} displayName={displayName} />
+                <div className="page-meta">
+                  <strong>{displayName}</strong>
+                  <span>
+                    {t("sidebar.pageSummary", {
+                      panels: page.panels.length,
+                      dialogue: page.texts.length + page.bubbles.length,
+                    })}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
       {contextMenu && contextMenuActions.length > 0 ? (

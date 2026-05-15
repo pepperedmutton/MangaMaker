@@ -56,7 +56,8 @@ const openInspector = async (page: Page) => {
   await rightSidebarModeToggle(page).getByRole("button", { name: "Inspector" }).click();
 };
 
-test("agent opens, reports test config, validates plans, and executes through commands", async ({ page }) => {
+test("agent opens, reports test config, refuses page command plans, and writes documents", async ({ page }) => {
+  test.setTimeout(60_000);
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Agent Workflow");
   const contextFixture = await page.evaluate(async () => {
@@ -83,26 +84,40 @@ test("agent opens, reports test config, validates plans, and executes through co
     enabled: true,
     provider: "test",
     testMode: true,
+    modelCapability: "multimodal",
     visionEnabled: true,
   });
   const models = await page.evaluate(async () => {
     const response = await fetch("/__mangamaker__/agent/models");
     return response.json();
   });
-  expect(models).toEqual([
+  expect(models).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      id: "deepseek/deepseek-v4-pro",
+      capability: "metadoc",
+      inputModalities: ["text"],
+      outputModalities: expect.arrayContaining(["text"]),
+    }),
     expect.objectContaining({
       id: "moonshotai/kimi-k2.6",
+      capability: "multimodal",
       inputModalities: expect.arrayContaining(["image"]),
       outputModalities: expect.arrayContaining(["text"]),
     }),
-  ]);
+    expect.objectContaining({
+      id: "qwen/qwen3.6-flash",
+      capability: "multimodal",
+      inputModalities: expect.arrayContaining(["image"]),
+      outputModalities: expect.arrayContaining(["text"]),
+    }),
+  ]));
   const documents = await page.evaluate(async () => {
     const projectId = window.mangaMaker!.project.get().id;
     const response = await fetch(`/__mangamaker__/agent/documents?projectId=${encodeURIComponent(projectId)}`);
     return response.json();
   });
   expect(documents.documents).toEqual(
-    expect.arrayContaining([expect.objectContaining({ id: "production-plan", path: "docs/production/production-plan.md" })]),
+    expect.arrayContaining([expect.objectContaining({ id: "production-plan", path: "docs/roles/Producer.md" })]),
   );
   expect(documents.roles).toEqual(
     expect.arrayContaining([expect.objectContaining({ id: "producer", metadocId: "production-plan" })]),
@@ -111,25 +126,61 @@ test("agent opens, reports test config, validates plans, and executes through co
   await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
   await expect(page.getByLabel("Project document workspace")).toContainText("Project document files");
   await expect(page.locator(".left-sidebar")).not.toContainText("Project documents");
-  await expect(page.getByLabel("Project document files")).toContainText("production-plan.md");
-  await page.getByLabel("Project document files").click({ button: "right" });
-  await page.getByRole("menuitem", { name: "New document" }).click();
+  await expect(page.getByLabel("Project document files")).toContainText("Producer.md");
+  await expect(page.getByLabel("Project document files")).toContainText("docs/work/producer");
+  await expect(page.getByLabel("Project document files")).toContainText("Working dir: Producer");
+  await page.getByLabel("Working directory docs/work/producer").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "New document" }).click({ force: true });
   await expect(page.getByRole("dialog", { name: "New Markdown document" })).toBeVisible();
-  await page.getByLabel("New document title").fill("Scene Notes");
+  await page.getByLabel("New document name").fill("Working Note");
+  await page.getByRole("dialog", { name: "New Markdown document" }).getByRole("button", { name: "Create" }).click();
+  await expect(page.getByLabel("Rendered Markdown document")).toContainText("Working Note");
+  await page.getByRole("button", { name: "Files" }).click();
+  await expect(page.getByLabel("Project document files")).toContainText("Working Note.md");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=working-note`);
+        const document = (await response.json()) as { path?: string };
+        return document.path ?? "";
+      }),
+    )
+    .toBe("docs/work/producer/Working Note.md");
+  await page.getByLabel("Project document files").getByRole("button", { name: /Working Note\.md/i }).click();
+  await expect(page.getByLabel("Rendered Markdown document")).toContainText("Working Note");
+  await page.getByRole("button", { name: "Files" }).click();
+  await expect(page.getByLabel("Working directory docs/work/scriptDesigner")).toBeVisible();
+  await page.getByLabel("Working directory docs/work/scriptDesigner").click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Rename working dir" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Rename working dir" }).click({ force: true });
+  await expect(page.getByRole("dialog", { name: "Rename working directory" })).toBeVisible();
+  await expect(page.getByLabel("Rename working directory path")).toHaveCount(0);
+  await page.getByLabel("Rename working directory name").fill("script-output");
+  await page.getByRole("dialog", { name: "Rename working directory" }).getByRole("button", { name: "Rename" }).click();
+  await expect(page.getByLabel("Working directory docs/work/script-output")).toBeVisible();
+  await expect(page.getByLabel("Project document files")).not.toContainText("docs/work/scriptDesigner");
+  await page.getByLabel("Working directory docs/work/script-output").click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Rename working dir" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Rename working dir" }).click({ force: true });
+  await expect(page.getByLabel("Rename working directory path")).toHaveCount(0);
+  await page.getByLabel("Rename working directory name").fill("scriptDesigner");
+  await page.getByRole("dialog", { name: "Rename working directory" }).getByRole("button", { name: "Rename" }).click();
+  await expect(page.getByLabel("Working directory docs/work/scriptDesigner")).toBeVisible();
+  await expect(page.getByLabel("Working directory docs/work/promptEngineer")).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByLabel("Working directory docs/work/promptEngineer").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete working dir" }).click({ force: true });
+  await expect(page.getByLabel("Working directory docs/work/promptEngineer")).toHaveCount(0);
+  await page.getByLabel("Project document files").getByRole("button", { name: /Producer\.md/i }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "New document" }).click({ force: true });
+  await expect(page.getByRole("dialog", { name: "New Markdown document" })).toBeVisible();
+  await page.getByLabel("New document name").fill("Scene Notes");
   await page.locator("#new-document-role").selectOption("scriptDesigner");
-  await page.locator("#new-document-path").fill("docs/script/scene-notes.md");
   await page.getByRole("dialog", { name: "New Markdown document" }).getByRole("button", { name: "Create" }).click();
   await expect(page.getByLabel("Rendered Markdown document")).toContainText("Scene Notes");
   await page.getByRole("button", { name: "Files" }).click();
-  await expect(page.getByLabel("Project document files")).toContainText("scene-notes.md");
-  await page.getByLabel("Project document files").getByRole("button", { name: /scene-notes\.md/i }).click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Rename document" }).click();
-  await expect(page.getByRole("dialog", { name: "Rename Markdown document" })).toBeVisible();
-  await page.getByLabel("Rename document path").fill("docs/script/renamed-scene-notes.md");
-  await page.getByRole("dialog", { name: "Rename Markdown document" }).getByRole("button", { name: "Rename" }).click();
-  await expect(page.getByLabel("Rendered Markdown document")).toContainText("Scene Notes");
-  await page.getByRole("button", { name: "Files" }).click();
-  await expect(page.getByLabel("Project document files")).toContainText("renamed-scene-notes.md");
+  await expect(page.getByLabel("Project document files")).toContainText("Scene Notes.md");
   await expect
     .poll(() =>
       page.evaluate(async () => {
@@ -139,13 +190,32 @@ test("agent opens, reports test config, validates plans, and executes through co
         return document.path ?? "";
       }),
     )
-    .toBe("docs/script/renamed-scene-notes.md");
+    .toBe("docs/scriptdesigner/Scene Notes.md");
+  await page.getByLabel("Project document files").getByRole("button", { name: /Scene Notes\.md/i }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Rename document" }).click({ force: true });
+  await expect(page.getByRole("dialog", { name: "Rename Markdown document" })).toBeVisible();
+  await expect(page.getByLabel("Rename document path")).toHaveCount(0);
+  await page.getByLabel("Rename document name").fill("Renamed Scene Notes");
+  await page.getByRole("dialog", { name: "Rename Markdown document" }).getByRole("button", { name: "Rename" }).click();
+  await expect(page.getByLabel("Rendered Markdown document")).toContainText("Scene Notes");
+  await page.getByRole("button", { name: "Files" }).click();
+  await expect(page.getByLabel("Project document files")).toContainText("Renamed Scene Notes.md");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=scene-notes`);
+        const document = (await response.json()) as { path?: string };
+        return document.path ?? "";
+      }),
+    )
+    .toBe("docs/scriptdesigner/Renamed Scene Notes.md");
   await expect
     .poll(() =>
       page.evaluate(async () => {
         const projectId = window.mangaMaker!.project.get().id;
         const response = await fetch(
-          `/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=${encodeURIComponent("renamed-scene-notes.md")}`,
+          `/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=${encodeURIComponent("Renamed Scene Notes.md")}`,
         );
         if (!response.ok) {
           return null;
@@ -154,7 +224,7 @@ test("agent opens, reports test config, validates plans, and executes through co
         return { id: document.id, path: document.path };
       }),
     )
-    .toEqual({ id: "scene-notes", path: "docs/script/renamed-scene-notes.md" });
+    .toEqual({ id: "scene-notes", path: "docs/scriptdesigner/Renamed Scene Notes.md" });
   const roleCreateResult = await page.evaluate(async () => {
     const projectId = window.mangaMaker!.project.get().id;
     const createResponse = await fetch("/__mangamaker__/agent/role", {
@@ -167,16 +237,40 @@ test("agent opens, reports test config, validates plans, and executes through co
           name: "Scene Supervisor",
           title: "Scene metadoc test role",
           metadocId: "scene-notes",
+          workingDirectory: "work/scene-supervisor-output",
         },
       }),
     });
     if (!createResponse.ok) {
       throw new Error(await createResponse.text());
     }
-    const created = (await createResponse.json()) as { roles?: Array<{ id: string; metadocId: string }> };
-    return created.roles?.some((role) => role.id === "scene-supervisor" && role.metadocId === "scene-notes") ?? false;
+    const created = (await createResponse.json()) as { roles?: Array<{ id: string; name: string; title: string; metadocId: string; workingDirectory?: string; prompt?: string }> };
+    const role = created.roles?.find((entry) => entry.id === "scene-supervisor") ?? null;
+    return role
+      ? {
+          metadocId: role.metadocId,
+          title: role.title,
+          workingDirectory: role.workingDirectory,
+          prompt: role.prompt ?? "",
+        }
+      : null;
   });
-  expect(roleCreateResult).toBe(true);
+  expect(roleCreateResult).toEqual({
+    metadocId: "scene-notes",
+    title: "Scene Supervisor",
+    workingDirectory: "docs/work/scene-supervisor-output",
+    prompt: expect.stringContaining("active role metadoc"),
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=scene-notes`);
+        const document = (await response.json()) as { path?: string };
+        return document.path ?? "";
+      }),
+    )
+    .toBe("docs/roles/Scene Supervisor.md");
   const roleDeleteResult = await page.evaluate(async () => {
     const projectId = window.mangaMaker!.project.get().id;
     const response = await fetch(`/__mangamaker__/agent/role?projectId=${encodeURIComponent(projectId)}&roleId=scene-supervisor`, {
@@ -196,10 +290,10 @@ test("agent opens, reports test config, validates plans, and executes through co
   });
   expect(roleDeleteResult).toEqual({ roleDeleted: true, metadocKept: true });
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByLabel("Project document files").getByRole("button", { name: /renamed-scene-notes\.md/i }).click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Delete document" }).click();
-  await expect(page.getByLabel("Project document files")).not.toContainText("renamed-scene-notes.md");
-  await page.getByLabel("Project document files").getByRole("button", { name: /production-plan\.md/i }).click();
+  await page.getByLabel("Project document files").getByRole("button", { name: /Renamed Scene Notes\.md/i }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete document" }).click({ force: true });
+  await expect(page.getByLabel("Project document files")).not.toContainText("Renamed Scene Notes.md");
+  await page.getByLabel("Project document files").getByRole("button", { name: /Producer\.md/i }).click();
   await expect(page.getByLabel("Rendered Markdown document")).toContainText("Production Plan");
   await page.getByRole("button", { name: "Edit" }).click();
   await page.getByLabel("Markdown document editor").fill("# Production Plan\n\n## E2E\n\nDocument mode is durable.\n");
@@ -217,9 +311,9 @@ test("agent opens, reports test config, validates plans, and executes through co
     .toContain("Document mode is durable.");
   await page.getByRole("button", { name: "Files" }).click();
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByLabel("Project document files").getByRole("button", { name: /production-plan\.md/i }).click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Delete document" }).click();
-  await expect(page.getByLabel("Project document files")).not.toContainText("production-plan.md");
+  await page.getByLabel("Project document files").getByRole("button", { name: /Producer\.md/i }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete document" }).click({ force: true });
+  await expect(page.getByLabel("Project document files")).not.toContainText("Producer.md");
   await expect
     .poll(() =>
       page.evaluate(async () => {
@@ -243,8 +337,24 @@ test("agent opens, reports test config, validates plans, and executes through co
   await openAgent(page);
   await expect(page.getByLabel("Agent sidebar")).toBeVisible();
   await expect(page.getByLabel("Agent role")).toContainText("Assistant");
-  await expect(page.getByLabel("Agent role")).toContainText("Metadoc");
+  await expect(page.getByLabel("Agent role")).toContainText("Role prompt");
+  await page.getByRole("button", { name: "New role" }).click();
+  const newRoleDialog = page.getByRole("dialog", { name: "New Agent role" });
+  await expect(newRoleDialog).toBeVisible();
+  await expect(newRoleDialog.getByLabel("New role name")).toBeVisible();
+  await expect(newRoleDialog.getByLabel("New role title")).toHaveCount(0);
+  await expect(newRoleDialog.getByLabel("New role prompt")).toHaveCount(0);
+  await expect(newRoleDialog.getByLabel("New role working directory")).toBeVisible();
+  await newRoleDialog.getByLabel("New role name").fill("Panel Coach");
+  await expect(newRoleDialog.getByLabel("New role working directory")).toHaveValue("docs/work/panel-coach");
+  await expect(newRoleDialog).toContainText("used as the role prompt");
+  await expect(newRoleDialog).toContainText("Working dir stores");
+  await newRoleDialog.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByLabel("Agent configuration status")).toContainText("Test mode");
+  await page.getByText("Agent Config", { exact: true }).click();
+  await expect(page.getByLabel("Agent model")).toContainText("DeepSeek latest");
+  await expect(page.getByLabel("Agent model")).toContainText("Qwen latest");
+  await expect(page.getByLabel("Agent model")).toBeDisabled();
   await expect(page.getByLabel("Agent context summary")).toHaveCount(0);
   await expect
     .poll(async () =>
@@ -448,23 +558,15 @@ test("agent opens, reports test config, validates plans, and executes through co
   await expect(page.getByLabel("Agent messages")).toContainText("renderPages");
 
   await askAgent(page, "Create a panel");
-  await expect
-    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
-    .toBe(1);
-
-  await page.keyboard.press("Control+KeyZ");
+  await expect(page.getByLabel("Agent messages")).toContainText("Page and canvas edits are disabled");
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
     .toBe(0);
-  await page.keyboard.press("Control+KeyY");
-  await expect
-    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.panels.length))
-    .toBe(1);
 
   await askAgent(page, "Add text: Hello");
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages[0]?.texts[0]?.content))
-    .toBe("Hello");
+    .toBeUndefined();
 
   await askAgent(page, "Set text stroke red width 4");
   await expect
@@ -474,22 +576,17 @@ test("agent opens, reports test config, validates plans, and executes through co
         return text ? { strokeColor: text.strokeColor, strokeWidth: text.strokeWidth } : null;
       }),
     )
-    .toEqual({ strokeColor: "#ff0000", strokeWidth: 4 });
+    .toBeNull();
 
   const pageCountBeforeDeletePlan = await page.evaluate(
     () => window.mangaMaker?.project.get().pages.length ?? 0,
   );
   await askAgent(page, "Delete current page");
-  await expect(page.getByLabel("Pending command plan")).toContainText("Needs confirmation");
-  await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+  await expect(page.getByLabel("Pending command plan")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Confirm" })).toHaveCount(0);
   await expect
     .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages.length ?? 0))
     .toBe(pageCountBeforeDeletePlan);
-
-  await page.getByRole("button", { name: "Confirm" }).click();
-  await expect
-    .poll(() => page.evaluate(() => window.mangaMaker?.project.get().pages.length ?? 0))
-    .toBe(pageCountBeforeDeletePlan - 1);
 });
 
 test("agent message copy writes selected plain text only", async ({ page, context }) => {
@@ -686,7 +783,7 @@ test("agent clear context prevents stale visible context from reaching the model
   expect(capturedPayload?.conversationContextId).toBeTruthy();
   expect(capturedPayload?.conversationContextFingerprint).toBeTruthy();
   expect(capturedPayload?.messages?.map((message) => message.content)).toEqual([
-    "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.",
+    "Ready. I can inspect the current project, offer suggestions, and update project documents.",
     "New request after clear",
   ]);
 });
@@ -779,11 +876,11 @@ test("agent pauses with continue and stop controls when the tool budget is exhau
 
   await askAgent(page, "tool budget loop");
 
-  await expect(page.getByLabel("Agent messages")).toContainText("Tool budget reached");
+  await expect(page.getByLabel("Agent messages")).toContainText("Tool budget reached", { timeout: 30000 });
   await expect(page.getByLabel("Agent messages")).toContainText("paused instead of answering from incomplete evidence");
   await expect(page.getByLabel("Agent messages")).not.toContainText("more tool calls than the current safety limit");
   await expect(page.getByLabel("Agent messages")).not.toContainText("answering from the pages and resources already inspected");
-  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests");
+  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests", { timeout: 30000 });
   await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Continue" })).toBeVisible();
   await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Continue" })).toBeEnabled();
   await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true })).toBeVisible();
@@ -803,7 +900,7 @@ test("agent can stop after the tool budget is exhausted", async ({ page }) => {
 
   await askAgent(page, "tool budget loop");
 
-  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests");
+  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests", { timeout: 30000 });
   await expect(page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
   await page.getByLabel("Paused Agent run").getByRole("button", { name: "Stop", exact: true }).click();
   await expect(page.getByLabel("Paused Agent run")).toHaveCount(0);
@@ -815,7 +912,7 @@ test("agent can continue a restored tool budget run after Agent sidebar remount"
   await openAgent(page);
 
   await askAgent(page, "tool budget loop");
-  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests");
+  await expect(page.getByLabel("Paused Agent run")).toContainText("Pending tool requests", { timeout: 30000 });
 
   await openInspector(page);
   await openAgent(page);
@@ -938,10 +1035,10 @@ test("agent stop is clickable while the request is still preparing local context
           title: "Assistant Metadoc",
           role: "assistant",
           status: "draft",
-          path: "docs/agent/assistant-metadoc.md",
+          path: "docs/roles/Assistant.md",
           relatedPageIds: [],
           updatedAt: new Date().toISOString(),
-          summary: "General assistant role definition.",
+          summary: "General assistant role prompt/definition.",
           content: "# Assistant Metadoc\n",
         }),
       });
@@ -965,16 +1062,119 @@ test("agent stop is clickable while the request is still preparing local context
   await expect(page.getByLabel("Agent messages")).not.toContainText("Waiting for model response");
 });
 
+test("agent cancels a backend run id that arrives after local stop", async ({ page }) => {
+  let releaseRunResponse: (() => void) | null = null;
+  let runRequestStarted: (() => void) | null = null;
+  let cancelObserved: (() => void) | null = null;
+  let cancelCalled = false;
+  const now = new Date().toISOString();
+  const run = {
+    id: "agent-run-e2e-late-stop",
+    projectId: "project-e2e-late-stop",
+    roleId: "assistant",
+    conversationContextId: "conversation-context-e2e",
+    conversationContextFingerprint: "ctx-v1:e2e",
+    status: "running",
+    createdAt: now,
+    updatedAt: now,
+    modelTurnIndex: 0,
+    steps: [
+      {
+        id: "agent-step-e2e-late-stop",
+        runId: "agent-run-e2e-late-stop",
+        kind: "model_request",
+        status: "running",
+        operationId: "model_request:e2e-late-stop",
+        summary: "Sending model request",
+        createdAt: now,
+        startedAt: now,
+      },
+    ],
+    trace: [],
+    pendingToolCalls: [],
+  };
+  const cancelledRun = {
+    ...run,
+    status: "cancelled",
+    updatedAt: new Date().toISOString(),
+    steps: run.steps.map((step) => ({
+      ...step,
+      status: "error",
+      finishedAt: new Date().toISOString(),
+      error: "Cancelled by user.",
+    })),
+    error: "Cancelled by user.",
+  };
+  const runRequestPromise = new Promise<void>((resolve) => {
+    runRequestStarted = resolve;
+  });
+  const releaseRunPromise = new Promise<void>((resolve) => {
+    releaseRunResponse = resolve;
+  });
+  const cancelPromise = new Promise<void>((resolve) => {
+    cancelObserved = resolve;
+  });
+
+  await page.route("**/__mangamaker__/agent/runs**", async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === "POST" && url.pathname === "/__mangamaker__/agent/runs") {
+      runRequestStarted?.();
+      await releaseRunPromise;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify(run),
+      });
+      return;
+    }
+    if (route.request().method() === "POST" && url.pathname === "/__mangamaker__/agent/runs/agent-run-e2e-late-stop/cancel") {
+      cancelCalled = true;
+      cancelObserved?.();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(cancelledRun),
+      });
+      return;
+    }
+    if (route.request().method() === "GET" && url.pathname === "/__mangamaker__/agent/runs/agent-run-e2e-late-stop/events") {
+      await cancelPromise;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: `data: ${JSON.stringify({ type: "run_updated", run: cancelledRun })}\n\n`,
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Late Stop");
+  await openAgent(page);
+
+  await page.getByLabel("Agent prompt").fill("stop after backend run starts");
+  await page.getByRole("button", { name: "Send" }).click();
+  await runRequestPromise;
+  const stopButton = page.getByLabel("Active Agent run control").getByRole("button", { name: "Stop Agent" });
+  await expect(stopButton).toBeEnabled();
+  await stopButton.click();
+  await expect(page.getByLabel("Agent messages")).toContainText("Stopped the Agent before a backend run was created.");
+  releaseRunResponse?.();
+  await expect.poll(() => cancelCalled).toBe(true);
+});
+
 test("agent document write completes and exposes raw model debug output", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Document Write");
   await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
-  await page.getByLabel("Project document files").getByText("production-plan.md").click();
+  await page.getByLabel("Project document files").getByText("Producer.md").click();
   await openAgent(page);
 
   await askAgent(page, "write document");
 
   await expect(page.getByLabel("Agent messages")).toContainText("I updated the durable Markdown document.");
+  await expect(page.getByRole("region", { name: "Agent task progress" })).toContainText("completed");
   await expect(page.getByLabel("Agent messages")).toContainText("writeDocument");
   await expect(page.getByLabel("Agent messages")).toContainText("contentLength=");
   await expect(page.getByLabel("Agent messages")).toContainText("modelResponse");
@@ -998,11 +1198,60 @@ test("agent document write completes and exposes raw model debug output", async 
     .toBe(true);
 });
 
+test("agent can continue tool execution after a verified document write", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Document Write Stop");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
+  await page.getByLabel("Project document files").getByText("Producer.md").click();
+  await openAgent(page);
+
+  await askAgent(page, "write document then keep reading");
+
+  await expect(page.getByLabel("Agent messages")).toContainText("I updated the durable Markdown document.");
+  await expect(page.getByLabel("Agent messages")).toContainText("readDocument");
+  await expect(page.getByLabel("Agent messages")).not.toContainText("stopped additional evidence-gathering");
+  await expect(page.getByRole("region", { name: "Agent task progress" })).toContainText("completed");
+  await expect(page.getByLabel("Project document workspace")).toContainText(
+    "The test Agent write should complete the run without another read.",
+  );
+  await expect(page.getByLabel("Agent prompt")).toBeEnabled();
+});
+
+test("agent incremental document append tool persists without a full-document command plan", async ({ page }) => {
+  await clearDraftAndOpen(page);
+  await createProjectAndFirstPage(page, "Document Append");
+  await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
+  await page.getByLabel("Project document files").getByText("Producer.md").click();
+  await openAgent(page);
+
+  await askAgent(page, "append document note");
+
+  await expect(page.getByLabel("Agent messages")).toContainText("appendDocument");
+  await expect(page.getByLabel("Agent messages")).toContainText("I updated the durable Markdown document.");
+  await expect(page.getByRole("region", { name: "Agent task progress" })).toContainText("completed");
+  await expect(page.getByLabel("Project document workspace")).toContainText(
+    "The test Agent can append durable Markdown notes",
+  );
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        const projectId = window.mangaMaker!.project.get().id;
+        const response = await fetch(`/__mangamaker__/agent/document?projectId=${encodeURIComponent(projectId)}&documentId=production-plan`);
+        if (!response.ok) {
+          return null;
+        }
+        const document = (await response.json()) as { content?: string };
+        return document.content?.includes("The test Agent can append durable Markdown notes") ?? false;
+      }),
+    )
+    .toBe(true);
+});
+
 test("document editor rejects stale saves after backend document update", async ({ page }) => {
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Stale Document Guard");
   await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
-  await page.getByLabel("Project document files").getByText("production-plan.md").click();
+  await page.getByLabel("Project document files").getByText("Producer.md").click();
   await page.getByLabel("Project document workspace").getByRole("button", { name: "Edit" }).click();
   await page
     .getByLabel("Markdown document editor")
@@ -1020,7 +1269,7 @@ test("document editor rejects stale saves after backend document update", async 
           title: "Production Plan",
           role: "producer",
           status: "draft",
-          path: "docs/production/production-plan.md",
+          path: "docs/roles/Producer.md",
           relatedPageIds: [],
           summary: "Backend update for stale editor guard.",
           operationId: "e2e-stale-document-backend-update",
@@ -1058,7 +1307,7 @@ test("document edit tools can render once before writeDocument", async ({ page }
   await clearDraftAndOpen(page);
   await createProjectAndFirstPage(page, "Document Visual Evidence");
   await page.locator(".ribbon-bar").getByRole("button", { name: "Docs" }).click();
-  await page.getByLabel("Project document files").getByText("production-plan.md").click();
+  await page.getByLabel("Project document files").getByText("Producer.md").click();
   await openAgent(page);
 
   await askAgent(page, "document edit needs visual evidence");
@@ -1083,6 +1332,7 @@ test("agent repairs a document write claim that omitted writeDocument", async ({
   await expect(page.getByLabel("Agent messages")).toContainText("modelResponse");
   await expect(page.getByLabel("Agent messages")).toContainText("writeDocument");
   await expect(page.getByLabel("Agent messages")).toContainText("I updated the durable Markdown document.");
+  await expect(page.getByLabel("Agent messages")).not.toContainText("stopped additional evidence-gathering");
   await expect(page.getByLabel("Agent messages")).not.toContainText("agentVerification");
   await expect
     .poll(() =>

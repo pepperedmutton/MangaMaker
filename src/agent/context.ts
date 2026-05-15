@@ -1,4 +1,5 @@
 import { getPageWorkspace } from "../domain/helpers";
+import { getPageDisplayName } from "../domain/pageNaming";
 import type { Page, Project } from "../domain/schema";
 import { renderPageToCanvas } from "../export/render";
 import { useEditorStore } from "../state/editorStore";
@@ -285,15 +286,19 @@ export const renderPageSnapshot = async (
   }
 };
 
-export const listImageAssets = (project: Project = useEditorStore.getState().project): AgentImageAsset[] =>
-  project.pages.flatMap((page) =>
-    page.panels.flatMap((panel) =>
+export const listImageAssets = (
+  project: Project = useEditorStore.getState().project,
+  locale = useEditorStore.getState().locale,
+): AgentImageAsset[] =>
+  project.pages.flatMap((page, pageIndex) => {
+    const pageName = getPageDisplayName(locale, pageIndex);
+    return page.panels.flatMap((panel) =>
       panel.image
         ? [
             {
               src: panel.image.src,
               pageId: page.id,
-              pageName: page.name,
+              pageName,
               panelId: panel.id,
               panelRef: `${page.id}:${panel.id}`,
               sourceWidth: panel.image.sourceWidth ?? panel.image.viewBox.width,
@@ -306,13 +311,13 @@ export const listImageAssets = (project: Project = useEditorStore.getState().pro
             },
           ]
         : [],
-    ),
-  );
+    );
+  });
 
-const summarizePage = (page: Page, pageIndex: number): AgentPageSummary => ({
+const summarizePage = (page: Page, pageIndex: number, locale = useEditorStore.getState().locale): AgentPageSummary => ({
   id: page.id,
   pageNumber: pageIndex + 1,
-  name: page.name,
+  name: getPageDisplayName(locale, pageIndex),
   width: page.width,
   height: page.height,
   background: page.background,
@@ -322,7 +327,7 @@ const summarizePage = (page: Page, pageIndex: number): AgentPageSummary => ({
   layerCount: page.layers.length,
 });
 
-const summarizeObjects = (page: Page): AgentObjectSummary[] => {
+const summarizeObjects = (page: Page, pageName: string): AgentObjectSummary[] => {
   const objects: AgentObjectSummary[] = [];
   for (const [layerIndex, layerRef] of page.layers.entries()) {
     const [objectType, objectId] = layerRef.split(":", 2);
@@ -334,7 +339,7 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
           objectType,
           objectRef: `${page.id}:panel:${panel.id}`,
           pageId: page.id,
-          pageName: page.name,
+          pageName,
           panelRef: `${page.id}:${panel.id}`,
           x: panel.x,
           y: panel.y,
@@ -353,7 +358,7 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
             ? {
                 src: panel.image.src,
                 pageId: page.id,
-                pageName: page.name,
+                pageName,
                 panelId: panel.id,
                 panelRef: `${page.id}:${panel.id}`,
                 sourceWidth: panel.image.sourceWidth ?? panel.image.viewBox.width,
@@ -377,7 +382,7 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
           objectType,
           objectRef: `${page.id}:text:${text.id}`,
           pageId: page.id,
-          pageName: page.name,
+          pageName,
           x: text.x,
           y: text.y,
           width: text.width,
@@ -406,7 +411,7 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
           objectType,
           objectRef: `${page.id}:bubble:${bubble.id}`,
           pageId: page.id,
-          pageName: page.name,
+          pageName,
           x: bubble.x,
           y: bubble.y,
           width: bubble.width,
@@ -434,7 +439,7 @@ const summarizeObjects = (page: Page): AgentObjectSummary[] => {
           objectType,
           objectRef: `${page.id}:element:${element.id}`,
           pageId: page.id,
-          pageName: page.name,
+          pageName,
           x: element.x,
           y: element.y,
           width: element.width,
@@ -475,10 +480,11 @@ export const getAgentContext = async (): Promise<AgentContextSnapshot> => {
       ? await captureCurrentCanvasSnapshot("selection")
       : null;
   const pages: AgentPageContextSummary[] = state.project.pages.map((page, pageIndex) => {
-    const objects = summarizeObjects(page);
+    const pageName = getPageDisplayName(state.locale, pageIndex);
+    const objects = summarizeObjects(page, pageName);
     const isCurrent = page.id === selectedPage?.id;
     return {
-      ...summarizePage(page, pageIndex),
+      ...summarizePage(page, pageIndex, state.locale),
       isCurrent,
       viewing: isCurrent,
       selectedObject:
@@ -508,7 +514,7 @@ export const getAgentContext = async (): Promise<AgentContextSnapshot> => {
     saveStatus: { ...state.saveStatus },
     objects,
     selectedObject,
-    imageAssets: listImageAssets(state.project),
+    imageAssets: listImageAssets(state.project, state.locale),
     commandManifest: buildCommandManifest(),
     canvasSnapshot,
     selectionSnapshot,

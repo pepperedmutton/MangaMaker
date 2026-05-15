@@ -57,7 +57,6 @@ agent 必须把以下层面视为一个系统：
 - `src/state`: session state and history behavior
 - `src/storage`: persistence, `projects/` integration, and local draft behavior
 - `src/agent`: built-in creator assistance Agent config, harness, tools, roles, documents, and response validation
-- `src/sysml`: official SysML v2 Pilot adapter, project SysML repository, MBSE model defaults, and validation types
 - `src/ui`: human-facing behavior
 - `src/automation/api.ts`: browser automation bridge
 - `vite.config.ts`: web persistence middleware, `/projects` serving, and allowed share hosts
@@ -272,14 +271,14 @@ An agent must not claim the project is complete if the documented contract is no
 如果文档契约尚未实现，agent 不得声称项目已经完成。
 ## 10. Built-in Creator Assistance Agent Product Contract / 内置创作辅助 Agent 契约
 
-The built-in creator assistance Agent is a MangaMaker product feature, not the external coding-agent workflow. Its role is to assist the human creator with suggestions, context inspection, consistency checks, and bounded command plans. Manga creation remains human-led; the Agent must not be framed as independently writing, directing, drawing, or completing the comic.
+The built-in creator assistance Agent is a MangaMaker product feature, not the external coding-agent workflow. Its role is to assist the human creator with suggestions, context inspection, consistency checks, and durable document updates. Manga creation remains human-led; the Agent must not be framed as independently writing, directing, drawing, or completing the comic.
 
 It must never receive or expose real API keys in the frontend. Provider configuration is read only by the web/Vite backend or the Tauri backend.
 
 Role rules:
 
 - The Agent may advise on panels, dialogue placement, pacing, captions, bubbles, and layout consistency.
-- The Agent may prepare local command plans only when they are grounded in the current project context and command manifest.
+- The Agent must not prepare executable page/canvas command plans in the current product scope. Page-change requests should become Markdown updates or clear manual editor instructions for the creator.
 - The Agent must not claim that a comic page, story, or finished work is complete unless the creator has made or approved the relevant changes.
 - The Agent should use language such as "suggest", "prepare", "inspect", and "help adjust" rather than language that implies autonomous authorship.
 - Human creative intent takes precedence over model suggestions.
@@ -287,20 +286,20 @@ Role rules:
 Durable document rules:
 
 - Chat is not the durable production source of truth. Project Markdown documents are the durable carrier for plans, storyboards, script, art direction, continuity, and image prompts.
+- Every project must contain `docs/PrimeDirective.md`. It is a project-level document, not a role metadoc, and it defines the project form, creator intent, operating constraints, and conflict priority for all Agent roles.
+- `PrimeDirective.md` must be created for new projects and backfilled for existing project manifests. It must not be deletable through the document API or Docs UI.
 - The editor must expose a center workspace mode that can switch between comic editing and project Markdown documents while keeping the Agent sidebar available on the right.
 - The left overview/sidebar is reserved for comic page thumbnails and page operations. It must not show document overviews.
 - Entering the `Docs` workspace must show a file-viewer list of Markdown file names first. A document body is shown only after the user selects a file, and the default document view is rendered Markdown rather than a raw editor.
 - The Docs workspace must let the creator right-click to create Markdown documents and right-click any document to rename or delete it. Default role metadocs are starter files only; once a manifest exists, user deletion must be respected and missing defaults must not be silently recreated.
-- A new project must start with role metadocs under `docs/`: assistant metadoc, production plan, story architecture, storyboard overview, script/dialogue, art supervision, continuity check, and image prompts.
-- Every active Agent role must be represented in the project document manifest and must bind exactly one `metadocId`. That metadoc defines the role and records the role's durable output.
-- Within one project, each role must have at most one active Conversation Context session and exactly one metadoc. Switching roles must switch the visible conversation to that role's session.
+- A new project must start with `docs/PrimeDirective.md` plus role metadocs under `docs/roles/`. Each role metadoc filename must match the role name, for example `docs/roles/Producer.md`, `docs/roles/Director.md`, and `docs/roles/Prompt Engineer.md`.
+- Every active Agent role must be represented in the project document manifest and must bind exactly one `metadocId` plus one role working directory. The metadoc is the role prompt and role definition only; durable role output belongs in ordinary Markdown documents under the working directory unless the creator names another document.
+- Within one project, each role must have at most one active Conversation Context session, exactly one metadoc, and one working directory. Switching roles must switch the visible conversation to that role's session.
 - A document may be ordinary and unbound to any role. A role may read and write documents beyond its own metadoc.
-- Creating a role must either create its metadoc automatically or bind an existing ordinary document as the role metadoc. Deleting a metadoc must remove the role. Deleting a role must keep its metadoc as an ordinary document.
-- The Agent harness must expose roles and documents as tools: it may preload only the active role metadoc, and it must expose list roles, list documents, read one document, search documents, and write one document on demand. It must not preload all document bodies into the initial prompt.
-- The Agent harness must expose SysML as an explicit standard-aware tool surface. `readSysmlStandardOverview` must be preloaded as a compact SysML v2/KerML/Pilot rule index, and `readSysmlStandardReference` must let any role read focused standard topics before changing unfamiliar MBSE semantics. Project model tools remain on demand: `getSysmlStatus`, `listSysmlFiles`, `readSysmlFile`, `writeSysmlFile`, and `validateSysmlModel`. It must not preload all SysML files into the initial prompt.
-- When SysML is enabled, formal engineering constraints belong in `projects/<project-folder>/sysml/` and must be validated by the official SysML v2 Pilot Implementation. Markdown remains the human-readable production record, but SysML is the formal MBSE model.
-- The center workspace must include `Comic`, `Docs`, and `SysML` modes. The SysML mode must list project SysML/KerML files, allow bounded edits, and expose validation diagnostics without hiding Pilot errors.
-- Role prompts must describe the Agent as a producer, director, storyboard designer, script designer, art supervisor, continuity supervisor, prompt engineer, or custom assisting production role. These roles read and write documents and may prepare bounded command plans, but they do not become the human creator or claim final authorship.
+- Creating a role must ask for the role name, the metadoc source, and the role working directory. It must either create the metadoc automatically or bind an existing ordinary document as the role metadoc, and it must create or preserve the working directory under `docs/`. The role name is the only display name; legacy title fields must be normalized to the name, and role prompt text must come from the metadoc body. Deleting a metadoc must remove the role. Deleting a role must keep its metadoc as an ordinary document.
+- The Agent harness must expose roles and documents as tools: it must preload `PrimeDirective.md` and the active role metadoc as pinned context, include the active role working directory in resource policy, and expose list roles, list documents, read one document, search documents, and write one document on demand. It must not preload all other document bodies into the initial prompt.
+- The center workspace must include `Comic` and `Docs` modes.
+- Role prompts must describe the Agent as a producer, director, storyboard designer, script designer, art supervisor, continuity supervisor, prompt engineer, or custom assisting production role. These roles read and write Markdown documents and may inspect pages/renders, but they do not execute page edits, become the human creator, or claim final authorship.
 - Other local agents should be able to inspect project documents by reading `projects/<project-folder>/docs/` and the document API without scraping chat messages.
 
 Configuration rules:
@@ -310,8 +309,9 @@ Configuration rules:
 - `MANGAMAKER_AGENT_MODEL` must be explicit outside test mode unless the project documents a vision-capable default.
 - `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` controls the Agent prompt/input budget and defaults to `262144`, the Kimi K2.6 upper context limit used by this project. The UI may send a per-project runtime override, but the backend must clamp it to the known model limit when one is available.
 - `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS` defaults to `16384`; `MANGAMAKER_AGENT_REASONING_MAX_TOKENS` defaults to `2048`; `MANGAMAKER_AGENT_REASONING_EXCLUDE` defaults to `true`; `MANGAMAKER_AGENT_TEMPERATURE` defaults to `0.1`; `MANGAMAKER_AGENT_TOP_P` defaults to `0.9`. These settings should favor reliable JSON/tool behavior over exploratory prose. The reasoning cap is important for Kimi-style reasoning models because reasoning tokens share the model output budget; without a cap, the provider can return `finish_reason=length` with no final Agent JSON.
-- The OpenRouter model allowlist is provider-restricted to DeepSeek and Kimi/Moonshot model ids, then capability-restricted to models whose metadata includes image input, text output, and `response_format` support.
-- Google, Anthropic, OpenAI, text-only, and non-JSON-capable models must not be offered as available built-in Agent models.
+- The OpenRouter model allowlist is provider-restricted to DeepSeek and Kimi/Moonshot model ids. Multimodal entries are capability-restricted to models whose metadata includes image input, text output, and `response_format` support.
+- `deepseek/deepseek-v4-pro` is the only allowed text-only model in the built-in Agent model list. It must be treated as `metadoc` capability, not multimodal capability: vision must be disabled, page/image/render tools must not be exposed, and the backend must reject or block any such tool call without leaking project resource content. Markdown document tools remain available so the model can work in the active role working directory.
+- Google, Anthropic, OpenAI, other text-only, and non-JSON-capable models must not be offered as available built-in Agent models.
 - The UI must show whether vision input is enabled. If vision is unavailable or a screenshot send fails, the user-visible response must include a warning or error.
 
 Command-plan rules:
@@ -326,19 +326,19 @@ Command-plan rules:
 Context rules:
 
 - The Agent context should summarize page, panel, image crop, text, bubble, layer order, and current selection information when those details are requested.
-- The initial model prompt must not include every page's full resources, every asset metadata record, every SysML file body, or a screenshot by default. It should include a lightweight project summary, page index, current-page marker, selection summary, compact SysML standard overview, and tool catalog.
+- The initial model prompt must not include every page's full resources, every asset metadata record, every Markdown document body, or a screenshot by default. It should include a lightweight project summary, page index, current-page marker, selection summary, `PrimeDirective.md`, active role metadoc, active role working directory, and tool catalog.
 - The Agent must be able to read all project pages on demand, not only the currently selected page. The creator's current page must be marked with `isCurrent=true` in the page index and detailed page reads.
-- The Agent harness should present project reading as local tools such as project summary, page listing, project search, single-page and batch page reading, selection inspection, filtered image asset listing, single-page and batch page rendering, role listing, Markdown document listing/reading/searching/writing, and command manifest reading.
+- The multimodal Agent harness should present project reading as local tools such as project summary, page listing, project search, single-page and batch page reading, selection inspection, filtered image asset listing, single-page and batch page rendering, role listing, and Markdown document listing/reading/searching/writing. Markdown writing must include incremental tools for append, heading-section replacement, line-range editing, and exact text replacement, plus full-document replacement for creation or large rewrites. Page/canvas command manifests are not exposed in the current product scope. The text-only document harness must expose Markdown document tools and must not expose project page reading, visual, or render tools.
 - The Agent must be able to close the multimodal loop for a page: request a screenshot/render tool for a specific page, receive the composed visual result as a vision attachment, and receive the same page's structured resources so it can compare resource-level state with rendered outcome.
 - The Agent must follow a structured-first visual budget policy. It should search/read resources before screenshots, use preview renders by default, request cropped page renders for local details, and reserve high-detail renders for small text, faces, or fine line art. Token savings must come from reducing image count, pixels, and crop area rather than relying on PNG/JPG format differences.
 - The Agent context window controls prompt compaction only; it is not permission to preload every page, every asset, or every document. The default budget should allow Kimi K2.6-scale long document edits while still preserving the tool-first harness.
 - The Agent UI must enforce a finite per-turn tool budget, skip repeated identical tool calls, and pause with Continue/Stop when more tools are needed instead of forcing a final answer from incomplete evidence.
 - Canvas screenshots should prefer full page rendering or a Konva stage snapshot before falling back to raw DOM canvases.
 - Large base64 assets must not be sent without bounds.
-- `writeDocument` must be idempotent: model tool input must include an `operationId`, retries with the same id and identical document content must be safe, and conflicting reuse of an id must be rejected.
+- Document mutation tools must be idempotent: model tool input must include an `operationId`, retries with the same id and identical document edit must be safe, and conflicting reuse of an id must be rejected.
 - The Agent sidebar must publish a sanitized debug snapshot for local automation and web debugging. The snapshot may include current busy state, pending tool call, recent messages, tool logs, config status, summarized context, and active run id/status, but it must not expose API keys or raw base64 screenshots.
 - The Agent UI must show tool call status inline in the conversation flow rather than maintaining a standalone Tool Log panel. Clearing Conversation Context must clear visible tool status entries without recording a synthetic delete event.
-- The Agent sidebar must expose a front-end configuration interface for manual steering and debugging. The creator must be able to edit the system prompt used for future turns and edit the conversation context sent to the model, including both user messages and Agent replies. Backend protocol constraints for JSON responses, command-plan validation, and local command execution remain mandatory even when the creator edits the prompt.
+- The Agent sidebar must expose a front-end configuration interface for manual steering and debugging. The creator must be able to edit the system prompt used for future turns and edit the conversation context sent to the model, including both user messages and Agent replies. Backend protocol constraints for JSON responses, document-write verification, and disabled page command plans remain mandatory even when the creator edits the prompt.
 
 Agent run rules:
 

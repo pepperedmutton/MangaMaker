@@ -25,7 +25,13 @@ const getPanelImageMetrics = (panel: Panel) => {
 const toSafeClipId = (pageId: string, panelId: string) =>
   `thumb-clip-${pageId}-${panelId}`.replace(/[^a-zA-Z0-9-_]/g, "-");
 
-export const PageThumbnail = ({ page }: { page: Page | null }) => {
+export const PageThumbnail = ({
+  page,
+  displayName,
+}: {
+  page: Page | null;
+  displayName?: string;
+}) => {
   const { t } = useI18n();
 
   if (!page) {
@@ -42,7 +48,7 @@ export const PageThumbnail = ({ page }: { page: Page | null }) => {
         className="page-thumbnail-svg"
         viewBox={`0 0 ${page.width} ${page.height}`}
         preserveAspectRatio="xMidYMid meet"
-        aria-label={`${page.name} thumbnail`}
+        aria-label={`${displayName ?? page.name} thumbnail`}
       >
         <defs>
           {page.panels.map((panel) => (

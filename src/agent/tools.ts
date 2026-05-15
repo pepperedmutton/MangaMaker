@@ -2,6 +2,7 @@ import { useEditorStore } from "../state/editorStore";
 import type { ExecuteCommandOptions } from "../state/editorStore";
 import { commandRegistry } from "../commands/registry";
 import type { Page, Project } from "../domain/schema";
+import { getPageDisplayName } from "../domain/pageNaming";
 import {
   buildCommandManifest,
   commandPlanRequiresConfirmation,
@@ -196,7 +197,7 @@ export const createRedactedCommandPlanDiff = (
       undefined;
     const pageInfo = {
       pageId: page.id,
-      pageName: page.name,
+      pageName: pageNumber ? getPageDisplayName(useEditorStore.getState().locale, pageNumber - 1) : page.name,
       ...(pageNumber ? { pageNumber } : {}),
     };
 

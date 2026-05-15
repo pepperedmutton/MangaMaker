@@ -9,24 +9,33 @@ import type {
   AgentSnapshotCrop,
   AgentToolCallRequest,
 } from "./types";
+import type { AgentModelCapability } from "./modelCatalog";
 import { renderPageSnapshot } from "./context";
 import {
+  deleteProjectDocument,
   listProjectDocuments,
   readProjectDocument,
   writeProjectDocument,
 } from "./documents";
 import {
-  getSysmlConfig,
-  listSysmlProjectFiles,
-  readSysmlProjectFile,
-  validateSysmlProject,
-  writeSysmlProjectFile,
-} from "../sysml/client";
+  AGENT_DOCUMENT_WRITE_SCOPE,
+  createAgentDocumentWriteScopeBlockedResult,
+  validateExistingAgentDocumentWriteScope,
+} from "./documentWriteScope";
 import {
-  SYSML_STANDARD_REFERENCE_TOPIC_IDS,
-  getSysmlStandardOverview,
-  readSysmlStandardReferenceTopic,
-} from "../sysml/standardReference";
+  applyAppendDocumentEdit,
+  applyEditDocumentLinesEdit,
+  applyReplaceDocumentSectionEdit,
+  applyReplaceDocumentTextEdit,
+  createDocumentLinesResult,
+  incrementalDocumentEditFailureReason,
+  isIncrementalDocumentEditVerifiedNoop,
+  type AppendDocumentInput,
+  type EditDocumentLinesInput,
+  type IncrementalDocumentEdit,
+  type ReplaceDocumentSectionInput,
+  type ReplaceDocumentTextInput,
+} from "./documentEditTools";
 import {
   AGENT_MAX_BATCH_READ_PAGES,
   AGENT_MAX_BATCH_RENDER_PAGES,
@@ -37,6 +46,54 @@ const now = () => new Date().toISOString();
 const DEFAULT_SEARCH_LIMIT = 20;
 const DEFAULT_ASSET_LIMIT = 40;
 const DEFAULT_DOCUMENT_SEARCH_LIMIT = 20;
+
+export type AgentHarnessOptions = {
+  modelCapability?: AgentModelCapability;
+  activeMetadocId?: string;
+  activeRoleWorkingDirectory?: string;
+  primeDirective?: AgentDocument;
+};
+
+export const METADOC_ONLY_AGENT_TOOL_NAMES = new Set([
+  "listDocuments",
+  "listRoles",
+  "readDocument",
+  "readDocumentLines",
+  "searchDocuments",
+  "writeDocument",
+  "appendDocument",
+  "replaceDocumentSection",
+  "replaceDocumentText",
+  "editDocumentLines",
+  "deleteDocument",
+  "validateDocumentAgainstProject",
+]);
+
+export const isMetadocOnlyAgentToolName = (toolName: string) =>
+  METADOC_ONLY_AGENT_TOOL_NAMES.has(toolName);
+
+export const isMetadocOnlyToolCallAllowed = (
+  call: AgentToolCallRequest,
+) =>
+  isMetadocOnlyAgentToolName(call.toolName);
+
+export const createMetadocOnlyToolBlockedResult = (
+  call: AgentToolCallRequest,
+  activeMetadocId?: string | null,
+  activeRoleWorkingDirectory?: string | null,
+  projectUpdatedAt?: string | null,
+) =>
+  createAgentHarnessToolResult(call.toolName, call.input, {
+    projectUpdatedAt: projectUpdatedAt ?? null,
+    blocked: true,
+    reason:
+      "This Agent model is configured for text-only document work. It cannot read pages, image assets, or renders.",
+    activeMetadocId: activeMetadocId ?? null,
+    activeRoleWorkingDirectory: activeRoleWorkingDirectory ?? null,
+    allowedTools: Array.from(METADOC_ONLY_AGENT_TOOL_NAMES),
+    guidance:
+      "Use the preloaded readPrimeDirective and readActiveRoleMetadoc results for pinned context. This mode is document-only: it may read/list/search any Markdown document and mutate only existing ordinary documents under the active role working directory, but it cannot create documents or inspect pages, images, or renders.",
+  });
 
 const renderDetailSchema = { type: "string", enum: ["preview", "detail"] };
 const renderCropSchema = {
@@ -102,6 +159,69 @@ const documentResultSummary = (document: AgentDocument) => ({
   contentLength: document.content.length,
 });
 
+const documentWriteInputWouldChange = (
+  existing: AgentDocument,
+  input: Partial<AgentDocumentMeta> & { content: string },
+) => {
+  const relatedPageIdsChanged = Array.isArray(input.relatedPageIds) &&
+    JSON.stringify(input.relatedPageIds) !== JSON.stringify(existing.relatedPageIds);
+  return input.content !== existing.content ||
+    (typeof input.title === "string" && input.title !== existing.title) ||
+    (typeof input.role === "string" && input.role !== existing.role) ||
+    (typeof input.status === "string" && input.status !== existing.status) ||
+    (typeof input.path === "string" && input.path !== existing.path) ||
+    (typeof input.summary === "string" && input.summary !== (existing.summary ?? "")) ||
+    relatedPageIdsChanged;
+};
+
+const primeDirectiveResultValue = (document: AgentDocument) => ({
+  document: {
+    id: document.id,
+    title: document.title,
+    path: document.path,
+    status: document.status,
+    summary: document.summary ?? "",
+    content: document.content,
+    contentLength: document.content.length,
+  },
+  priority:
+    "Project-level directive. Interpret role metadocs, creator requests, page evidence, and output documents through this directive.",
+  conflictRule:
+    "If role instructions, chat, or ordinary documents conflict with PrimeDirective.md, follow PrimeDirective.md and report the conflict.",
+});
+
+const incrementalDocumentEditSummary = (
+  document: AgentDocument,
+  edit: IncrementalDocumentEdit,
+) => ({
+  saved: true,
+  verified: true,
+  changed: edit.changed,
+  edit,
+  document: documentResultSummary(document),
+});
+
+const incrementalDocumentNoWriteSummary = (
+  document: AgentDocument,
+  edit: Parameters<typeof incrementalDocumentEditSummary>[1],
+) => {
+  const verified = isIncrementalDocumentEditVerifiedNoop(edit);
+  return {
+    saved: verified,
+    verified,
+    changed: false,
+    alreadyApplied: verified,
+    edit,
+    document: documentResultSummary(document),
+    reason: verified
+      ? "The requested document edit was already present, so no file write was needed."
+      : incrementalDocumentEditFailureReason(edit),
+    guidance: verified
+      ? "Treat this document edit as complete. Do not call the same document mutation again."
+      : "Do not report the document edit as completed. Use the available document content to choose a correct heading/text target or ask for clarification.",
+  };
+};
+
 const documentLookupFailureResult = (
   requestedDocumentId: string,
   error: unknown,
@@ -112,7 +232,7 @@ const documentLookupFailureResult = (
   error: error instanceof Error ? error.message : String(error),
   availableDocuments: availableDocuments.map(documentIndexEntry),
   guidance:
-    "Use one of the available document ids or paths. For role output, prefer the active role metadoc instead of inventing a new document id.",
+    "Use one of the available document ids or paths. The Agent may edit or delete only existing ordinary Markdown documents under the active role working directory; if the target is missing, ask the creator to create it manually first.",
 });
 
 type AgentDocumentLookupFailure = ReturnType<typeof documentLookupFailureResult>;
@@ -558,16 +678,8 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     requiresConfirmation: false,
   }),
   tool({
-    name: "listCommandManifest",
-    description: "Read the command registry manifest and command payload schemas only before preparing an editor command plan when the schema is not already present. Project mutations must use these command ids and schemas.",
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    outputDescription: "Command manifest entries derived from the local command registry.",
-    mutatesProject: false,
-    requiresConfirmation: false,
-  }),
-  tool({
     name: "listDocuments",
-    description: "List durable Markdown production documents in this project when the needed document id is not already known. The active role metadoc is already supplied as readActiveRoleMetadoc.",
+    description: "List durable Markdown production documents in this project when the needed document id is not already known. The active role metadoc is already supplied as readActiveRoleMetadoc and is the role prompt/definition, not a work-output log.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     outputDescription: "Document ids, titles, optional role tags, status, paths, related pages, update times, summaries, and role metadoc bindings.",
     mutatesProject: false,
@@ -575,9 +687,9 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "listRoles",
-    description: "List project Agent roles and their required metadoc document ids. Every active role has one metadoc; documents without a matching role are ordinary docs.",
+    description: "List project Agent roles, required role prompt metadoc ids, and working directories. Every active role has one metadoc; work output should live in ordinary docs under the role working directory.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    outputDescription: "Role ids, names, titles, metadoc ids, autonomy defaults, preferred tools, and role prompts.",
+    outputDescription: "Role ids, names, metadoc ids, working directories, autonomy defaults, and preferred tools. The role metadoc content is the role prompt.",
     mutatesProject: false,
     requiresConfirmation: false,
   }),
@@ -601,7 +713,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "searchDocuments",
-    description: "Search durable Markdown production documents by title, summary, path, role, and content only when the preloaded metadoc and known document ids are insufficient.",
+    description: "Search durable Markdown production documents by title, summary, path, role, and content only when the preloaded Prime Directive, role metadoc, and known document ids are insufficient.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -617,7 +729,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "writeDocument",
-    description: "Create or update one durable Markdown production document. This is the only successful completion path for document/metadoc edit requests. For role output, update the active role metadoc unless the creator explicitly asks for a new ordinary document.",
+    description: "Replace one existing durable Markdown production document with complete revised Markdown content. The Agent is forbidden to create new Markdown documents; if the target document does not already exist, ask the creator to create it manually. Prefer replaceDocumentSection or replaceDocumentText for focused edits; use appendDocument only for plain heading-free additive notes/log lines. Hard rule: reads may inspect any Markdown document, but writes are allowed only for existing ordinary docs under harness.resourcePolicy.activeRoleWorkingDirectory. Do not mutate role metadocs, PrimeDirective.md, or documents outside that working directory.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -660,103 +772,195 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     requiresConfirmation: false,
   }),
   tool({
-    name: "readSysmlStandardOverview",
-    description: "Read the built-in SysML v2/KerML/Pilot reference overview and topic index. This short overview is already supplied in the initial harness.",
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    outputDescription: "Mandatory SysML harness rules and available reference topics.",
-    mutatesProject: false,
-    requiresConfirmation: false,
-  }),
-  tool({
-    name: "readSysmlStandardReference",
-    description: "Read one built-in SysML v2 reference topic before writing or repairing unfamiliar MBSE model semantics.",
+    name: "readDocumentLines",
+    description: "Read a Markdown document with stable 1-based line numbers. Use this before editDocumentLines when deleting, inserting, or replacing an arbitrary line range.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["topic"],
+      required: ["documentId"],
       properties: {
-        topic: { type: "string", enum: [...SYSML_STANDARD_REFERENCE_TOPIC_IDS] },
+        documentId: {
+          type: "string",
+          description: "Prefer the stable manifest document id from listDocuments/searchDocuments; path, filename, or exact title are accepted only as fallback.",
+        },
+        startLine: { type: "number", minimum: 1 },
+        endLine: { type: "number", minimum: 1 },
       },
     },
-    outputDescription: "Focused SysML v2/KerML/Pilot guidance for the requested topic.",
+    outputDescription: "Document metadata, total line count, requested line range, and line-numbered Markdown text.",
     mutatesProject: false,
     requiresConfirmation: false,
   }),
   tool({
-    name: "getSysmlStatus",
-    description: "Read whether the official SysML v2 Pilot validator is configured. Use this before SysML/MBSE work if no SysML status is already present.",
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    outputDescription: "SysML backend status, official Pilot availability, and configuration reason if unavailable.",
-    mutatesProject: false,
-    requiresConfirmation: false,
-  }),
-  tool({
-    name: "listSysmlFiles",
-    description: "List project SysML/KerML model files. This does not read full file contents.",
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    outputDescription: "SysML file paths, sizes, hashes, and update times.",
-    mutatesProject: false,
-    requiresConfirmation: false,
-  }),
-  tool({
-    name: "readSysmlFile",
-    description: "Read one SysML/KerML model file by path when the model content is needed for MBSE reasoning or editing.",
+    name: "appendDocument",
+    description: "Append plain Markdown body text to an existing working-dir document or existing heading. Use only for truly additive notes, logs, or checklist items. Do not use this for replacing/restructuring sections, page ranges, metadoc plans, or any content that contains Markdown headings; use replaceDocumentSection or writeDocument for those edits. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["path"],
-      properties: { path: { type: "string" } },
-    },
-    outputDescription: "One SysML file with content and hash.",
-    mutatesProject: false,
-    requiresConfirmation: false,
-  }),
-  tool({
-    name: "writeSysmlFile",
-    description: "Create or update one SysML/KerML model file. Use this for durable MBSE model changes, then validateSysmlModel.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "path", "content"],
+      required: ["operationId", "documentId", "content"],
       properties: {
-        operationId: { type: "string" },
+        operationId: {
+          type: "string",
+          description: "Stable idempotency key for this exact append operation. Reuse only when retrying the same content.",
+        },
+        documentId: {
+          type: "string",
+          description: "Stable manifest document id, path, filename, or exact title. For role output, prefer an ordinary document under the active role working directory.",
+        },
+        heading: {
+          type: "string",
+          description: "Optional existing heading to append under. If absent, content is appended to the end of the document.",
+        },
+        createHeadingIfMissing: {
+          type: "boolean",
+          description: "Legacy compatibility only. Prefer replaceDocumentSection to create a heading section.",
+        },
+        title: { type: "string" },
+        role: { type: "string" },
+        status: { type: "string", enum: ["draft", "ready", "applied", "obsolete"] },
         path: { type: "string" },
+        relatedPageIds: { type: "array", items: { type: "string" } },
+        summary: { type: "string" },
         content: { type: "string" },
       },
     },
-    outputDescription: "Saved SysML file metadata, idempotency status, changed flag, and content hash.",
+    outputDescription: "Saved document metadata plus append summary, changed flag, target heading, and content lengths. Heading-bearing content is refused as an unsafe append.",
     mutatesProject: true,
     requiresConfirmation: false,
   }),
   tool({
-    name: "validateSysmlModel",
-    description: "Validate the project's SysML model with the official SysML v2 Pilot implementation. Optionally validate only named paths; omit paths for the full model.",
+    name: "deleteDocument",
+    description: "Delete one existing ordinary Markdown document from the active role working directory when the creator explicitly asks for that document to be removed. This cannot delete PrimeDirective.md, role metadocs, or documents outside harness.resourcePolicy.activeRoleWorkingDirectory. The Agent may not create replacement documents.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
+      required: ["operationId", "documentId"],
       properties: {
-        paths: { type: "array", items: { type: "string" } },
+        operationId: {
+          type: "string",
+          description: "Stable idempotency key for this exact delete operation.",
+        },
+        documentId: {
+          type: "string",
+          description: "Stable manifest document id from listDocuments/searchDocuments. Path, filename, or exact title may be accepted by the backend as fallback.",
+        },
       },
     },
-    outputDescription: "Official Pilot validation result, diagnostics, source hash, and validated files.",
-    mutatesProject: false,
+    outputDescription: "Deletion verification, removed document metadata, and updated document manifest counts.",
+    mutatesProject: true,
     requiresConfirmation: false,
   }),
   tool({
-    name: "proposeCommandPlan",
-    description: "Prepare a command plan for validation and possible execution by MangaMaker. This is the only mutation path available to the Agent.",
+    name: "replaceDocumentSection",
+    description: "Replace the body of one Markdown heading section in an existing working-dir document, or create that section when createIfMissing is not false. Use this for role output documents such as page ranges, plans, character notes, prompt rules, or supervision records. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["summary", "commands"],
+      required: ["operationId", "documentId", "heading", "content"],
       properties: {
+        operationId: {
+          type: "string",
+          description: "Stable idempotency key for this exact section replacement. Reuse only when retrying the same content.",
+        },
+        documentId: {
+          type: "string",
+          description: "Stable manifest document id, path, filename, or exact title. For role output, prefer an ordinary document under the active role working directory.",
+        },
+        heading: { type: "string" },
+        headingLevel: { type: "number", minimum: 1, maximum: 6 },
+        occurrence: { type: "number", minimum: 1 },
+        createIfMissing: { type: "boolean" },
+        contentIncludesHeading: {
+          type: "boolean",
+          description: "Set true only when content already includes the Markdown heading line to write as the complete replacement section.",
+        },
+        title: { type: "string" },
+        role: { type: "string" },
+        status: { type: "string", enum: ["draft", "ready", "applied", "obsolete"] },
+        path: { type: "string" },
+        relatedPageIds: { type: "array", items: { type: "string" } },
         summary: { type: "string" },
-        commands: { type: "array", minItems: 1, items: { type: "object" } },
+        content: { type: "string" },
       },
     },
-    outputDescription: "A pendingCommandPlan in the model response. The app validates it against local Zod schemas before display.",
+    outputDescription: "Saved document metadata plus section replacement summary, changed flag, heading, occurrence, and content lengths.",
     mutatesProject: true,
-    requiresConfirmation: true,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "replaceDocumentText",
+    description: "Replace an exact text span in an existing working-dir Markdown document. Use this for precise small edits when the old text is known from readDocument/readDocumentLines. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "documentId", "oldText", "newText"],
+      properties: {
+        operationId: {
+          type: "string",
+          description: "Stable idempotency key for this exact text replacement. Reuse only when retrying the same text replacement.",
+        },
+        documentId: {
+          type: "string",
+          description: "Stable manifest document id, path, filename, or exact title. For role output, prefer an ordinary document under the active role working directory.",
+        },
+        oldText: { type: "string" },
+        newText: { type: "string" },
+        replaceAll: { type: "boolean" },
+        title: { type: "string" },
+        role: { type: "string" },
+        status: { type: "string", enum: ["draft", "ready", "applied", "obsolete"] },
+        path: { type: "string" },
+        relatedPageIds: { type: "array", items: { type: "string" } },
+        summary: { type: "string" },
+      },
+    },
+    outputDescription: "Saved document metadata plus exact text replacement count, changed flag, and content lengths.",
+    mutatesProject: true,
+    requiresConfirmation: false,
+  }),
+  tool({
+    name: "editDocumentLines",
+    description: "Apply arbitrary Markdown line edits to an existing working-dir document using 1-based line numbers from readDocumentLines. Use this for deleting any line range, replacing any line range, or inserting text at any line when section/text tools are too narrow. Multiple operations are interpreted against the original line-numbered snapshot and applied from bottom to top. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "documentId", "operations"],
+      properties: {
+        operationId: {
+          type: "string",
+          description: "Stable idempotency key for this exact set of line edits. Reuse only when retrying the same edit.",
+        },
+        documentId: {
+          type: "string",
+          description: "Stable manifest document id, path, filename, or exact title. For role output, prefer an ordinary document under the active role working directory.",
+        },
+        operations: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["type"],
+            properties: {
+              type: { type: "string", enum: ["replace", "delete", "insertBefore", "insertAfter"] },
+              startLine: { type: "number", minimum: 1 },
+              endLine: { type: "number", minimum: 1 },
+              line: { type: "number", minimum: 0 },
+              content: { type: "string" },
+            },
+          },
+        },
+        title: { type: "string" },
+        role: { type: "string" },
+        status: { type: "string", enum: ["draft", "ready", "applied", "obsolete"] },
+        path: { type: "string" },
+        relatedPageIds: { type: "array", items: { type: "string" } },
+        summary: { type: "string" },
+      },
+    },
+    outputDescription: "Saved document metadata plus line edit summary, changed flag, applied operation count, line counts, and content lengths.",
+    mutatesProject: true,
+    requiresConfirmation: false,
   }),
 ];
 
@@ -783,8 +987,48 @@ const projectStateResult = (
 export const buildAgentHarness = (
   context: AgentContextSnapshot,
   dynamicToolResults: AgentHarnessToolResult[] = [],
+  options: AgentHarnessOptions = {},
 ): AgentHarnessSnapshot => {
-  const initialToolResults = [
+  const modelCapability = options.modelCapability ?? "multimodal";
+  const metadocOnly = modelCapability === "metadoc";
+  const existingPrimeDirectiveResult = dynamicToolResults.find((entry) => entry.toolName === "readPrimeDirective");
+  const existingPrimeDirectiveInput =
+    existingPrimeDirectiveResult?.input &&
+    typeof existingPrimeDirectiveResult.input === "object" &&
+    !Array.isArray(existingPrimeDirectiveResult.input)
+      ? existingPrimeDirectiveResult.input as Record<string, unknown>
+      : {};
+  const primeDirectiveDocumentId =
+    options.primeDirective?.id ??
+    (typeof existingPrimeDirectiveInput.documentId === "string" ? existingPrimeDirectiveInput.documentId : undefined);
+  const primeDirectivePreloaded = Boolean(options.primeDirective || existingPrimeDirectiveResult);
+  const primeDirectiveResult = options.primeDirective && !existingPrimeDirectiveResult
+    ? [
+        result(
+          "readPrimeDirective",
+          { documentId: options.primeDirective.id },
+          primeDirectiveResultValue(options.primeDirective),
+        ),
+      ]
+    : [];
+  const initialToolResults = metadocOnly
+    ? [
+        ...primeDirectiveResult,
+        result("metadocOnlyPolicy", {}, {
+          modelCapability,
+          activeMetadocId: options.activeMetadocId ?? null,
+          activeRoleWorkingDirectory: options.activeRoleWorkingDirectory ?? null,
+          pinnedContext: ["systemPrompt", "readPrimeDirective", "readActiveRoleMetadoc"],
+          roleMetadocPurpose: "role-prompt-definition-only",
+          visibleContext:
+            "This run is restricted to document-only work. Prime Directive and active role metadoc are pinned context. Page context, image assets, and renders are not supplied.",
+          allowedTools: Array.from(METADOC_ONLY_AGENT_TOOL_NAMES),
+          outputRule:
+            "Read any project Markdown document when needed, but write only to ordinary Markdown documents under the active role working directory. Do not mutate role metadocs, PrimeDirective.md, or documents outside the working directory.",
+        }),
+      ]
+    : [
+    ...primeDirectiveResult,
     result("readProjectSummary", {}, {
       projectUpdatedAt: context.project.updatedAt,
       project: context.project,
@@ -809,14 +1053,16 @@ export const buildAgentHarness = (
           }
         : null,
     }),
-    result("readSysmlStandardOverview", {}, getSysmlStandardOverview()),
   ];
+  const tools = metadocOnly
+    ? AGENT_HARNESS_TOOLS.filter((entry) => isMetadocOnlyAgentToolName(entry.name))
+    : AGENT_HARNESS_TOOLS;
   return {
     mode: "tool-harness",
     currentPageId: context.currentPage?.id ?? context.selectedPageId,
     projectId: context.project.id,
     currentPageMarkedBy: "isCurrent",
-    tools: AGENT_HARNESS_TOOLS,
+    tools,
     initialToolResults,
     dynamicToolResults,
     completedToolCallIndex: createCompletedAgentToolCallIndex(
@@ -826,19 +1072,43 @@ export const buildAgentHarness = (
         currentPageId: context.currentPage?.id ?? context.selectedPageId,
       },
     ),
+    taskProtocol: {
+      requiredResponseField: "taskProgress",
+      planningRequired: true,
+      maxSteps: 12,
+      stopRule:
+        "Before requesting tools, define the smallest task plan and a concrete stopCondition. Stop as soon as that condition is met instead of continuing exploratory tool use.",
+      progressRule:
+        "Every model response must update taskProgress with objective, phase, status, steps, currentStepId, stopCondition, nextAction, and percent when useful.",
+      actionRule:
+        "If taskProgress.status is planning, running, or needs_tool, you must request the exact next harness tool call or mark the task blocked with a concrete stopReason. requestedToolCalls: [] is valid for completed, blocked, or waiting_for_user responses that ask the creator for missing input.",
+      completionRule:
+        metadocOnly
+          ? "When the document task is complete, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status: completed, taskProgress.phase: complete, and a stopReason. Do not request page, image, or render tools."
+          : "When the task is complete, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status: completed, taskProgress.phase: complete, and a stopReason. After any allowed working-dir Markdown mutation returns saved=true, verified=true, and changed=true or alreadyApplied=true, report completion and stop.",
+    },
     resourcePolicy: {
-      allPagesReadable: true,
-      assetsReadableOnDemand: true,
+      modelCapability,
+      metadocOnly,
+      ...(options.activeMetadocId ? { activeMetadocId: options.activeMetadocId } : {}),
+      ...(options.activeRoleWorkingDirectory ? { activeRoleWorkingDirectory: options.activeRoleWorkingDirectory } : {}),
+      roleMetadocPurpose: "role-prompt-definition-only",
+      pinnedContext: ["systemPrompt", "readPrimeDirective", "readActiveRoleMetadoc"],
+      evictableContext: ["conversationMessages", "dynamicToolResults", "ordinaryDocuments", "pageReads", "renders"],
+      allPagesReadable: !metadocOnly,
+      assetsReadableOnDemand: !metadocOnly,
       documentsReadableOnDemand: true,
       documentsWritableOnDemand: true,
-      sysmlReadableOnDemand: true,
-      sysmlWritableOnDemand: true,
-      sysmlValidationProvider: "official-pilot",
-      sysmlStandardReference: "overview-preloaded-topic-tools",
+      documentsCreatableByAgent: false,
+      documentWriteScope: AGENT_DOCUMENT_WRITE_SCOPE,
+      primeDirectiveDocumentId,
+      primeDirectivePreloaded,
       inlineDataUrlsRedactedFromPrompt: true,
-      projectMutationPath: "commandPlanOnly",
+      projectMutationPath: "documentOnly",
       pagePanelBoundary:
-        "A page is a top-level comic page. A panel is an object inside exactly one page. Refer to panels by pageId+panelId or panelRef.",
+        metadocOnly
+          ? "Unavailable in text-only document mode. This model cannot inspect pages or panels."
+          : "A page is a top-level comic page. A panel is an object inside exactly one page. Refer to panels by pageId+panelId or panelRef.",
     },
   };
 };
@@ -909,7 +1179,19 @@ const getRenderCropInput = (input: unknown): AgentSnapshotCrop | undefined => {
 export const executeAgentHarnessToolCall = async (
   context: AgentContextSnapshot,
   call: AgentToolCallRequest,
+  options: AgentHarnessOptions = {},
 ): Promise<AgentHarnessToolResult> => {
+  if (
+    options.modelCapability === "metadoc" &&
+    !isMetadocOnlyToolCallAllowed(call)
+  ) {
+    return createMetadocOnlyToolBlockedResult(
+      call,
+      options.activeMetadocId,
+      options.activeRoleWorkingDirectory,
+      context.project.updatedAt,
+    );
+  }
   if (call.toolName === "readProjectSummary") {
     return result(call.toolName, call.input, {
       projectUpdatedAt: context.project.updatedAt,
@@ -1059,7 +1341,11 @@ export const executeAgentHarnessToolCall = async (
     });
   }
   if (call.toolName === "listCommandManifest") {
-    return result(call.toolName, call.input, context.commandManifest);
+    return result(call.toolName, call.input, {
+      available: false,
+      reason:
+        "Canvas/page command plans are disabled for the built-in Agent. Use editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument for existing Markdown documents. The Agent cannot create documents.",
+    });
   }
   if (call.toolName === "listDocuments") {
     const manifest = await listProjectDocuments(context.project.id);
@@ -1069,8 +1355,8 @@ export const executeAgentHarnessToolCall = async (
       roles: manifest.roles.map((role) => ({
         id: role.id,
         name: role.name,
-        title: role.title,
         metadocId: role.metadocId,
+        workingDirectory: role.workingDirectory ?? null,
         defaultAutonomy: role.defaultAutonomy,
         preferredTools: role.preferredTools,
       })),
@@ -1082,12 +1368,32 @@ export const executeAgentHarnessToolCall = async (
     return result(call.toolName, call.input, {
       projectId: manifest.projectId,
       updatedAt: manifest.updatedAt,
-      roles: manifest.roles,
+      roles: manifest.roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        metadocId: role.metadocId,
+        workingDirectory: role.workingDirectory ?? null,
+        defaultAutonomy: role.defaultAutonomy,
+        preferredTools: role.preferredTools,
+        metadocIsRolePrompt: true,
+      })),
     });
   }
   if (call.toolName === "readDocument") {
     const documentId = (call.input as { documentId?: string }).documentId ?? "";
     return result(call.toolName, call.input, await readProjectDocumentForTool(context.project.id, documentId));
+  }
+  if (call.toolName === "readDocumentLines") {
+    const input = call.input as { documentId?: string; startLine?: number; endLine?: number };
+    const document = await readProjectDocumentForTool(context.project.id, input.documentId ?? "");
+    if (isDocumentLookupFailure(document)) {
+      return result(call.toolName, call.input, document);
+    }
+    return result(call.toolName, call.input, createDocumentLinesResult(document, {
+      documentId: document.id,
+      startLine: input.startLine,
+      endLine: input.endLine,
+    }));
   }
   if (call.toolName === "searchDocuments") {
     return result(call.toolName, call.input, await searchDocuments(context, call.input as {
@@ -1098,6 +1404,41 @@ export const executeAgentHarnessToolCall = async (
   }
   if (call.toolName === "writeDocument") {
     const input = call.input as Partial<AgentDocumentMeta> & { content: string; operationId: string };
+    const manifest = await listProjectDocuments(context.project.id);
+    const documentId = String(input.id ?? "").trim();
+    const existing = manifest.documents.find((document) => document.id === documentId) ?? null;
+    let scopedWritePath = existing?.path ?? "";
+    const existingScopeBlock = existing
+      ? validateExistingAgentDocumentWriteScope({
+          toolName: call.toolName,
+          document: existing,
+          requestedPath: input.path,
+          activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+        })
+      : null;
+    if (existingScopeBlock) {
+      return result(call.toolName, call.input, existingScopeBlock);
+    }
+    if (!existing) {
+      return result(call.toolName, call.input, createAgentDocumentWriteScopeBlockedResult({
+        toolName: call.toolName,
+        requestedDocumentId: documentId,
+        requestedPath: input.path,
+        activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+        reason:
+          `Document ${documentId || "(missing id)"} does not exist. The Agent is not allowed to create Markdown documents; create the document manually first.`,
+      }));
+    }
+    input.path = scopedWritePath;
+    const existingDocument = await readProjectDocumentForTool(context.project.id, documentId);
+    if (isDocumentLookupFailure(existingDocument)) {
+      return result(call.toolName, call.input, {
+        ...existingDocument,
+        saved: false,
+        verified: false,
+      });
+    }
+    const changed = documentWriteInputWouldChange(existingDocument, input);
     let saved: AgentDocument;
     try {
       saved = await writeProjectDocument(context.project.id, input);
@@ -1119,62 +1460,234 @@ export const executeAgentHarnessToolCall = async (
     return result(call.toolName, call.input, {
       saved: true,
       verified: true,
+      changed,
+      alreadyApplied: false,
       operationId: input.operationId,
       document: documentResultSummary(saved),
+      ...(changed
+        ? {}
+        : {
+            reason:
+              "writeDocument saved and verified the existing document, but the submitted content and metadata matched the current document. No document content changed.",
+            guidance:
+              "Do not report this as a completed edit unless the requested change was already present. If the creator asked for a change, inspect the target and retry with different content.",
+          }),
     });
+  }
+  if (call.toolName === "deleteDocument") {
+    const input = call.input as { operationId: string; documentId: string };
+    const document = await readProjectDocumentForTool(context.project.id, input.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return result(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+        deleted: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+    });
+    if (scopeBlock) {
+      return result(call.toolName, call.input, scopeBlock);
+    }
+    const manifest = await deleteProjectDocument(context.project.id, document.id);
+    const stillPresent = manifest.documents.some((entry) => entry.id === document.id);
+    return result(call.toolName, call.input, {
+      saved: !stillPresent,
+      verified: !stillPresent,
+      changed: !stillPresent,
+      deleted: !stillPresent,
+      operationId: input.operationId,
+      document: documentResultSummary(document),
+      documentCount: manifest.documents.length,
+      guidance: stillPresent
+        ? "The delete operation did not verify; do not report completion."
+        : "The requested document was deleted and verified absent from the manifest.",
+    });
+  }
+  if (call.toolName === "appendDocument") {
+    const input = call.input as AppendDocumentInput;
+    const document = await readProjectDocumentForTool(context.project.id, input.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return result(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: input.path,
+      activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+    });
+    if (scopeBlock) {
+      return result(call.toolName, call.input, scopeBlock);
+    }
+    const scopedInput = { ...input, path: document.path };
+    const applied = applyAppendDocumentEdit(document, scopedInput);
+    if (!applied.edit.changed) {
+      return result(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const saved = await writeProjectDocument(context.project.id, applied.writePayload);
+      return result(call.toolName, call.input, incrementalDocumentEditSummary(saved, applied.edit));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return result(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId: input.operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
+  }
+  if (call.toolName === "replaceDocumentSection") {
+    const input = call.input as ReplaceDocumentSectionInput;
+    const document = await readProjectDocumentForTool(context.project.id, input.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return result(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: input.path,
+      activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+    });
+    if (scopeBlock) {
+      return result(call.toolName, call.input, scopeBlock);
+    }
+    const scopedInput = { ...input, path: document.path };
+    const applied = applyReplaceDocumentSectionEdit(document, scopedInput);
+    if (!applied.edit.changed) {
+      return result(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const saved = await writeProjectDocument(context.project.id, applied.writePayload);
+      return result(call.toolName, call.input, incrementalDocumentEditSummary(saved, applied.edit));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return result(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId: input.operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
+  }
+  if (call.toolName === "replaceDocumentText") {
+    const input = call.input as ReplaceDocumentTextInput;
+    const document = await readProjectDocumentForTool(context.project.id, input.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return result(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: input.path,
+      activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+    });
+    if (scopeBlock) {
+      return result(call.toolName, call.input, scopeBlock);
+    }
+    const scopedInput = { ...input, path: document.path };
+    const applied = applyReplaceDocumentTextEdit(document, scopedInput);
+    if (!applied.edit.changed) {
+      return result(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const saved = await writeProjectDocument(context.project.id, applied.writePayload);
+      return result(call.toolName, call.input, incrementalDocumentEditSummary(saved, applied.edit));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return result(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId: input.operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
+  }
+  if (call.toolName === "editDocumentLines") {
+    const input = call.input as EditDocumentLinesInput;
+    const document = await readProjectDocumentForTool(context.project.id, input.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return result(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: input.path,
+      activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+    });
+    if (scopeBlock) {
+      return result(call.toolName, call.input, scopeBlock);
+    }
+    const scopedInput = { ...input, path: document.path };
+    const applied = applyEditDocumentLinesEdit(document, scopedInput);
+    if (!applied.edit.changed) {
+      return result(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const saved = await writeProjectDocument(context.project.id, applied.writePayload);
+      return result(call.toolName, call.input, incrementalDocumentEditSummary(saved, applied.edit));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return result(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId: input.operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
   }
   if (call.toolName === "validateDocumentAgainstProject") {
     return result(call.toolName, call.input, await validateDocumentAgainstProject(context, call.input as { documentId?: string }));
-  }
-  if (call.toolName === "readSysmlStandardOverview") {
-    return result(call.toolName, call.input, getSysmlStandardOverview());
-  }
-  if (call.toolName === "readSysmlStandardReference") {
-    const topic = (call.input as { topic?: string }).topic ?? "";
-    if (!SYSML_STANDARD_REFERENCE_TOPIC_IDS.includes(topic as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number])) {
-      throw new Error(`Unsupported SysML standard reference topic: ${topic}`);
-    }
-    return result(
-      call.toolName,
-      call.input,
-      readSysmlStandardReferenceTopic(topic as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number]),
-    );
-  }
-  if (call.toolName === "getSysmlStatus") {
-    return result(call.toolName, call.input, await getSysmlConfig());
-  }
-  if (call.toolName === "listSysmlFiles") {
-    return result(call.toolName, call.input, await listSysmlProjectFiles(context.project.id));
-  }
-  if (call.toolName === "readSysmlFile") {
-    const filePath = (call.input as { path?: string }).path ?? "";
-    return result(call.toolName, call.input, await readSysmlProjectFile(context.project.id, filePath));
-  }
-  if (call.toolName === "writeSysmlFile") {
-    const input = call.input as { operationId?: string; path?: string; content?: string };
-    return result(call.toolName, call.input, await writeSysmlProjectFile(context.project.id, {
-      path: input.path ?? "",
-      content: input.content ?? "",
-      operationId: input.operationId,
-    }));
-  }
-  if (call.toolName === "validateSysmlModel") {
-    const paths = Array.isArray((call.input as { paths?: unknown }).paths)
-      ? ((call.input as { paths: unknown[] }).paths).filter((entry): entry is string => typeof entry === "string")
-      : [];
-    const files = paths.length > 0
-      ? await Promise.all(paths.map((filePath) => readSysmlProjectFile(context.project.id, filePath).then((file) => ({
-          path: file.path,
-          content: file.content,
-        }))))
-      : undefined;
-    return result(call.toolName, call.input, await validateSysmlProject(context.project.id, files));
   }
   if (call.toolName === "proposeCommandPlan") {
     return result(call.toolName, call.input, {
       accepted: false,
       reason:
-        "Return this plan as pendingCommandPlan in the final JSON response so MangaMaker can validate schemas and apply confirmation policy.",
+        "Canvas/page command plans are disabled for the built-in Agent. Persist intent in existing Markdown documents with editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument, or describe the manual editor steps for the creator. The Agent cannot create documents.",
     });
   }
   throw new Error(`Unsupported Agent harness tool: ${call.toolName}`);

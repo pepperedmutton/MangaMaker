@@ -10,6 +10,7 @@ import {
 } from "../domain/clipboard";
 import type { ElementLibraryItem } from "../domain/elementLibrary";
 import type { Page, Project, ProjectType } from "../domain/schema";
+import { getPageDisplayName } from "../domain/pageNaming";
 import { downloadDataUrl } from "../export/download";
 import { formatLocaleTime, getDefaultProjectTitle, translate } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
@@ -27,7 +28,6 @@ import { Inspector } from "./Inspector";
 import { FirstRunGuide } from "./Onboarding";
 import { RibbonBar } from "./RibbonBar";
 import { Sidebar } from "./Sidebar";
-import { SysmlWorkspace } from "./SysmlWorkspace";
 import { WelcomeScreen } from "./WelcomeScreen";
 
 const isTextEditingElement = (target: EventTarget | null) => {
@@ -189,7 +189,7 @@ export const App = () => {
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(220);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(300);
   const [rightSidebarMode, setRightSidebarMode] = useState<"inspector" | "agent">("inspector");
-  const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "docs" | "sysml">("canvas");
+  const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "docs">("canvas");
   const [documentManifest, setDocumentManifest] = useState<AgentDocumentManifest | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [isLayoutResizing, setIsLayoutResizing] = useState(false);
@@ -206,6 +206,13 @@ export const App = () => {
 
   const selectedPage =
     project.pages.find((page) => page.id === selectedPageId) ?? project.pages[0] ?? null;
+  const selectedPageIndex = selectedPage
+    ? project.pages.findIndex((page) => page.id === selectedPage.id)
+    : -1;
+  const selectedPageDisplayName =
+    selectedPage && selectedPageIndex >= 0
+      ? getPageDisplayName(locale, selectedPageIndex)
+      : undefined;
   const selectedPanel =
     selectedPage && selection?.pageId === selectedPage.id && selection.objectType === "panel"
       ? selectedPage.panels.find((panel) => panel.id === selection.objectId) ?? null
@@ -469,7 +476,7 @@ export const App = () => {
     await handleSaveProject();
   };
 
-  const handleSetWorkspaceMode = (mode: "canvas" | "docs" | "sysml") => {
+  const handleSetWorkspaceMode = (mode: "canvas" | "docs") => {
     setWorkspaceMode(mode);
   };
 
@@ -958,12 +965,6 @@ export const App = () => {
                   onDocumentSaved={refreshProjectDocuments}
                 />
               </div>
-              <div
-                className={`workspace-pane${workspaceMode === "sysml" ? " active" : ""}`}
-                aria-hidden={workspaceMode !== "sysml"}
-              >
-                <SysmlWorkspace projectId={project.id} />
-              </div>
             </div>
             <div className="status-bar">
               <span>{statusMessage?.text ?? t("status.ready")}</span>
@@ -1014,6 +1015,7 @@ export const App = () => {
       ) : (
         <Inspector
           page={selectedPage}
+          pageDisplayName={selectedPageDisplayName}
           activeTool={activeTool}
           onExportProjectPdf={() => void handleExportProjectPdf()}
           onExportProjectJpgZip={() => void handleExportProjectJpgZip()}

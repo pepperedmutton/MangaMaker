@@ -15,6 +15,8 @@ const LEGACY_AGENT_CHAT_HISTORY_FILE: &str = "agent-chat.json";
 const DEFAULT_AGENT_CONVERSATION_ROLE_ID: &str = "assistant";
 const AGENT_DOCS_DIR: &str = "docs";
 const AGENT_DOCS_MANIFEST_FILE: &str = "manifest.json";
+const AGENT_PRIME_DIRECTIVE_DOCUMENT_ID: &str = "prime-directive";
+const AGENT_ROLE_METADOC_PROMPT: &str = "Use the active role metadoc as this role's prompt. Read project documents as needed, but write durable role output only in the role working directory.";
 const KIMI_K2_6_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
 const MIN_AGENT_CONTEXT_WINDOW_TOKENS: u32 = 8_192;
 
@@ -28,6 +30,7 @@ struct AgentConfig {
     enabled: bool,
     provider: String,
     model: Option<String>,
+    model_capability: Option<String>,
     api_key_configured: bool,
     test_mode: bool,
     vision_enabled: bool,
@@ -145,6 +148,8 @@ struct AgentRoleDefinition {
     name: String,
     title: String,
     metadoc_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    working_directory: Option<String>,
     default_autonomy: String,
     allowed_command_groups: Vec<String>,
     preferred_tools: Vec<String>,
@@ -157,14 +162,11 @@ struct AgentRoleDefinition {
 struct AgentRoleInput {
     id: Option<String>,
     name: Option<String>,
-    title: Option<String>,
     metadoc_id: Option<String>,
-    metadoc_title: Option<String>,
-    metadoc_path: Option<String>,
+    working_directory: Option<String>,
     default_autonomy: Option<String>,
     allowed_command_groups: Option<Vec<String>>,
     preferred_tools: Option<Vec<String>>,
-    prompt: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -247,6 +249,7 @@ fn current_agent_config() -> AgentConfig {
             enabled: true,
             provider: "test".to_string(),
             model: Some(model.unwrap_or_else(|| "mangamaker-test-agent".to_string())),
+            model_capability: Some("multimodal".to_string()),
             api_key_configured,
             test_mode: true,
             vision_enabled: true,
@@ -262,6 +265,7 @@ fn current_agent_config() -> AgentConfig {
         enabled: false,
         provider: "unavailable".to_string(),
         model,
+        model_capability: None,
         api_key_configured,
         test_mode: false,
         vision_enabled: false,
@@ -335,6 +339,45 @@ fn create_agent_role_metadoc_path(role_name: &str, fallback: &str) -> String {
     )
 }
 
+fn create_unique_agent_document_path_from_title(
+    title: &str,
+    directory: &str,
+    documents: &[AgentDocumentMeta],
+    ignore_document_id: Option<&str>,
+    fallback: &str,
+) -> String {
+    let directory = directory
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string();
+    let directory = if directory.starts_with(&format!("{AGENT_DOCS_DIR}/")) {
+        directory
+    } else if directory.is_empty() {
+        format!("{AGENT_DOCS_DIR}/general")
+    } else {
+        format!("{AGENT_DOCS_DIR}/{directory}")
+    };
+    let stem = normalize_agent_role_metadoc_file_stem(title, fallback);
+    let mut candidate = format!("{directory}/{stem}.md");
+    let mut index = 2;
+    while documents.iter().any(|document| {
+        Some(document.id.as_str()) != ignore_document_id &&
+            document.path.eq_ignore_ascii_case(&candidate)
+    }) {
+        candidate = format!("{directory}/{stem} {index}.md");
+        index += 1;
+    }
+    candidate
+}
+
+fn create_agent_role_working_directory(role_id: &str, fallback: &str) -> String {
+    format!(
+        "{AGENT_DOCS_DIR}/work/{}",
+        normalize_agent_role_metadoc_file_stem(role_id, fallback).replace(' ', "-")
+    )
+}
+
 fn ensure_projects_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let root = cwd.join(PROJECTS_DIR_NAME);
@@ -398,68 +441,76 @@ fn now_millis_string() -> String {
 fn default_agent_documents() -> Vec<DefaultAgentDocumentDefinition> {
     vec![
         DefaultAgentDocumentDefinition {
+            id: AGENT_PRIME_DIRECTIVE_DOCUMENT_ID,
+            title: "Prime Directive",
+            role: None,
+            path: "docs/PrimeDirective.md",
+            summary: "Project-level prime directive that defines the work type, target form, operating constraints, and all-Agent priorities.",
+            body: "# Prime Directive\n\n## Project Form\n\nDefine what this project is. Examples: manga, CG set, illustrated light novel, storyboard pack, prompt book, or another concrete form.\n\n## Creator Intent\n\nState what the human creator wants this project to become, including audience, tone, format, and delivery target.\n\n## Agent Operating Directive\n\n- This document is project-level direction for every Agent role.\n- Agents must interpret role metadocs, page evidence, scripts, prompts, and ordinary documents through this directive.\n- If a role metadoc or chat instruction conflicts with this document, follow this document and report the conflict.\n- Role metadocs are role prompts and role definitions only. Agent work output belongs in that role's working directory.\n- Agents cannot rewrite this directive through Agent document tools.\n\n## Project-Specific Rules\n\n- Work type:\n- Must preserve:\n- Must avoid:\n- Definition of done:\n",
+        },
+        DefaultAgentDocumentDefinition {
             id: "assistant-metadoc",
             title: "Assistant Metadoc",
             role: Some("assistant"),
-            path: "docs/agent/assistant-metadoc.md",
-            summary: "General assistant role definition, operating notes, and durable assistance output.",
-            body: "# Assistant Metadoc\n\n## Role\n\nAssist the human creator with project inspection, suggestions, bounded command plans, and durable documentation updates.\n\n## Operating Rules\n\n- Read only the documents, pages, assets, and renders needed for the current request.\n- Do not treat conversation context as production state.\n- Record durable output in Markdown documents when it should survive the session.\n\n## Output Log\n\nRecord durable assistance notes here when no more specific role document owns them.\n",
+            path: "docs/roles/Assistant.md",
+            summary: "General assistant role prompt/definition. Durable assistance output belongs under the assistant working directory.",
+            body: "# Assistant Metadoc\n\n## Role\n\nAssist the human creator with project inspection, suggestions, manual edit guidance, and durable documentation updates.\n\n## Operating Rules\n\n- Read only the documents, pages, assets, and renders needed for the current request.\n- Do not treat conversation context as production state.\n- Record durable output under `docs/work/assistant/`.\n\n## Context Priority\n\nPinned context is the system prompt, `docs/PrimeDirective.md`, and this role prompt. Working output can be evicted from the model window and reread on demand.\n",
         },
         DefaultAgentDocumentDefinition {
             id: "production-plan",
             title: "Production Plan",
             role: Some("producer"),
-            path: "docs/production/production-plan.md",
-            summary: "Producer-owned project goals, deliverables, constraints, and task order.",
-            body: "# Production Plan\n\n## Goal\n\nDescribe the manga project's creative target, audience, format, and delivery scope.\n\n## Constraints\n\n- Pages:\n- Style:\n- Deadline:\n- Must not change:\n\n## Task Board\n\n- [ ] Story/script pass\n- [ ] Storyboard pass\n- [ ] Page execution\n- [ ] Continuity review\n\n## Producer Notes\n\nRecord decisions that other roles should treat as project-level direction.\n",
+            path: "docs/roles/Producer.md",
+            summary: "Producer role prompt/definition. Producer output belongs under docs/work/producer/.",
+            body: "# Production Plan\n\n## Role\n\nPlan production work, scope, acceptance criteria, unresolved decisions, and task order for the human creator.\n\n## Operating Rules\n\n- Treat this metadoc as role prompt and role definition only.\n- Put producer output under `docs/work/producer/`.\n- Do not modify comic pages directly.\n",
         },
         DefaultAgentDocumentDefinition {
             id: "story-architecture",
             title: "Story Architecture",
             role: Some("director"),
-            path: "docs/director/story-architecture.md",
-            summary: "Director metadoc for story structure, page flow, supervision decisions, and scene intent.",
-            body: "# Story Architecture\n\n## Role\n\nThe director supervises page intent, rhythm, shot order, reader attention, and whether execution serves the documented story plan.\n\n## Story Structure\n\nRecord the current story architecture, scene order, dramatic beats, and unresolved direction questions.\n\n## Direction Notes\n\nRecord durable direction decisions and review output here.\n",
+            path: "docs/roles/Director.md",
+            summary: "Director role prompt/definition. Director output belongs under docs/work/director/.",
+            body: "# Story Architecture\n\n## Role\n\nThe director supervises page intent, rhythm, shot order, reader attention, and whether execution serves the documented story plan.\n\n## Operating Rules\n\n- Treat this metadoc as role prompt and role definition only.\n- Put story architecture, direction decisions, and supervision notes under `docs/work/director/`.\n- Use page/render evidence only when it is needed for the current request.\n",
         },
         DefaultAgentDocumentDefinition {
             id: "storyboard-overview",
             title: "Storyboard Overview",
             role: Some("storyboardDesigner"),
-            path: "docs/storyboard/storyboard-overview.md",
-            summary: "Storyboard structure, page beats, panels, visual flow, and execution notes.",
-            body: "# Storyboard Overview\n\n## Page Beats\n\nList each page's dramatic purpose and visual reading order.\n\n## Panel Plan\n\nUse one section per page. Include panel count, camera distance, composition, and important props.\n\n## Execution Notes\n\nWhen this document drives canvas edits, describe the intended panel/text/bubble changes clearly.\n",
+            path: "docs/roles/Storyboard Designer.md",
+            summary: "Storyboard designer role prompt/definition. Storyboard output belongs under docs/work/storyboardDesigner/.",
+            body: "# Storyboard Overview\n\n## Role\n\nDesign page beats, panel structure, camera distance, composition, and reading flow.\n\n## Operating Rules\n\n- Treat this metadoc as role prompt and role definition only.\n- Put storyboard output under `docs/work/storyboardDesigner/`.\n- Record proposed page/panel edits in Markdown instead of executing them directly.\n",
         },
         DefaultAgentDocumentDefinition {
             id: "script-dialogue",
             title: "Script and Dialogue",
             role: Some("scriptDesigner"),
-            path: "docs/script/script-dialogue.md",
-            summary: "Dialogue, captions, narration, tone, and text placement notes.",
-            body: "# Script and Dialogue\n\n## Voice Rules\n\nDefine tone, speech style, and terminology.\n\n## Page Text\n\nUse page and panel headings. Keep text short enough for manga bubbles.\n\n## Revision Notes\n\nTrack wording decisions that should be reflected in text objects or bubbles.\n",
+            path: "docs/roles/Script Designer.md",
+            summary: "Script designer role prompt/definition. Script output belongs under docs/work/scriptDesigner/.",
+            body: "# Script and Dialogue\n\n## Role\n\nDesign dialogue, captions, narration, tone, and text-placement notes.\n\n## Operating Rules\n\n- Treat this metadoc as role prompt and role definition only.\n- Put script and dialogue output under `docs/work/scriptDesigner/`.\n- Keep manga text concise and map wording to page/panel/object ids when available.\n",
         },
         DefaultAgentDocumentDefinition {
             id: "art-supervision",
             title: "Art Supervision",
             role: Some("artSupervisor"),
-            path: "docs/art/art-supervision.md",
-            summary: "Visual style, rendering consistency, assets, and art-direction checks.",
-            body: "# Art Supervision\n\n## Style Guide\n\nRecord line, tone, palette, framing, and visual consistency rules.\n\n## Asset Notes\n\nList image assets, prompts, crops, and issues that require replacement or correction.\n",
+            path: "docs/roles/Art Supervisor.md",
+            summary: "Art supervisor role prompt/definition. Art supervision output belongs under docs/work/artSupervisor/.",
+            body: "# Art Supervision\n\n## Role\n\nReview visual style, rendering consistency, image assets, crops, composition, and art-direction risks.\n\n## Operating Rules\n\n- Treat this metadoc as role prompt and role definition only.\n- Put art supervision output under `docs/work/artSupervisor/`.\n- Compare resources with rendered pages only when the task needs visual evidence.\n",
         },
         DefaultAgentDocumentDefinition {
             id: "continuity-check",
             title: "Continuity Check",
             role: Some("continuitySupervisor"),
-            path: "docs/continuity/continuity-check.md",
-            summary: "Cross-page continuity, object placement, reading order, and unresolved issues.",
-            body: "# Continuity Check\n\n## Checks\n\n- Character state:\n- Props:\n- Page order:\n- Dialogue continuity:\n\n## Issues\n\nRecord issues with page ids and proposed fixes.\n",
+            path: "docs/roles/Continuity Supervisor.md",
+            summary: "Continuity supervisor role prompt/definition. Continuity output belongs under docs/work/continuitySupervisor/.",
+            body: "# Continuity Check\n\n## Role\n\nCheck page order, character state, props, dialogue continuity, reading order, and unresolved continuity issues.\n\n## Operating Rules\n\n- Treat this metadoc as role prompt and role definition only.\n- Put continuity output under `docs/work/continuitySupervisor/`.\n- Request bounded page samples unless the creator narrows the scope.\n",
         },
         DefaultAgentDocumentDefinition {
             id: "image-prompts",
             title: "Image Prompts",
             role: Some("promptEngineer"),
-            path: "docs/prompts/image-prompts.md",
-            summary: "Panel and asset prompts derived from production, storyboard, and art direction.",
-            body: "# Image Prompts\n\n## Prompt Rules\n\nDefine style tags, negative constraints, and asset naming conventions.\n\n## Page Prompts\n\nUse page/panel ids where possible so prompts can be mapped back to panels.\n",
+            path: "docs/roles/Prompt Engineer.md",
+            summary: "Prompt engineer role prompt/definition. Prompt output belongs under docs/work/promptEngineer/.",
+            body: "# Image Prompts\n\n## Role\n\nDesign image prompts, prompt rules, negative constraints, and page/panel prompt records.\n\n## Operating Rules\n\n- Treat this metadoc as role prompt and role definition only.\n- Put prompt rules and generated prompts under `docs/work/promptEngineer/`.\n- Keep prompts mapped to page or panel ids when possible.\n",
         },
     ]
 }
@@ -523,6 +574,7 @@ fn default_agent_roles_for_documents(documents: &[AgentDocumentMeta]) -> Vec<Age
                 name: name.to_string(),
                 title: title.to_string(),
                 metadoc_id: metadoc_id.to_string(),
+                working_directory: Some(create_agent_role_working_directory(id, id)),
                 default_autonomy: default_autonomy.to_string(),
                 allowed_command_groups: allowed_command_groups.into_iter().map(|entry| entry.to_string()).collect(),
                 preferred_tools: preferred_tools.into_iter().map(|entry| entry.to_string()).collect(),
@@ -534,82 +586,82 @@ fn default_agent_roles_for_documents(documents: &[AgentDocumentMeta]) -> Vec<Age
     push_role(
         "assistant",
         "Assistant",
-        "General manga production assistant",
+        "Assistant",
         "assistant-metadoc",
         "confirmEveryMutation",
         vec!["read", "document", "safeCurrentPageEdit"],
         vec!["readDocument", "searchProject", "readPage", "listDocuments"],
-        "Operate as the general MangaMaker assistant. Use the preloaded active metadoc first, then inspect only missing resources needed for the request.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     push_role(
         "producer",
         "Producer",
-        "Production planner",
+        "Producer",
         "production-plan",
         "adviseOnly",
         vec!["read", "document"],
         vec!["listDocuments", "readDocument", "writeDocument", "searchDocuments"],
-        "Operate as the producer. Maintain the production metadoc with goals, constraints, task order, acceptance criteria, and unresolved decisions.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     push_role(
         "director",
         "Director",
-        "Performance and page-flow director",
+        "Director",
         "story-architecture",
         "confirmEveryMutation",
         vec!["read", "document", "safeCurrentPageEdit", "visualReview"],
         vec!["readDocument", "readPage", "renderPage", "writeDocument", "listCommandManifest"],
-        "Operate as the director. Maintain the story architecture metadoc and supervise page intent, rhythm, and rendered results.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     push_role(
         "storyboardDesigner",
         "Storyboard Designer",
-        "Panel and page structure designer",
+        "Storyboard Designer",
         "storyboard-overview",
         "autoSafeCurrentPage",
         vec!["read", "document", "safeCurrentPageEdit", "layout"],
         vec!["readDocument", "readPage", "renderPage", "writeDocument", "listCommandManifest"],
-        "Operate as the storyboard designer. Maintain storyboard Markdown and prepare bounded page/panel command plans grounded in the metadoc.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     push_role(
         "scriptDesigner",
         "Script Designer",
-        "Dialogue and captions designer",
+        "Script Designer",
         "script-dialogue",
         "autoSafeCurrentPage",
         vec!["read", "document", "safeCurrentPageEdit", "text"],
         vec!["readDocument", "readPage", "searchProject", "writeDocument", "listCommandManifest"],
-        "Operate as the script designer. Maintain dialogue and caption Markdown.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     push_role(
         "artSupervisor",
         "Art Supervisor",
-        "Style and asset supervisor",
+        "Art Supervisor",
         "art-supervision",
         "confirmEveryMutation",
         vec!["read", "document", "visualReview"],
         vec!["listImageAssets", "readPage", "renderPage", "writeDocument"],
-        "Operate as the art supervisor. Maintain art-direction Markdown and compare resources with rendered pages.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     push_role(
         "continuitySupervisor",
         "Continuity Supervisor",
-        "Cross-page consistency supervisor",
+        "Continuity Supervisor",
         "continuity-check",
         "confirmEveryMutation",
         vec!["read", "document", "visualReview"],
         vec!["listPages", "readPages", "renderPages", "writeDocument", "searchDocuments"],
-        "Operate as the continuity supervisor. Maintain continuity Markdown and cross-page issue logs.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     push_role(
         "promptEngineer",
         "Prompt Engineer",
-        "Image prompt and asset prompt designer",
+        "Prompt Engineer",
         "image-prompts",
         "adviseOnly",
         vec!["read", "document"],
         vec!["readDocument", "listImageAssets", "readPage", "writeDocument"],
-        "Operate as the prompt engineer. Maintain prompt rules and generated prompts in the prompt metadoc.",
+        AGENT_ROLE_METADOC_PROMPT,
     );
     roles.sort_by(|left, right| left.name.cmp(&right.name));
     roles
@@ -632,9 +684,16 @@ fn normalize_agent_roles_for_documents(
         if metadoc_ids.iter().any(|metadoc_id| metadoc_id == &role.metadoc_id) {
             continue;
         }
-        role_ids.push(role.id.clone());
-        metadoc_ids.push(role.metadoc_id.clone());
-        normalized.push(role);
+        let mut normalized_role = role;
+        normalized_role.title = normalized_role.name.clone();
+        normalized_role.prompt = AGENT_ROLE_METADOC_PROMPT.to_string();
+        if normalized_role.working_directory.is_none() {
+            normalized_role.working_directory =
+                Some(create_agent_role_working_directory(&normalized_role.id, &normalized_role.id));
+        }
+        role_ids.push(normalized_role.id.clone());
+        metadoc_ids.push(normalized_role.metadoc_id.clone());
+        normalized.push(normalized_role);
     }
     normalized.sort_by(|left, right| left.name.cmp(&right.name));
     normalized
@@ -663,6 +722,27 @@ fn normalize_agent_document_path(value: &str, fallback_id: &str) -> Result<Strin
     Ok(parts.join("/"))
 }
 
+fn normalize_agent_document_directory_path(value: &str, fallback_path: &str) -> Result<String, String> {
+    let trimmed = if value.trim().is_empty() {
+        fallback_path.trim().replace('\\', "/").trim_start_matches('/').to_string()
+    } else {
+        value.trim().replace('\\', "/").trim_start_matches('/').to_string()
+    };
+    let raw = if trimmed.starts_with(&format!("{AGENT_DOCS_DIR}/")) || trimmed == AGENT_DOCS_DIR {
+        trimmed
+    } else {
+        format!("{AGENT_DOCS_DIR}/{trimmed}")
+    };
+    let parts: Vec<&str> = raw.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+    if parts.iter().any(|part| *part == "..") || parts.first() != Some(&AGENT_DOCS_DIR) {
+        return Err("Agent role working directory must stay under docs/.".to_string());
+    }
+    if raw.to_lowercase().ends_with(".md") {
+        return Err("Agent role working directory must be a directory path, not a Markdown file.".to_string());
+    }
+    Ok(parts.join("/"))
+}
+
 fn resolve_path_inside_project_dir(project_dir: &Path, relative_path: &str) -> Result<PathBuf, String> {
     let candidate = project_dir.join(relative_path);
     if !candidate.starts_with(project_dir) {
@@ -677,6 +757,82 @@ fn same_filesystem_path(left: &Path, right: &Path) -> bool {
     } else {
         left == right
     }
+}
+
+fn agent_document_body_from_markdown(raw: &str) -> String {
+    if raw.starts_with("---\n") {
+        if let Some(index) = raw.find("\n---") {
+            return raw[index + 4..].trim_start_matches('\n').to_string();
+        }
+    }
+    raw.to_string()
+}
+
+fn migrate_role_metadoc_document_paths(
+    project_dir: &Path,
+    mut documents: Vec<AgentDocumentMeta>,
+    roles: &[AgentRoleDefinition],
+    now: &str,
+) -> Result<(Vec<AgentDocumentMeta>, bool), String> {
+    let mut changed = false;
+    for role in roles {
+        let Some(index) = documents.iter().position(|document| document.id == role.metadoc_id) else {
+            continue;
+        };
+        let expected_path = normalize_agent_document_path(
+            &create_agent_role_metadoc_path(&role.name, &role.id),
+            &documents[index].id,
+        )?;
+        if documents[index].path == expected_path {
+            continue;
+        }
+        if documents
+            .iter()
+            .any(|document| document.id != documents[index].id && document.path.to_lowercase() == expected_path.to_lowercase())
+        {
+            return Err(format!(
+                "Cannot rename metadoc for role \"{}\" to {}; that path is already used.",
+                role.name, expected_path
+            ));
+        }
+
+        let previous_path = normalize_agent_document_path(&documents[index].path, &documents[index].id)?;
+        let previous_absolute_path = resolve_path_inside_project_dir(project_dir, &previous_path)?;
+        let next_absolute_path = resolve_path_inside_project_dir(project_dir, &expected_path)?;
+        let same_path = same_filesystem_path(&previous_absolute_path, &next_absolute_path);
+        let previous_raw = fs::read_to_string(&previous_absolute_path).ok();
+        let has_previous_file = previous_raw.is_some();
+        let next_exists = !same_path && next_absolute_path.exists();
+        if has_previous_file && next_exists {
+            return Err(format!(
+                "Cannot rename metadoc for role \"{}\" to {}; a file already exists at that path.",
+                role.name, expected_path
+            ));
+        }
+
+        let mut next_document = documents[index].clone();
+        next_document.path = expected_path.clone();
+        next_document.updated_at = now.to_string();
+        let content = previous_raw
+            .as_deref()
+            .map(agent_document_body_from_markdown)
+            .unwrap_or_default();
+        if has_previous_file || !next_exists {
+            if let Some(parent) = next_absolute_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(&next_absolute_path, build_agent_document_markdown(&next_document, &content))
+                .map_err(|error| error.to_string())?;
+        }
+        if !same_path && has_previous_file && previous_absolute_path.exists() {
+            fs::remove_file(&previous_absolute_path).map_err(|error| error.to_string())?;
+        }
+
+        documents[index] = next_document;
+        changed = true;
+    }
+    documents.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok((documents, changed))
 }
 
 fn resolve_agent_docs_manifest_file(project_id: &str, create_project_dir: bool) -> Result<PathBuf, String> {
@@ -716,8 +872,43 @@ fn ensure_project_documents(project_id: &str) -> Result<AgentDocumentManifest, S
         document.path = normalize_agent_document_path(&document.path, &document.id)?;
     }
 
+    let default_definitions = default_agent_documents();
+    if let Some(definition) = default_definitions
+        .iter()
+        .find(|definition| definition.id == AGENT_PRIME_DIRECTIVE_DOCUMENT_ID)
+    {
+        let existing_index = documents.iter().position(|document| document.id == definition.id);
+        let meta = existing_index
+            .map(|index| {
+                let mut meta = documents[index].clone();
+                meta.path = normalize_agent_document_path(&meta.path, &meta.id)?;
+                Ok::<AgentDocumentMeta, String>(meta)
+            })
+            .transpose()?
+            .unwrap_or_else(|| create_agent_document_meta(definition, &now));
+        if existing_index.is_none() {
+            documents.push(meta.clone());
+            changed = true;
+        }
+        let document_path = resolve_path_inside_project_dir(
+            &project_dir,
+            &normalize_agent_document_path(&meta.path, &meta.id)?,
+        )?;
+        if !document_path.exists() {
+            if let Some(parent) = document_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(&document_path, build_agent_document_markdown(&meta, definition.body))
+                .map_err(|error| error.to_string())?;
+            changed = true;
+        }
+    }
+
     if existing.is_none() {
-        for definition in default_agent_documents() {
+        for definition in default_definitions {
+            if documents.iter().any(|document| document.id == definition.id) {
+                continue;
+            }
             let meta = create_agent_document_meta(&definition, &now);
             let document_path = resolve_path_inside_project_dir(&project_dir, &normalize_agent_document_path(&meta.path, &meta.id)?)?;
             if !document_path.exists() {
@@ -737,6 +928,12 @@ fn ensure_project_documents(project_id: &str) -> Result<AgentDocumentManifest, S
     } else {
         default_agent_roles_for_documents(&documents)
     };
+    let (migrated_documents, path_migration_changed) =
+        migrate_role_metadoc_document_paths(&project_dir, documents, &roles, &now)?;
+    documents = migrated_documents;
+    if path_migration_changed {
+        changed = true;
+    }
     if let Some(existing_manifest) = &existing {
         if existing_manifest.role_setup_version == 0 || existing_roles != roles {
             changed = true;
@@ -958,11 +1155,21 @@ fn write_agent_document_file(project_id: &str, document: AgentDocumentInput) -> 
         .clone()
         .or_else(|| existing.map(|entry| entry.title.clone()))
         .unwrap_or_else(|| id.clone());
+    let default_path = create_unique_agent_document_path_from_title(
+        &title,
+        &format!(
+            "{AGENT_DOCS_DIR}/{}",
+            sanitize_path_component(role.as_deref().unwrap_or("general"), "role")
+        ),
+        &manifest.documents,
+        Some(&id),
+        &id,
+    );
     let path_input = document
         .path
         .as_deref()
         .or_else(|| existing.map(|entry| entry.path.as_str()))
-        .unwrap_or("");
+        .unwrap_or(&default_path);
     let meta = AgentDocumentMeta {
         id: id.clone(),
         title: if title.trim().is_empty() { id.clone() } else { title },
@@ -973,18 +1180,7 @@ fn write_agent_document_file(project_id: &str, document: AgentDocumentInput) -> 
             .or_else(|| existing.map(|entry| entry.status.clone()))
             .filter(|entry| !entry.trim().is_empty())
             .unwrap_or_else(|| "draft".to_string()),
-        path: if path_input.trim().is_empty() {
-            normalize_agent_document_path(
-                &format!(
-                    "{AGENT_DOCS_DIR}/{}/{}.md",
-                    sanitize_path_component(role.as_deref().unwrap_or("general"), "role"),
-                    sanitize_path_component(&id, "document")
-                ),
-                &id,
-            )?
-        } else {
-            normalize_agent_document_path(path_input, &id)?
-        },
+        path: normalize_agent_document_path(path_input, &id)?,
         related_page_ids: document
             .related_page_ids
             .clone()
@@ -1050,6 +1246,9 @@ fn write_agent_document_file(project_id: &str, document: AgentDocumentInput) -> 
 fn delete_agent_document_file(project_id: &str, document_id: &str) -> Result<AgentDocumentManifest, String> {
     let manifest = ensure_project_documents(project_id)?;
     let meta = resolve_agent_document_meta(&manifest, document_id)?;
+    if meta.id == AGENT_PRIME_DIRECTIVE_DOCUMENT_ID {
+        return Err("PrimeDirective.md is required for every project and cannot be deleted.".to_string());
+    }
     let project_dir = resolve_project_dir_for_agent_docs(project_id, false)?;
     let document_path = resolve_path_inside_project_dir(
         &project_dir,
@@ -1069,6 +1268,270 @@ fn delete_agent_document_file(project_id: &str, document_id: &str) -> Result<Age
         updated_at: now_millis_string(),
         role_setup_version: 1,
         roles: normalize_agent_roles_for_documents(manifest.roles, &documents),
+        documents,
+    };
+    write_agent_document_manifest(&next_manifest)?;
+    Ok(next_manifest)
+}
+
+fn agent_role_working_directory(role: &AgentRoleDefinition) -> Result<String, String> {
+    normalize_agent_document_directory_path(
+        role.working_directory.as_deref().unwrap_or(""),
+        &create_agent_role_working_directory(&role.id, &role.id),
+    )
+}
+
+fn normalize_agent_working_directory_path(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("Agent working directory path is required.".to_string());
+    }
+    normalize_agent_document_directory_path(value, "")
+}
+
+fn agent_directory_paths_equal(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn agent_document_path_is_under_directory(document_path: &str, directory_path: &str) -> Result<bool, String> {
+    let normalized_document_path = document_path.replace('\\', "/").trim_start_matches('/').to_string();
+    let normalized_directory_path = normalize_agent_working_directory_path(directory_path)?;
+    Ok(normalized_document_path
+        .to_lowercase()
+        .starts_with(&format!("{}/", normalized_directory_path.to_lowercase())))
+}
+
+fn replace_agent_directory_prefix(document_path: &str, from_directory: &str, to_directory: &str) -> String {
+    let normalized_document_path = document_path.replace('\\', "/");
+    let suffix = normalized_document_path
+        .get(from_directory.len()..)
+        .unwrap_or_default();
+    format!("{to_directory}{suffix}")
+}
+
+fn rewrite_agent_document_at_path(
+    project_dir: &Path,
+    meta: &AgentDocumentMeta,
+    previous_meta: Option<&AgentDocumentMeta>,
+) -> Result<(), String> {
+    let document_path = resolve_path_inside_project_dir(project_dir, &normalize_agent_document_path(&meta.path, &meta.id)?)?;
+    let raw = fs::read_to_string(&document_path).unwrap_or_default();
+    let content = if raw.is_empty() {
+        String::new()
+    } else {
+        agent_document_body_from_markdown(&raw)
+    };
+    let _ = previous_meta;
+    if let Some(parent) = document_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(&document_path, build_agent_document_markdown(meta, &content))
+        .map_err(|error| error.to_string())
+}
+
+fn rename_agent_working_directory(
+    project_id: &str,
+    directory_path: &str,
+    next_directory_path: &str,
+) -> Result<AgentDocumentManifest, String> {
+    let from_directory = normalize_agent_working_directory_path(directory_path)?;
+    let to_directory = normalize_agent_working_directory_path(next_directory_path)?;
+    if agent_directory_paths_equal(&from_directory, &to_directory) {
+        return ensure_project_documents(project_id);
+    }
+    if to_directory.to_lowercase().starts_with(&format!("{}/", from_directory.to_lowercase())) ||
+        from_directory.to_lowercase().starts_with(&format!("{}/", to_directory.to_lowercase()))
+    {
+        return Err("Agent working directory cannot be renamed into itself or one of its nested directories.".to_string());
+    }
+
+    let manifest = ensure_project_documents(project_id)?;
+    let now = now_millis_string();
+    let roles_to_move: Vec<AgentRoleDefinition> = manifest
+        .roles
+        .iter()
+        .filter_map(|role| {
+            agent_role_working_directory(role)
+                .ok()
+                .filter(|directory| agent_directory_paths_equal(directory, &from_directory))
+                .map(|_| role.clone())
+        })
+        .collect();
+    let documents_to_move: Vec<AgentDocumentMeta> = manifest
+        .documents
+        .iter()
+        .filter_map(|document| {
+            agent_document_path_is_under_directory(&document.path, &from_directory)
+                .ok()
+                .filter(|matches| *matches)
+                .map(|_| document.clone())
+        })
+        .collect();
+    let project_dir = resolve_project_dir_for_agent_docs(project_id, true)?;
+    let from_absolute_path = resolve_path_inside_project_dir(&project_dir, &from_directory)?;
+    let to_absolute_path = resolve_path_inside_project_dir(&project_dir, &to_directory)?;
+    if roles_to_move.is_empty() && documents_to_move.is_empty() && !from_absolute_path.is_dir() {
+        return Err(format!("Agent working directory not found: {from_directory}"));
+    }
+
+    let mut target_paths: Vec<(String, String)> = Vec::new();
+    for document in &documents_to_move {
+        target_paths.push((
+            document.id.clone(),
+            normalize_agent_document_path(
+                &replace_agent_directory_prefix(&document.path, &from_directory, &to_directory),
+                &document.id,
+            )?,
+        ));
+    }
+    for document in &manifest.documents {
+        if target_paths.iter().any(|(id, _)| id == &document.id) {
+            continue;
+        }
+        if target_paths
+            .iter()
+            .any(|(_, target_path)| target_path.eq_ignore_ascii_case(&document.path))
+        {
+            return Err(format!(
+                "Cannot rename working directory to {to_directory}; document path already exists: {}",
+                document.path
+            ));
+        }
+    }
+
+    if !same_filesystem_path(&from_absolute_path, &to_absolute_path) && from_absolute_path.is_dir() {
+        if to_absolute_path.exists() {
+            let target_entries = if to_absolute_path.is_dir() {
+                fs::read_dir(&to_absolute_path)
+                    .map_err(|error| error.to_string())?
+                    .count()
+            } else {
+                1
+            };
+            if target_entries > 0 {
+                return Err(format!(
+                    "Cannot rename working directory to {to_directory}; target directory already exists."
+                ));
+            }
+            fs::remove_dir_all(&to_absolute_path).map_err(|error| error.to_string())?;
+        }
+        if let Some(parent) = to_absolute_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::rename(&from_absolute_path, &to_absolute_path).map_err(|error| error.to_string())?;
+    } else {
+        fs::create_dir_all(&to_absolute_path).map_err(|error| error.to_string())?;
+    }
+
+    let mut next_documents = manifest.documents.clone();
+    for (document_id, target_path) in &target_paths {
+        if let Some(document) = next_documents.iter_mut().find(|entry| &entry.id == document_id) {
+            document.path = target_path.clone();
+            document.updated_at = now.clone();
+        }
+    }
+    for document in &documents_to_move {
+        if let Some(next_document) = next_documents.iter().find(|entry| entry.id == document.id) {
+            rewrite_agent_document_at_path(&project_dir, next_document, Some(document))?;
+        }
+    }
+
+    for role in &roles_to_move {
+        let Some(index) = next_documents.iter().position(|document| document.id == role.metadoc_id) else {
+            continue;
+        };
+        let metadoc_path = resolve_path_inside_project_dir(
+            &project_dir,
+            &normalize_agent_document_path(&next_documents[index].path, &next_documents[index].id)?,
+        )?;
+        let raw = fs::read_to_string(&metadoc_path).unwrap_or_default();
+        if raw.is_empty() || !raw.contains(&from_directory) {
+            continue;
+        }
+        let body = agent_document_body_from_markdown(&raw).replace(&from_directory, &to_directory);
+        let mut next_metadoc = next_documents[index].clone();
+        next_metadoc.updated_at = now.clone();
+        next_documents[index] = next_metadoc.clone();
+        fs::write(&metadoc_path, build_agent_document_markdown(&next_metadoc, &body))
+            .map_err(|error| error.to_string())?;
+    }
+
+    next_documents.sort_by(|left, right| left.path.cmp(&right.path));
+    let next_roles: Vec<AgentRoleDefinition> = manifest
+        .roles
+        .into_iter()
+        .map(|mut role| {
+            if agent_role_working_directory(&role)
+                .map(|directory| agent_directory_paths_equal(&directory, &from_directory))
+                .unwrap_or(false)
+            {
+                role.working_directory = Some(to_directory.clone());
+            }
+            role
+        })
+        .collect();
+    let next_manifest = AgentDocumentManifest {
+        project_id: project_id.to_string(),
+        updated_at: now,
+        role_setup_version: 1,
+        roles: normalize_agent_roles_for_documents(next_roles, &next_documents),
+        documents: next_documents,
+    };
+    write_agent_document_manifest(&next_manifest)?;
+    Ok(next_manifest)
+}
+
+fn delete_agent_working_directory(project_id: &str, directory_path: &str) -> Result<AgentDocumentManifest, String> {
+    let directory = normalize_agent_working_directory_path(directory_path)?;
+    let manifest = ensure_project_documents(project_id)?;
+    let roles_to_delete: Vec<AgentRoleDefinition> = manifest
+        .roles
+        .iter()
+        .filter_map(|role| {
+            agent_role_working_directory(role)
+                .ok()
+                .filter(|working_directory| agent_directory_paths_equal(working_directory, &directory))
+                .map(|_| role.clone())
+        })
+        .collect();
+    let documents_to_delete: Vec<AgentDocumentMeta> = manifest
+        .documents
+        .iter()
+        .filter_map(|document| {
+            agent_document_path_is_under_directory(&document.path, &directory)
+                .ok()
+                .filter(|matches| *matches)
+                .map(|_| document.clone())
+        })
+        .collect();
+    if documents_to_delete.iter().any(|document| document.id == AGENT_PRIME_DIRECTIVE_DOCUMENT_ID) {
+        return Err("PrimeDirective.md cannot be deleted through working directory deletion.".to_string());
+    }
+    let project_dir = resolve_project_dir_for_agent_docs(project_id, false)?;
+    let directory_path = resolve_path_inside_project_dir(&project_dir, &directory)?;
+    if roles_to_delete.is_empty() && documents_to_delete.is_empty() && !directory_path.is_dir() {
+        return Err(format!("Agent working directory not found: {directory}"));
+    }
+    if directory_path.exists() {
+        fs::remove_dir_all(&directory_path).map_err(|error| error.to_string())?;
+    }
+    let deleted_document_ids: Vec<String> = documents_to_delete.into_iter().map(|document| document.id).collect();
+    let deleted_role_ids: Vec<String> = roles_to_delete.into_iter().map(|role| role.id).collect();
+    let mut documents: Vec<AgentDocumentMeta> = manifest
+        .documents
+        .into_iter()
+        .filter(|document| !deleted_document_ids.iter().any(|id| id == &document.id))
+        .collect();
+    documents.sort_by(|left, right| left.path.cmp(&right.path));
+    let roles = manifest
+        .roles
+        .into_iter()
+        .filter(|role| !deleted_role_ids.iter().any(|id| id == &role.id))
+        .collect();
+    let next_manifest = AgentDocumentManifest {
+        project_id: project_id.to_string(),
+        updated_at: now_millis_string(),
+        role_setup_version: 1,
+        roles: normalize_agent_roles_for_documents(roles, &documents),
         documents,
     };
     write_agent_document_manifest(&next_manifest)?;
@@ -1104,6 +1567,17 @@ fn create_agent_role_binding(project_id: &str, role_input: AgentRoleInput) -> Re
     if manifest.roles.iter().any(|role| role.id == id) {
         return Err(format!("Agent role already exists: {id}"));
     }
+    let metadoc_file_stem = normalize_agent_role_metadoc_file_stem(&name, &id).to_lowercase();
+    if manifest.roles.iter().any(|role| {
+        normalize_agent_role_metadoc_file_stem(&role.name, &role.id).to_lowercase() == metadoc_file_stem
+    }) {
+        return Err(format!("Agent role metadoc filename already exists for role name: {name}"));
+    }
+    let default_working_directory = create_agent_role_working_directory(&id, &id);
+    let working_directory = normalize_agent_document_directory_path(
+        role_input.working_directory.as_deref().unwrap_or(""),
+        &default_working_directory,
+    )?;
 
     let mut documents = manifest.documents.clone();
     let metadoc_id = if let Some(existing_metadoc_id) = role_input
@@ -1121,11 +1595,7 @@ fn create_agent_role_binding(project_id: &str, role_input: AgentRoleInput) -> Re
         let metadoc_path_input = create_agent_role_metadoc_path(&name, &id);
         let meta = AgentDocumentMeta {
             id: metadoc_id.clone(),
-            title: role_input
-                .metadoc_title
-                .clone()
-                .filter(|entry| !entry.trim().is_empty())
-                .unwrap_or_else(|| name.clone()),
+            title: name.clone(),
             role: Some(id.clone()),
             status: "draft".to_string(),
             path: normalize_agent_document_path(&metadoc_path_input, &metadoc_id)?,
@@ -1146,9 +1616,10 @@ fn create_agent_role_binding(project_id: &str, role_input: AgentRoleInput) -> Re
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let body = format!(
-            "# {}\n\n## Role\n\n{}\n\n## Responsibilities\n\n- Define this role's working rules.\n- Record this role's durable output here.\n\n## Output Log\n\n",
+            "# {}\n\n## Role Prompt\n\nOperate as {} in this MangaMaker project.\n\n## Responsibilities\n\n- Define this role's working rules.\n- Treat this metadoc as role prompt and role definition only.\n- Record durable role output under `{}/`.\n\n## Context Priority\n\nPinned context is the system prompt, `docs/PrimeDirective.md`, and this role prompt. Working output can be evicted from the model window and reread on demand.\n",
             meta.title,
-            role_input.title.clone().unwrap_or_else(|| name.clone())
+            name,
+            working_directory
         );
         fs::write(&document_path, build_agent_document_markdown(&meta, &body))
             .map_err(|error| error.to_string())?;
@@ -1160,11 +1631,15 @@ fn create_agent_role_binding(project_id: &str, role_input: AgentRoleInput) -> Re
     if manifest.roles.iter().any(|role| role.metadoc_id == metadoc_id) {
         return Err(format!("Metadoc is already bound to a role: {metadoc_id}"));
     }
+    let project_dir = resolve_project_dir_for_agent_docs(project_id, true)?;
+    let working_directory_path = resolve_path_inside_project_dir(&project_dir, &working_directory)?;
+    fs::create_dir_all(&working_directory_path).map_err(|error| error.to_string())?;
     let role = AgentRoleDefinition {
-        id,
+        id: id.clone(),
         name: name.clone(),
-        title: role_input.title.clone().filter(|entry| !entry.trim().is_empty()).unwrap_or(name.clone()),
+        title: name.clone(),
         metadoc_id,
+        working_directory: Some(working_directory),
         default_autonomy: role_input.default_autonomy.unwrap_or_else(|| "adviseOnly".to_string()),
         allowed_command_groups: role_input.allowed_command_groups.unwrap_or_else(|| vec!["read".to_string(), "document".to_string()]),
         preferred_tools: role_input.preferred_tools.unwrap_or_else(|| vec![
@@ -1173,20 +1648,18 @@ fn create_agent_role_binding(project_id: &str, role_input: AgentRoleInput) -> Re
             "searchDocuments".to_string(),
             "writeDocument".to_string(),
         ]),
-        prompt: role_input
-            .prompt
-            .clone()
-            .filter(|entry| !entry.trim().is_empty())
-            .unwrap_or_else(|| format!("Operate as {name}. Use the preloaded active metadoc first and record durable output there. Request other documents or resources only when the creator's task needs missing evidence.")),
+        prompt: AGENT_ROLE_METADOC_PROMPT.to_string(),
         built_in: false,
     };
     let mut roles = manifest.roles.clone();
     roles.push(role);
+    let normalized_roles = normalize_agent_roles_for_documents(roles, &documents);
+    let (documents, _) = migrate_role_metadoc_document_paths(&project_dir, documents, &normalized_roles, &now)?;
     let next_manifest = AgentDocumentManifest {
         project_id: project_id.to_string(),
         updated_at: now,
         role_setup_version: 1,
-        roles: normalize_agent_roles_for_documents(roles, &documents),
+        roles: normalize_agent_roles_for_documents(normalized_roles, &documents),
         documents,
     };
     write_agent_document_manifest(&next_manifest)?;
@@ -1636,6 +2109,23 @@ fn delete_project_doc(project_id: String, document_id: String) -> Result<AgentDo
 }
 
 #[tauri::command]
+fn rename_project_working_directory(
+    project_id: String,
+    directory_path: String,
+    next_directory_path: String,
+) -> Result<AgentDocumentManifest, String> {
+    rename_agent_working_directory(&project_id, &directory_path, &next_directory_path)
+}
+
+#[tauri::command]
+fn delete_project_working_directory(
+    project_id: String,
+    directory_path: String,
+) -> Result<AgentDocumentManifest, String> {
+    delete_agent_working_directory(&project_id, &directory_path)
+}
+
+#[tauri::command]
 fn create_project_role(project_id: String, role: AgentRoleInput) -> Result<AgentDocumentManifest, String> {
     create_agent_role_binding(&project_id, role)
 }
@@ -1693,6 +2183,8 @@ pub fn run() {
             read_project_doc,
             write_project_doc,
             delete_project_doc,
+            rename_project_working_directory,
+            delete_project_working_directory,
             create_project_role,
             delete_project_role,
             get_agent_config,

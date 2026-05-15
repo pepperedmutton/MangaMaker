@@ -19,7 +19,7 @@ import type {
 import { validateAgentChatResponse } from "./agentResponseSchema";
 
 const AGENT_API_BASE = "/__mangamaker__/agent";
-const AGENT_CHAT_TIMEOUT_MS = 120_000;
+const AGENT_CHAT_TIMEOUT_MS = 300_000;
 
 const isTauriRuntime = () => typeof window !== "undefined" && isTauri();
 
@@ -275,7 +275,7 @@ export const chatWithAgent = async (request: AgentChatRequest): Promise<AgentCha
       throw error;
     }
     if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
-      const message = "Agent request timed out after 120 seconds. Try a narrower document edit or retry with fewer tool reads.";
+      const message = `Agent request timed out after ${Math.round(AGENT_CHAT_TIMEOUT_MS / 1000)} seconds. Try a narrower document edit or retry with fewer tool reads.`;
       throw new AgentRequestError(
         message,
         createClientTrace(requestTrace, "timeout", [

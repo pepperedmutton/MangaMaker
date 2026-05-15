@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { getAgentConfigFromEnv } from "../../src/agent/config";
-import { filterAllowedAgentModels } from "../../src/agent/modelCatalog";
+import {
+  DEEPSEEK_V4_PRO_MODEL_ID,
+  QWEN_3_6_FLASH_MODEL_ID,
+  filterAllowedAgentModels,
+} from "../../src/agent/modelCatalog";
 import {
   commandPlanRequiresConfirmation,
   getCommandManifestEntry,
@@ -24,8 +28,25 @@ import {
   MIN_AGENT_CONTEXT_WINDOW_TOKENS,
 } from "../../src/agent/contextWindow";
 import { AGENT_MAX_BATCH_READ_PAGES } from "../../src/agent/toolLimits";
+import {
+  applyAppendDocumentEdit,
+  applyEditDocumentLinesEdit,
+  applyReplaceDocumentSectionEdit,
+  applyReplaceDocumentTextEdit,
+  createDocumentLinesResult,
+} from "../../src/agent/documentEditTools";
 import { executeCommandPlan, previewCommandPlan } from "../../src/agent/tools";
 import { useEditorStore } from "../../src/state/editorStore";
+
+const testDocument = {
+  id: "story",
+  title: "Story",
+  status: "draft" as const,
+  path: "docs/story.md",
+  relatedPageIds: [],
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  content: "# Story\n\n## Page 1\n\nOld beat.\n\n## Notes\n\nExisting note.\n",
+};
 
 describe("agent config", () => {
   it("enables the test provider in test mode", () => {
@@ -54,6 +75,23 @@ describe("agent config", () => {
         contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
         inputModalities: ["text", "image"],
         outputModalities: ["text"],
+        capability: "multimodal" as const,
+      },
+      {
+        id: DEEPSEEK_V4_PRO_MODEL_ID,
+        name: "DeepSeek V4 Pro",
+        contextLength: 1048576,
+        inputModalities: ["text"],
+        outputModalities: ["text"],
+        capability: "metadoc" as const,
+      },
+      {
+        id: QWEN_3_6_FLASH_MODEL_ID,
+        name: "Qwen 3.6 Flash",
+        contextLength: 1000000,
+        inputModalities: ["text", "image", "video"],
+        outputModalities: ["text"],
+        capability: "multimodal" as const,
       },
     ];
     expect(
@@ -68,10 +106,31 @@ describe("agent config", () => {
       enabled: true,
       provider: "openrouter",
       model: "moonshotai/kimi-k2.6",
+      modelCapability: "multimodal",
       apiKeyConfigured: true,
       visionEnabled: true,
       contextWindowTokens: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
       contextWindowMaxTokens: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+      contextWindowSource: "model",
+    });
+
+    expect(
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+          MANGAMAKER_AGENT_MODEL: DEEPSEEK_V4_PRO_MODEL_ID,
+        },
+        availableModels,
+      ),
+    ).toMatchObject({
+      enabled: true,
+      provider: "openrouter",
+      model: DEEPSEEK_V4_PRO_MODEL_ID,
+      modelCapability: "metadoc",
+      apiKeyConfigured: true,
+      visionEnabled: false,
+      contextWindowTokens: 1048576,
+      contextWindowMaxTokens: 1048576,
       contextWindowSource: "model",
     });
 
@@ -93,6 +152,24 @@ describe("agent config", () => {
       enabled: false,
       reason: expect.stringContaining("MANGAMAKER_AGENT_MODEL"),
     });
+
+    expect(
+      getAgentConfigFromEnv(
+        {
+          OPENROUTER_API_KEY: "not-a-real-key",
+        },
+        availableModels,
+        QWEN_3_6_FLASH_MODEL_ID,
+      ),
+    ).toMatchObject({
+      enabled: true,
+      provider: "openrouter",
+      model: QWEN_3_6_FLASH_MODEL_ID,
+      modelCapability: "multimodal",
+      visionEnabled: true,
+      contextWindowTokens: 1000000,
+      contextWindowMaxTokens: 1000000,
+    });
   });
 
   it("lets the Agent context window be configured without exceeding the model limit", () => {
@@ -103,6 +180,7 @@ describe("agent config", () => {
         contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
         inputModalities: ["text", "image"],
         outputModalities: ["text"],
+        capability: "multimodal" as const,
       },
     ];
 
@@ -153,6 +231,15 @@ describe("agent config", () => {
         contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
         inputModalities: ["text", "image"],
         outputModalities: ["text"],
+        capability: "multimodal" as const,
+      },
+      {
+        id: DEEPSEEK_V4_PRO_MODEL_ID,
+        name: "DeepSeek V4 Pro",
+        contextLength: 1048576,
+        inputModalities: ["text"],
+        outputModalities: ["text"],
+        capability: "metadoc" as const,
       },
     ];
 
@@ -183,7 +270,7 @@ describe("agent config", () => {
     });
   });
 
-  it("filters available models to DeepSeek or Kimi multimodal JSON-capable models", () => {
+  it("filters available models to multimodal models plus DeepSeek V4 Pro metadoc-only mode", () => {
     const models = filterAllowedAgentModels([
       {
         id: "moonshotai/kimi-k2.6",
@@ -197,6 +284,26 @@ describe("agent config", () => {
         name: "DeepSeek VL",
         architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
         supported_parameters: ["response_format"],
+      },
+      {
+        id: "deepseek/deepseek-v4-pro",
+        name: "DeepSeek V4 Pro",
+        architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+        supported_parameters: ["response_format"],
+        context_length: 1048576,
+      },
+      {
+        id: "deepseek/deepseek-v4-flash",
+        name: "DeepSeek V4 Flash",
+        architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+        supported_parameters: ["response_format"],
+      },
+      {
+        id: QWEN_3_6_FLASH_MODEL_ID,
+        name: "Qwen 3.6 Flash",
+        architecture: { input_modalities: ["text", "image", "video"], output_modalities: ["text"] },
+        supported_parameters: ["response_format"],
+        context_length: 1000000,
       },
       {
         id: "openai/gpt-5.5",
@@ -219,9 +326,22 @@ describe("agent config", () => {
     ]);
 
     expect(models.map((model) => model.id)).toEqual([
+      DEEPSEEK_V4_PRO_MODEL_ID,
       "deepseek/deepseek-vl",
       "moonshotai/kimi-k2.6",
+      QWEN_3_6_FLASH_MODEL_ID,
     ]);
+    expect(models.find((model) => model.id === DEEPSEEK_V4_PRO_MODEL_ID)).toMatchObject({
+      capability: "metadoc",
+      inputModalities: ["text"],
+    });
+    expect(models.find((model) => model.id === "deepseek/deepseek-vl")).toMatchObject({
+      capability: "multimodal",
+    });
+    expect(models.find((model) => model.id === QWEN_3_6_FLASH_MODEL_ID)).toMatchObject({
+      capability: "multimodal",
+      inputModalities: ["text", "image", "video"],
+    });
   });
 
   it("prioritizes Venice for Kimi K2.6 OpenRouter routing", () => {
@@ -284,6 +404,172 @@ describe("agent response validation", () => {
         reason: expect.stringContaining(`first ${AGENT_MAX_BATCH_READ_PAGES}`),
       },
     ]);
+    expect(response.taskProgress).toMatchObject({
+      phase: "gathering_context",
+      status: "needs_tool",
+      stopCondition: expect.stringContaining("Stop"),
+    });
+  });
+
+  it("preserves explicit model task progress", () => {
+    const response = validateAgentChatResponse({
+      message: "I will edit the metadoc.",
+      requestedToolCalls: [
+        {
+          toolName: "editDocumentLines",
+          input: {
+            operationId: "edit-lines-progress",
+            documentId: "story",
+            operations: [{ type: "delete", startLine: 4, endLine: 5 }],
+          },
+          reason: "Remove obsolete lines.",
+        },
+      ],
+      pendingCommandPlan: null,
+      taskProgress: {
+        objective: "Clean the story metadoc.",
+        phase: "editing_document",
+        status: "needs_tool",
+        steps: [
+          { id: "read", title: "Identify obsolete lines", status: "completed" },
+          { id: "edit", title: "Delete obsolete lines", status: "in_progress", stopCondition: "editDocumentLines verifies saved=true" },
+        ],
+        currentStepId: "edit",
+        stopCondition: "Stop after editDocumentLines verifies saved=true.",
+        nextAction: "Call editDocumentLines.",
+        percent: 70,
+      },
+    });
+
+    expect(response.taskProgress).toMatchObject({
+      objective: "Clean the story metadoc.",
+      phase: "editing_document",
+      status: "needs_tool",
+      currentStepId: "edit",
+      percent: 70,
+    });
+  });
+
+  it("does not treat an explicitly incomplete no-action response as a completed fallback", () => {
+    const response = validateAgentChatResponse({
+      message: "I still need to read the target document before I can finish.",
+      requestedToolCalls: [],
+      pendingCommandPlan: null,
+      taskProgress: {
+        objective: "Update the working document.",
+        phase: "gathering_context",
+        status: "needs_tool",
+        steps: [
+          { id: "read", title: "Read the target document", status: "in_progress" },
+        ],
+        currentStepId: "read",
+        stopCondition: "Stop after the document is updated and verified.",
+        nextAction: "Request readDocument.",
+        percent: 20,
+      },
+    });
+
+    expect(response.taskProgress).toMatchObject({
+      phase: "gathering_context",
+      status: "needs_tool",
+      currentStepId: "read",
+      nextAction: "Request readDocument.",
+    });
+  });
+
+  it("preserves waiting-for-user responses with object-shaped steps", () => {
+    const response = validateAgentChatResponse({
+      message: "已收到约束。请提供需要修改的文本内容。",
+      requestedToolCalls: [],
+      pendingCommandPlan: null,
+      taskProgress: {
+        objective: "根据创作者要求调整文本。",
+        phase: "waiting_for_user",
+        status: "waiting_for_user",
+        steps: {
+          "step-1": {
+            description: "接收创作者的约束条件",
+            status: "completed",
+          },
+          "step-2": {
+            description: "等待创作者提供具体文本",
+            status: "pending",
+          },
+        },
+        currentStepId: "step-2",
+        stopCondition: "创作者提供需要修改的文本内容",
+        nextAction: "等待创作者提供具体文本",
+        percent: 10,
+      },
+    });
+
+    expect(response.requestedToolCalls).toEqual([]);
+    expect(response.taskProgress).toMatchObject({
+      phase: "reporting",
+      status: "waiting_for_user",
+      currentStepId: "step-2",
+      steps: [
+        { id: "step-1", title: "接收创作者的约束条件", status: "completed" },
+        { id: "step-2", title: "等待创作者提供具体文本", status: "pending" },
+      ],
+      nextAction: "等待创作者提供具体文本",
+    });
+  });
+
+  it("uses a neutral completed fallback for true final answers without tool calls", () => {
+    const response = validateAgentChatResponse({
+      message: "Done.",
+      requestedToolCalls: [],
+      pendingCommandPlan: null,
+    });
+
+    expect(response.taskProgress).toMatchObject({
+      phase: "complete",
+      status: "completed",
+      stopReason: "The Agent returned a final answer and did not request additional tools.",
+    });
+    expect(response.taskProgress?.stopReason).not.toContain("no requestedToolCalls");
+  });
+
+  it("normalizes loose model task progress instead of failing the response", () => {
+    const response = validateAgentChatResponse({
+      message: "I need to inspect the project.",
+      requestedToolCalls: [
+        {
+          toolName: "readPages",
+          input: { pageIds: ["page-1"] },
+          reason: "Inspect relevant page.",
+        },
+      ],
+      pendingCommandPlan: null,
+      taskProgress: {
+        objective: "Inspect page state.",
+        phase: "inspection",
+        status: "inProgress",
+        steps: [
+          "Read project context",
+          "Inspect requested page",
+          "Decide whether a document edit is needed",
+        ],
+        currentStep: "step-1",
+        stop_condition: "Stop when enough evidence is available.",
+        progress: "25%",
+      },
+    });
+
+    expect(response.taskProgress).toMatchObject({
+      objective: "Inspect page state.",
+      phase: "gathering_context",
+      status: "running",
+      currentStepId: "step-1",
+      stopCondition: "Stop when enough evidence is available.",
+      percent: 25,
+      steps: [
+        { id: "step-1", title: "Read project context", status: "in_progress" },
+        { id: "step-2", title: "Inspect requested page", status: "pending" },
+        { id: "step-3", title: "Decide whether a document edit is needed", status: "pending" },
+      ],
+    });
   });
 
   it("extracts OpenRouter assistant content from string or part-array messages", () => {
@@ -376,28 +662,32 @@ describe("agent response validation", () => {
     ).toThrow(/non-JSON response.*text\/html.*Gateway timeout/);
   });
 
-  it("rejects unknown command ids", () => {
-    expect(() =>
-      validateAgentChatResponse({
-        message: "Bad plan",
-        pendingCommandPlan: {
-          summary: "Bad",
-          commands: [{ commandId: "missingCommand", payload: {} }],
-        },
-      }),
-    ).toThrow(/unknown commandId/);
-  });
+  it("ignores model command plans because page edits are disabled for the built-in Agent", () => {
+    const unknownCommand = validateAgentChatResponse({
+      message: "Bad plan",
+      pendingCommandPlan: {
+        summary: "Bad",
+        commands: [{ commandId: "missingCommand", payload: {} }],
+      },
+    });
+    const invalidPayload = validateAgentChatResponse({
+      message: "Bad payload",
+      pendingCommandPlan: {
+        summary: "Bad",
+        commands: [{ commandId: "createPanel", payload: { pageId: "p1", width: 100 } }],
+      },
+    });
+    const malformedPlan = validateAgentChatResponse({
+      message: "Malformed page plan",
+      pendingCommandPlan: { commands: "not an array" },
+    });
 
-  it("rejects payloads that fail the command Zod schema", () => {
-    expect(() =>
-      validateAgentChatResponse({
-        message: "Bad payload",
-        pendingCommandPlan: {
-          summary: "Bad",
-          commands: [{ commandId: "createPanel", payload: { pageId: "p1", width: 100 } }],
-        },
-      }),
-    ).toThrow();
+    expect(unknownCommand.pendingCommandPlan).toBeNull();
+    expect(unknownCommand.warning).toContain("page/canvas edits are disabled");
+    expect(invalidPayload.pendingCommandPlan).toBeNull();
+    expect(invalidPayload.warning).toContain("page/canvas edits are disabled");
+    expect(malformedPlan.pendingCommandPlan).toBeNull();
+    expect(malformedPlan.warning).toContain("page/canvas edits are disabled");
   });
 
   it("allows known harness tool requests and rejects unknown tools", () => {
@@ -410,13 +700,13 @@ describe("agent response validation", () => {
           { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
           { toolName: "listDocuments", input: {}, reason: "Inspect durable docs" },
           { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
+          { toolName: "readDocumentLines", input: { documentId: "production-plan", startLine: 10, endLine: 20 }, reason: "Read line numbers" },
           { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
-          { toolName: "readSysmlStandardOverview", input: {}, reason: "Inspect SysML reference index" },
-          {
-            toolName: "readSysmlStandardReference",
-            input: { topic: "pilot-validation-workflow" },
-            reason: "Inspect SysML validation workflow",
-          },
+          { toolName: "appendDocument", input: { operationId: "append-1", documentId: "production-plan", content: "Note" }, reason: "Append docs" },
+          { toolName: "deleteDocument", input: { operationId: "delete-1", documentId: "production-plan" }, reason: "Delete docs" },
+          { toolName: "replaceDocumentSection", input: { operationId: "section-1", documentId: "production-plan", heading: "Notes", content: "Body" }, reason: "Replace section" },
+          { toolName: "replaceDocumentText", input: { operationId: "text-1", documentId: "production-plan", oldText: "old", newText: "new" }, reason: "Replace text" },
+          { toolName: "editDocumentLines", input: { operationId: "edit-lines-1", documentId: "production-plan", operations: [{ type: "delete", startLine: 10, endLine: 20 }] }, reason: "Delete line range" },
           { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
           { toolName: "renderPanel", input: { pageId: "p1", panelId: "panel-1", detail: "preview" }, reason: "Inspect one panel" },
           {
@@ -433,13 +723,13 @@ describe("agent response validation", () => {
       { toolName: "listImageAssets", input: { pageId: "p1", limit: 10 }, reason: "Inspect page resources" },
       { toolName: "listDocuments", input: {}, reason: "Inspect durable docs" },
       { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read docs" },
+      { toolName: "readDocumentLines", input: { documentId: "production-plan", startLine: 10, endLine: 20 }, reason: "Read line numbers" },
       { toolName: "searchDocuments", input: { query: "beat", role: "storyboardDesigner", limit: 3 }, reason: "Search docs" },
-      { toolName: "readSysmlStandardOverview", input: {}, reason: "Inspect SysML reference index" },
-      {
-        toolName: "readSysmlStandardReference",
-        input: { topic: "pilot-validation-workflow" },
-        reason: "Inspect SysML validation workflow",
-      },
+      { toolName: "appendDocument", input: { operationId: "append-1", documentId: "production-plan", content: "Note" }, reason: "Append docs" },
+      { toolName: "deleteDocument", input: { operationId: "delete-1", documentId: "production-plan" }, reason: "Delete docs" },
+      { toolName: "replaceDocumentSection", input: { operationId: "section-1", documentId: "production-plan", heading: "Notes", content: "Body" }, reason: "Replace section" },
+      { toolName: "replaceDocumentText", input: { operationId: "text-1", documentId: "production-plan", oldText: "old", newText: "new" }, reason: "Replace text" },
+      { toolName: "editDocumentLines", input: { operationId: "edit-lines-1", documentId: "production-plan", operations: [{ type: "delete", startLine: 10, endLine: 20 }] }, reason: "Delete line range" },
       { toolName: "renderPages", input: { pageIds: ["p1", "p2"], detail: "preview" }, reason: "Inspect several pages" },
       { toolName: "renderPanel", input: { pageId: "p1", panelId: "panel-1", detail: "preview" }, reason: "Inspect one panel" },
       {
@@ -449,29 +739,37 @@ describe("agent response validation", () => {
       },
     ]);
 
-    expect(() =>
+    expect(
       validateAgentChatResponse({
         message: "Bad tool",
         requestedToolCalls: [{ toolName: "readFile", input: { path: "secret" } }],
         pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      expect.objectContaining({
+        toolName: "toolInputError",
+        input: expect.objectContaining({
+          attemptedToolName: "readFile",
+          error: expect.stringContaining("unknown tool"),
+        }),
       }),
-    ).toThrow(/unknown tool/);
+    ]);
 
-    expect(() =>
+    expect(
       validateAgentChatResponse({
         message: "Bad render detail",
         requestedToolCalls: [{ toolName: "renderPage", input: { pageId: "p1", detail: "high" } }],
         pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      expect.objectContaining({
+        toolName: "toolInputError",
+        input: expect.objectContaining({
+          attemptedToolName: "renderPage",
+          error: expect.stringContaining("detail"),
+        }),
       }),
-    ).toThrow(/requestedToolCalls\[0\] renderPage: detail/);
-
-    expect(() =>
-      validateAgentChatResponse({
-        message: "Bad SysML topic",
-        requestedToolCalls: [{ toolName: "readSysmlStandardReference", input: { topic: "not-a-topic" } }],
-        pendingCommandPlan: null,
-      }),
-    ).toThrow(/readSysmlStandardReference: topic/);
+    ]);
 
     expect(
       validateAgentChatResponse({
@@ -492,13 +790,128 @@ describe("agent response validation", () => {
       },
     ]);
 
-    expect(() =>
+    expect(
       validateAgentChatResponse({
         message: "Bad document write",
         requestedToolCalls: [{ toolName: "writeDocument", input: { id: "doc", title: "Doc", content: "" } }],
         pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      expect.objectContaining({
+        toolName: "toolInputError",
+        input: expect.objectContaining({
+          attemptedToolName: "writeDocument",
+          error: expect.stringContaining("operationId"),
+        }),
       }),
-    ).toThrow(/operationId/);
+    ]);
+  });
+
+  it("reports misplaced requested tool reason as a model-visible tool input error", () => {
+    expect(
+      validateAgentChatResponse({
+        message: "Replace section",
+        requestedToolCalls: [
+          {
+            toolName: "replaceDocumentSection",
+            input: {
+              operationId: "section-reason-1",
+              documentId: "production-plan",
+              heading: "Notes",
+              content: "Body",
+              reason: "The model put this in the wrong place.",
+            },
+          },
+        ],
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      expect.objectContaining({
+        toolName: "toolInputError",
+        input: expect.objectContaining({
+          attemptedToolName: "replaceDocumentSection",
+          error: expect.stringContaining("reason"),
+          guidance: expect.stringContaining("requestedToolCalls[].reason"),
+        }),
+        reason: "Repair invalid replaceDocumentSection tool input.",
+      }),
+    ]);
+  });
+
+  it("reports malformed requestedToolCalls entries as model-visible repair tool results", () => {
+    expect(
+      validateAgentChatResponse({
+        message: "Need tools",
+        requestedToolCalls: [
+          { toolName: "readDocument", input: { documentId: "production-plan" }, reason: "Read first" },
+          "then update the document",
+        ],
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      expect.objectContaining({
+        toolName: "toolInputError",
+        input: expect.objectContaining({
+          requestedToolCallIndex: 1,
+          attemptedToolName: "unknown",
+          attemptedToolCallPreview: expect.stringContaining("then update the document"),
+          error: expect.stringContaining("requestedToolCalls[1] must be an object"),
+          guidance: expect.stringContaining("Do not put prose strings inside requestedToolCalls"),
+        }),
+        reason: "Repair malformed requestedToolCalls entry.",
+      }),
+    ]);
+
+    expect(
+      validateAgentChatResponse({
+        message: "Need tools",
+        requestedToolCalls: "readDocument",
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      expect.objectContaining({
+        toolName: "toolInputError",
+        input: expect.objectContaining({
+          requestedToolCallIndex: 0,
+          error: expect.stringContaining("requestedToolCalls must be an array"),
+        }),
+      }),
+    ]);
+  });
+
+  it("reports malformed top-level Agent responses as model-visible schema repair tool results", () => {
+    expect(
+      validateAgentChatResponse({
+        requestedToolCalls: [],
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      expect.objectContaining({
+        toolName: "toolInputError",
+        input: expect.objectContaining({
+          attemptedToolName: "agentResponse",
+          error: expect.stringContaining("message must be a string"),
+          guidance: expect.stringContaining("Do not omit message"),
+        }),
+        reason: "Repair malformed Agent response JSON.",
+      }),
+    ]);
+
+    const stringResponse = validateAgentChatResponse("not an object");
+    expect(stringResponse).toMatchObject({
+      message: expect.stringContaining("malformed Agent response"),
+      pendingCommandPlan: null,
+      warning: expect.stringContaining("response must be a JSON object"),
+      requestedToolCalls: [
+        expect.objectContaining({
+          toolName: "toolInputError",
+          input: expect.objectContaining({
+            attemptedToolName: "agentResponse",
+            error: expect.stringContaining("must be a JSON object"),
+          }),
+        }),
+      ],
+    });
   });
 
   it("preserves request trace metadata from the Agent backend", () => {
@@ -534,7 +947,7 @@ describe("agent response validation", () => {
     });
   });
 
-  it("does not trust model-provided dangerLevel", () => {
+  it("does not expose model-provided dangerLevel through chat responses", () => {
     const response = validateAgentChatResponse({
       message: "Delete",
       pendingCommandPlan: {
@@ -543,8 +956,186 @@ describe("agent response validation", () => {
       },
     });
 
-    expect(response.pendingCommandPlan?.commands[0].dangerLevel).toBe("destructive");
+    expect(response.pendingCommandPlan).toBeNull();
+    expect(response.warning).toContain("page/canvas edits are disabled");
     expect(getCommandDangerLevel("removePage")).toBe("destructive");
+  });
+});
+
+describe("agent incremental document edits", () => {
+  it("appends Markdown under an existing heading without requiring a full document rewrite", () => {
+    const result = applyAppendDocumentEdit(testDocument, {
+      operationId: "append-note",
+      documentId: "story",
+      heading: "Notes",
+      content: "New note.",
+    });
+
+    expect(result.writePayload.content).toContain("## Notes\n\nExisting note.\n\nNew note.");
+    expect(result.edit.changed).toBe(true);
+    expect(result.edit.heading).toBe("Notes");
+  });
+
+  it("does not append the same Markdown block twice even with a fresh operation id", () => {
+    const first = applyAppendDocumentEdit(testDocument, {
+      operationId: "append-note-1",
+      documentId: "story",
+      heading: "Notes",
+      content: "New note.",
+    });
+    const second = applyAppendDocumentEdit(
+      { ...testDocument, content: first.writePayload.content },
+      {
+        operationId: "append-note-2",
+        documentId: "story",
+        heading: "Notes",
+        content: "New note.",
+      },
+    );
+
+    expect(second.edit.changed).toBe(false);
+    expect(second.edit.duplicateAppend).toBe(true);
+    expect(second.writePayload.content.match(/New note\./g)).toHaveLength(1);
+  });
+
+  it("treats appended Markdown sections as section upserts instead of repeated appends", () => {
+    const first = applyAppendDocumentEdit(testDocument, {
+      operationId: "append-section-1",
+      documentId: "story",
+      content: "## Page 1\n\nReplacement beat.",
+    });
+    const second = applyAppendDocumentEdit(
+      { ...testDocument, content: first.writePayload.content },
+      {
+        operationId: "append-section-2",
+        documentId: "story",
+        content: "## Page 1\n\nReplacement beat.",
+      },
+    );
+
+    expect(first.edit.type).toBe("replaceSection");
+    expect(first.writePayload.content).toContain("## Page 1\n\nReplacement beat.");
+    expect(first.writePayload.content.match(/## Page 1/g)).toHaveLength(1);
+    expect(second.edit.changed).toBe(false);
+    expect(second.edit.alreadyApplied).toBe(true);
+    expect(second.writePayload.content.match(/## Page 1/g)).toHaveLength(1);
+  });
+
+  it("refuses appendDocument content that contains a different Markdown heading", () => {
+    const result = applyAppendDocumentEdit(testDocument, {
+      operationId: "unsafe-heading-append",
+      documentId: "story",
+      heading: "Notes",
+      content: "## Page 2\n\nThis is a section replacement, not an append.",
+    });
+
+    expect(result.edit.changed).toBe(false);
+    expect(result.edit.unsafeAppend).toBe(true);
+    expect(result.edit.alreadyApplied).toBeUndefined();
+    expect(result.writePayload.content).not.toContain("This is a section replacement");
+  });
+
+  it("replaces a heading section and preserves surrounding sections", () => {
+    const result = applyReplaceDocumentSectionEdit(testDocument, {
+      operationId: "replace-page-1",
+      documentId: "story",
+      heading: "Page 1",
+      content: "New beat.",
+    });
+
+    expect(result.writePayload.content).toContain("## Page 1\n\nNew beat.");
+    expect(result.writePayload.content).toContain("## Notes\n\nExisting note.");
+    expect(result.edit.changed).toBe(true);
+  });
+
+  it("accepts Markdown heading markers in replaceDocumentSection heading input", () => {
+    const result = applyReplaceDocumentSectionEdit(testDocument, {
+      operationId: "replace-page-1-marked-heading",
+      documentId: "story",
+      heading: "## Page 1",
+      content: "New beat.",
+      headingLevel: 2,
+      createIfMissing: true,
+    });
+
+    expect(result.writePayload.content).toContain("## Page 1\n\nNew beat.");
+    expect(result.writePayload.content.match(/## ## Page 1/g)).toBeNull();
+    expect(result.edit.createdSection).toBeUndefined();
+    expect(result.edit.changed).toBe(true);
+  });
+
+  it("reads document content with stable line numbers for range edits", () => {
+    const result = createDocumentLinesResult(testDocument, {
+      documentId: "story",
+      startLine: 3,
+      endLine: 5,
+    });
+
+    expect(result.lineCount).toBe(9);
+    expect(result.lines).toEqual([
+      { line: 3, text: "## Page 1" },
+      { line: 4, text: "" },
+      { line: 5, text: "Old beat." },
+    ]);
+  });
+
+  it("deletes arbitrary Markdown line ranges", () => {
+    const result = applyEditDocumentLinesEdit(testDocument, {
+      operationId: "delete-lines",
+      documentId: "story",
+      operations: [{ type: "delete", startLine: 9, endLine: 9 }],
+    });
+
+    expect(result.writePayload.content).toContain("## Notes\n");
+    expect(result.writePayload.content).not.toContain("Existing note.");
+    expect(result.edit).toMatchObject({
+      type: "editLines",
+      changed: true,
+      operationsApplied: 1,
+      lineCountBefore: 9,
+      lineCountAfter: 8,
+    });
+  });
+
+  it("replaces and inserts arbitrary Markdown line ranges against original line numbers", () => {
+    const result = applyEditDocumentLinesEdit(testDocument, {
+      operationId: "edit-lines",
+      documentId: "story",
+      operations: [
+        { type: "replace", startLine: 5, endLine: 5, content: "Sharper beat." },
+        { type: "insertAfter", line: 9, content: "New note." },
+      ],
+    });
+
+    expect(result.writePayload.content).toContain("## Page 1\n\nSharper beat.");
+    expect(result.writePayload.content).toContain("Existing note.\nNew note.");
+    expect(result.edit.operationsApplied).toBe(2);
+  });
+
+  it("replaces exact text spans for focused document edits", () => {
+    const result = applyReplaceDocumentTextEdit(testDocument, {
+      operationId: "replace-text",
+      documentId: "story",
+      oldText: "Old beat.",
+      newText: "Sharper beat.",
+    });
+
+    expect(result.writePayload.content).toContain("Sharper beat.");
+    expect(result.writePayload.content).not.toContain("Old beat.");
+    expect(result.edit.replacements).toBe(1);
+  });
+
+  it("reports missing exact text replacements as unverified no-op edits", () => {
+    const result = applyReplaceDocumentTextEdit(testDocument, {
+      operationId: "replace-missing-text",
+      documentId: "story",
+      oldText: "missing text",
+      newText: "new text",
+    });
+
+    expect(result.edit.changed).toBe(false);
+    expect(result.edit.notFound).toBe(true);
+    expect(result.edit.alreadyApplied).toBeUndefined();
   });
 });
 

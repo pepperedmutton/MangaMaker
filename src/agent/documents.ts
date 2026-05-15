@@ -94,11 +94,52 @@ export const deleteProjectDocument = async (
   return agentDocumentManifestSchema.parse(await readJsonResponse<unknown>(response));
 };
 
-export type CreateProjectRoleInput = Partial<Omit<AgentRoleDefinition, "metadocId">> & {
+export const renameProjectWorkingDirectory = async (
+  projectId: string,
+  directoryPath: string,
+  nextDirectoryPath: string,
+): Promise<AgentDocumentManifest> => {
+  if (isTauriRuntime()) {
+    return agentDocumentManifestSchema.parse(
+      await invoke<unknown>("rename_project_working_directory", {
+        projectId,
+        directoryPath,
+        nextDirectoryPath,
+      }),
+    );
+  }
+  const response = await fetch(`${AGENT_API_BASE}/working-directory`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId, directoryPath, nextDirectoryPath }),
+  });
+  return agentDocumentManifestSchema.parse(await readJsonResponse<unknown>(response));
+};
+
+export const deleteProjectWorkingDirectory = async (
+  projectId: string,
+  directoryPath: string,
+): Promise<AgentDocumentManifest> => {
+  if (isTauriRuntime()) {
+    return agentDocumentManifestSchema.parse(
+      await invoke<unknown>("delete_project_working_directory", { projectId, directoryPath }),
+    );
+  }
+  const response = await fetch(
+    `${AGENT_API_BASE}/working-directory?projectId=${encodeURIComponent(projectId)}&directoryPath=${encodeURIComponent(directoryPath)}`,
+    { method: "DELETE" },
+  );
+  return agentDocumentManifestSchema.parse(await readJsonResponse<unknown>(response));
+};
+
+export type CreateProjectRoleInput = {
+  id?: string;
   name: string;
   metadocId?: string;
-  metadocTitle?: string;
-  metadocPath?: string;
+  workingDirectory?: string;
+  defaultAutonomy?: AgentRoleDefinition["defaultAutonomy"];
+  allowedCommandGroups?: string[];
+  preferredTools?: string[];
 };
 
 export const createProjectRole = async (

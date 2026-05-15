@@ -9,6 +9,8 @@ import {
   loadStoredTextInsertDefaults,
   persistTextInsertDefaults,
 } from "../storage/textDefaults";
+import { saveLocalDraft } from "../storage/localDraft";
+import { shouldAutoSaveAfterCommand } from "./autoSavePolicy";
 import type {
   EditorMultiSelection,
   EditorSelection,
@@ -146,6 +148,35 @@ const areTextInsertDefaultsEqual = (
 
 export const useEditorStore = create<EditorStore>((set, get) => {
   const pendingHistorySnapshots = new Map<string, HistoryEntry>();
+  let latestAutoSaveProject: Project | null = null;
+
+  const queueMajorChangeAutoSave = (projectToSave: Project) => {
+    if (projectToSave.title.trim().length === 0) {
+      return;
+    }
+    latestAutoSaveProject = projectToSave;
+    void saveLocalDraft(projectToSave, { mode: "last-write-wins" })
+      .then((savedAt) => {
+        if (!savedAt) {
+          return;
+        }
+        set((state) => {
+          if (state.project !== projectToSave || latestAutoSaveProject !== projectToSave) {
+            return state;
+          }
+          return {
+            saveStatus: {
+              target: "localDraft",
+              lastSavedAt: savedAt,
+              hasUnsavedChanges: false,
+            },
+          };
+        });
+      })
+      .catch((error) => {
+        console.warn("Failed to auto-save major project change:", error);
+      });
+  };
 
   return {
     appView: "welcome",
@@ -386,6 +417,9 @@ export const useEditorStore = create<EditorStore>((set, get) => {
             hasUnsavedChanges: true,
           },
         }));
+        if (shouldAutoSaveAfterCommand(definition.id)) {
+          queueMajorChangeAutoSave(get().project);
+        }
       }
       return result;
     } catch (error) {

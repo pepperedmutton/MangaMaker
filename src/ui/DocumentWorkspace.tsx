@@ -1,12 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
-import { deleteProjectDocument, readProjectDocument, writeProjectDocument } from "../agent/documents";
+import {
+  deleteProjectDocument,
+  deleteProjectWorkingDirectory,
+  readProjectDocument,
+  renameProjectWorkingDirectory,
+  writeProjectDocument,
+} from "../agent/documents";
 import {
   AGENT_DOCUMENT_ROLE_VALUES,
+  createUniqueAgentDocumentPathFromTitle,
+  normalizeAgentDocumentDirectoryPath,
+  normalizeAgentDocumentFileStem,
   type AgentDocument,
   type AgentDocumentMeta,
   type AgentDocumentRole,
 } from "../agent/documentSchema";
-import { getAgentRoleLabel, type AgentRoleDefinition } from "../agent/roles";
+import {
+  getAgentRoleLabel,
+  getAgentRoleWorkingDirectory,
+  type AgentRoleDefinition,
+} from "../agent/roles";
 
 type DocumentWorkspaceProps = {
   projectId: string;
@@ -23,19 +36,29 @@ type DocumentContextMenuState = {
   x: number;
   y: number;
   documentId: string | null;
+  directoryPath: string | null;
 } | null;
+
+const DOCUMENT_CONTEXT_MENU_MARGIN = 8;
+
+const clampNumber = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
 
 type NewDocumentDraft = {
   title: string;
   role: AgentDocumentRole | "";
-  path: string;
+  directory: string;
   summary: string;
 };
 
 type RenameDocumentDraft = {
   documentId: string;
   title: string;
-  path: string;
+};
+
+type RenameWorkingDirectoryDraft = {
+  directoryPath: string;
+  name: string;
 };
 
 type MarkdownBlock =
@@ -86,6 +109,17 @@ const getDocumentDirectory = (path: string) => {
   return parts.join("/") || ".";
 };
 
+const getDirectoryName = (path: string) => {
+  const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts.at(-1) ?? path;
+};
+
+const documentPathIsUnderDirectory = (documentPath: string, directoryPath: string) =>
+  documentPath
+    .replace(/\\/g, "/")
+    .toLowerCase()
+    .startsWith(`${directoryPath.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()}/`);
+
 const isEditableTarget = (target: EventTarget | null) =>
   target instanceof HTMLElement &&
   Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
@@ -111,17 +145,23 @@ const createUniqueDocumentId = (title: string, documents: AgentDocumentMeta[]) =
   return candidate;
 };
 
-const defaultDocumentPath = (role: AgentDocumentRole | "", documentId: string) =>
-  `docs/${slugifyDocumentPart(role || "general", "role")}/${slugifyDocumentPart(documentId, "document")}.md`;
+const defaultDocumentDirectory = (role: AgentDocumentRole | "") =>
+  `docs/${slugifyDocumentPart(role || "general", "role")}`;
 
-const normalizeNewDocumentPath = (path: string, role: AgentDocumentRole | "", documentId: string) => {
-  const trimmed = path.trim().replace(/\\/g, "/").replace(/^\/+/, "");
-  if (!trimmed) {
-    return defaultDocumentPath(role, documentId);
-  }
-  const underDocs = trimmed.startsWith("docs/") ? trimmed : `docs/${trimmed}`;
-  return underDocs.toLowerCase().endsWith(".md") ? underDocs : `${underDocs}.md`;
-};
+const defaultDocumentPath = (
+  role: AgentDocumentRole | "",
+  title: string,
+  documents: AgentDocumentMeta[],
+  documentId?: string,
+  directory?: string,
+) =>
+  createUniqueAgentDocumentPathFromTitle(
+    title,
+    directory?.trim() || defaultDocumentDirectory(role),
+    documents,
+    documentId,
+    documentId || "document",
+  );
 
 const parseTableRow = (line: string) =>
   line
@@ -441,21 +481,27 @@ export const DocumentWorkspace = ({
   const [creating, setCreating] = useState(false);
   const [renamingDocumentId, setRenamingDocumentId] = useState<string | null>(null);
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+  const [renamingDirectoryPath, setRenamingDirectoryPath] = useState<string | null>(null);
+  const [deletingDirectoryPath, setDeletingDirectoryPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<DocumentContextMenuState>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [renameDirectoryDialogOpen, setRenameDirectoryDialogOpen] = useState(false);
+  const [expandedDirectoryPaths, setExpandedDirectoryPaths] = useState<Set<string>>(() => new Set());
   const [newDocument, setNewDocument] = useState<NewDocumentDraft>({
     title: "",
     role: "",
-    path: "",
+    directory: "",
     summary: "",
   });
   const [renameDraft, setRenameDraft] = useState<RenameDocumentDraft | null>(null);
+  const [renameDirectoryDraft, setRenameDirectoryDraft] = useState<RenameWorkingDirectoryDraft | null>(null);
   const dirty = Boolean(document && content !== document.content);
   const dirtyRef = useRef(false);
   const loadedDocumentIdRef = useRef<string | null>(null);
   const loadedDocumentRevisionRef = useRef<string | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const sortedDocuments = useMemo(
     () =>
@@ -466,9 +512,59 @@ export const DocumentWorkspace = ({
       }),
     [documents],
   );
+  const workingDirectoryRows = useMemo(() => {
+    const directoryByPath = new Map<string, { path: string; roles: AgentRoleDefinition[] }>();
+    for (const role of roles) {
+      const path = getAgentRoleWorkingDirectory(role);
+      const key = path.toLowerCase();
+      const current = directoryByPath.get(key);
+      if (current) {
+        current.roles.push(role);
+      } else {
+        directoryByPath.set(key, { path, roles: [role] });
+      }
+    }
+    return Array.from(directoryByPath.values()).sort((left, right) =>
+      left.path.toLowerCase().localeCompare(right.path.toLowerCase()),
+    );
+  }, [roles]);
   const roleByMetadocId = useMemo(
     () => new Map(roles.map((role) => [role.metadocId, role])),
     [roles],
+  );
+  const workingDirectoryDocuments = useMemo(() => {
+    const entries = new Map<string, AgentDocumentMeta[]>();
+    for (const { path } of workingDirectoryRows) {
+      entries.set(path, sortedDocuments.filter((document) => documentPathIsUnderDirectory(document.path, path)));
+    }
+    return entries;
+  }, [sortedDocuments, workingDirectoryRows]);
+  const documentsInWorkingDirectories = useMemo(() => {
+    const ids = new Set<string>();
+    for (const directoryDocuments of workingDirectoryDocuments.values()) {
+      for (const document of directoryDocuments) {
+        ids.add(document.id);
+      }
+    }
+    return ids;
+  }, [workingDirectoryDocuments]);
+  const fileBrowserEntries = useMemo(
+    () =>
+      [
+        ...workingDirectoryRows.map((entry) => ({
+          kind: "directory" as const,
+          sortPath: `${entry.path}/`,
+          entry,
+        })),
+        ...sortedDocuments
+          .filter((entry) => !documentsInWorkingDirectories.has(entry.id))
+          .map((entry) => ({
+          kind: "document" as const,
+          sortPath: entry.path,
+          entry,
+        })),
+      ].sort((left, right) => left.sortPath.toLowerCase().localeCompare(right.sortPath.toLowerCase())),
+    [documentsInWorkingDirectories, sortedDocuments, workingDirectoryRows],
   );
   const selectedDocumentMeta = useMemo(
     () => documents.find((entry) => entry.id === documentId) ?? null,
@@ -555,24 +651,64 @@ export const DocumentWorkspace = ({
     };
     window.addEventListener("click", closeContextMenu);
     window.addEventListener("resize", closeContextMenu);
-    window.addEventListener("scroll", closeContextMenu, true);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("click", closeContextMenu);
       window.removeEventListener("resize", closeContextMenu);
-      window.removeEventListener("scroll", closeContextMenu, true);
       window.removeEventListener("keydown", handleKeyDown);
     };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    setExpandedDirectoryPaths((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const [directoryPath, directoryDocuments] of workingDirectoryDocuments) {
+        if (directoryDocuments.length > 0 && !next.has(directoryPath)) {
+          next.add(directoryPath);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [workingDirectoryDocuments]);
+
+  useEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) {
+      return;
+    }
+    const menuRect = contextMenuRef.current.getBoundingClientRect();
+    const maxLeft = Math.max(
+      DOCUMENT_CONTEXT_MENU_MARGIN,
+      window.innerWidth - menuRect.width - DOCUMENT_CONTEXT_MENU_MARGIN,
+    );
+    const maxTop = Math.max(
+      DOCUMENT_CONTEXT_MENU_MARGIN,
+      window.innerHeight - menuRect.height - DOCUMENT_CONTEXT_MENU_MARGIN,
+    );
+    const nextX = clampNumber(contextMenu.x, DOCUMENT_CONTEXT_MENU_MARGIN, maxLeft);
+    const opensDown = contextMenu.y + menuRect.height <= window.innerHeight - DOCUMENT_CONTEXT_MENU_MARGIN;
+    const opensUp = contextMenu.y - menuRect.height >= DOCUMENT_CONTEXT_MENU_MARGIN;
+    const nextY = opensDown
+      ? contextMenu.y
+      : opensUp
+        ? contextMenu.y - menuRect.height
+        : clampNumber(contextMenu.y, DOCUMENT_CONTEXT_MENU_MARGIN, maxTop);
+    if (Math.abs(nextX - contextMenu.x) > 0.5 || Math.abs(nextY - contextMenu.y) > 0.5) {
+      setContextMenu({ ...contextMenu, x: nextX, y: nextY });
+    }
   }, [contextMenu]);
 
   const contextDocument =
     contextMenu?.documentId
       ? sortedDocuments.find((entry) => entry.id === contextMenu.documentId) ?? null
       : null;
+  const contextDirectoryPath = contextMenu?.directoryPath ?? "";
 
   const openDocumentContextMenu = (
     event: MouseEvent<HTMLElement>,
     targetDocumentId: string | null,
+    targetDirectoryPath: string | null = null,
   ) => {
     if (isEditableTarget(event.target)) {
       return;
@@ -583,16 +719,20 @@ export const DocumentWorkspace = ({
       x: event.clientX,
       y: event.clientY,
       documentId: targetDocumentId,
+      directoryPath: targetDirectoryPath,
     });
   };
 
-  const openCreateDialog = (role: AgentDocumentRole | "" = "") => {
+  const openCreateDialog = (
+    role: AgentDocumentRole | "" = "",
+    directory = "",
+  ) => {
     setContextMenu(null);
     setError(null);
     setNewDocument({
       title: "",
       role,
-      path: "",
+      directory,
       summary: "",
     });
     setCreateDialogOpen(true);
@@ -609,9 +749,30 @@ export const DocumentWorkspace = ({
     setRenameDraft({
       documentId: target.id,
       title: target.title,
-      path: target.path,
     });
     setRenameDialogOpen(true);
+  };
+
+  const openRenameDirectoryDialog = (targetDirectoryPath: string) => {
+    setContextMenu(null);
+    setError(null);
+    setRenameDirectoryDraft({
+      directoryPath: targetDirectoryPath,
+      name: getDirectoryName(targetDirectoryPath),
+    });
+    setRenameDirectoryDialogOpen(true);
+  };
+
+  const toggleWorkingDirectory = (targetDirectoryPath: string) => {
+    setExpandedDirectoryPaths((current) => {
+      const next = new Set(current);
+      if (next.has(targetDirectoryPath)) {
+        next.delete(targetDirectoryPath);
+      } else {
+        next.add(targetDirectoryPath);
+      }
+      return next;
+    });
   };
 
   const saveDocument = async () => {
@@ -641,11 +802,17 @@ export const DocumentWorkspace = ({
     event.preventDefault();
     const title = newDocument.title.trim();
     if (!title) {
-      setError("Document title is required.");
+      setError("Document name is required.");
       return;
     }
     const id = createUniqueDocumentId(title, documents);
-    const path = normalizeNewDocumentPath(newDocument.path, newDocument.role, id);
+    const path = defaultDocumentPath(
+      newDocument.role,
+      title,
+      documents,
+      id,
+      newDocument.directory,
+    );
     if (documents.some((entry) => entry.path.toLowerCase() === path.toLowerCase())) {
       setError(`A document already uses ${path}.`);
       return;
@@ -688,10 +855,16 @@ export const DocumentWorkspace = ({
     }
     const title = renameDraft.title.trim();
     if (!title) {
-      setError("Document title is required.");
+      setError("Document name is required.");
       return;
     }
-    const path = normalizeNewDocumentPath(renameDraft.path, target.role ?? "", target.id);
+    const path = defaultDocumentPath(
+      target.role ?? "",
+      title,
+      documents,
+      target.id,
+      getDocumentDirectory(target.path),
+    );
     if (
       documents.some(
         (entry) => entry.id !== target.id && entry.path.toLowerCase() === path.toLowerCase(),
@@ -728,6 +901,40 @@ export const DocumentWorkspace = ({
     }
   };
 
+  const renameWorkingDirectory = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!renameDirectoryDraft) {
+      return;
+    }
+    const name = renameDirectoryDraft.name.trim();
+    if (!name) {
+      setError("Working directory name is required.");
+      return;
+    }
+    const parentDirectory = getDocumentDirectory(renameDirectoryDraft.directoryPath);
+    const directoryName = normalizeAgentDocumentFileStem(
+      name,
+      getDirectoryName(renameDirectoryDraft.directoryPath),
+    );
+    const nextDirectoryPath = normalizeAgentDocumentDirectoryPath(`${parentDirectory}/${directoryName}`);
+    setRenamingDirectoryPath(renameDirectoryDraft.directoryPath);
+    setError(null);
+    try {
+      await renameProjectWorkingDirectory(
+        projectId,
+        renameDirectoryDraft.directoryPath,
+        nextDirectoryPath,
+      );
+      await onDocumentSaved();
+      setRenameDirectoryDialogOpen(false);
+      setRenameDirectoryDraft(null);
+    } catch (renameError) {
+      setError(renameError instanceof Error ? renameError.message : String(renameError));
+    } finally {
+      setRenamingDirectoryPath(null);
+    }
+  };
+
   const deleteDocument = async (targetDocumentId: string) => {
     const target = documents.find((entry) => entry.id === targetDocumentId);
     if (!target) {
@@ -758,8 +965,48 @@ export const DocumentWorkspace = ({
     }
   };
 
+  const deleteWorkingDirectory = async (targetDirectoryPath: string) => {
+    setContextMenu(null);
+    const affectedDocuments = documents.filter((entry) =>
+      documentPathIsUnderDirectory(entry.path, targetDirectoryPath),
+    );
+    const affectedRoles =
+      workingDirectoryRows.find((entry) => entry.path === targetDirectoryPath)?.roles ?? [];
+    const confirmed = window.confirm(
+      [
+        `Delete working directory "${targetDirectoryPath}"?`,
+        "",
+        affectedRoles.length > 0
+          ? `This removes ${affectedRoles.length} role binding(s): ${affectedRoles.map((role) => role.name).join(", ")}. Their metadocs are preserved as ordinary documents.`
+          : "No role binding uses this directory.",
+        affectedDocuments.length > 0
+          ? `This also deletes ${affectedDocuments.length} Markdown document(s) under the directory.`
+          : "No Markdown documents are registered under the directory.",
+      ].join("\n"),
+    );
+    if (!confirmed) {
+      return;
+    }
+    setDeletingDirectoryPath(targetDirectoryPath);
+    setError(null);
+    try {
+      await deleteProjectWorkingDirectory(projectId, targetDirectoryPath);
+      if (selectedDocumentMeta && documentPathIsUnderDirectory(selectedDocumentMeta.path, targetDirectoryPath)) {
+        setDocument(null);
+        setContent("");
+        onSelectDocument(null);
+      }
+      await onDocumentSaved();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
+    } finally {
+      setDeletingDirectoryPath(null);
+    }
+  };
+
   const contextMenuNode = contextMenu ? (
     <div
+      ref={contextMenuRef}
       className="document-context-menu"
       role="menu"
       style={{ left: contextMenu.x, top: contextMenu.y }}
@@ -769,10 +1016,31 @@ export const DocumentWorkspace = ({
       <button
         type="button"
         role="menuitem"
-        onClick={() => openCreateDialog(contextDocument?.role ?? "")}
+        onClick={() => openCreateDialog(contextDocument?.role ?? "", contextDirectoryPath)}
       >
         New document
       </button>
+      {contextDirectoryPath ? (
+        <>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={renamingDirectoryPath === contextDirectoryPath}
+            onClick={() => openRenameDirectoryDialog(contextDirectoryPath)}
+          >
+            Rename working dir
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            disabled={deletingDirectoryPath === contextDirectoryPath}
+            onClick={() => void deleteWorkingDirectory(contextDirectoryPath)}
+          >
+            Delete working dir
+          </button>
+        </>
+      ) : null}
       {contextDocument ? (
         <>
           <button
@@ -807,10 +1075,10 @@ export const DocumentWorkspace = ({
       >
         <h3>New Markdown document</h3>
         <label htmlFor="new-document-title">
-          <span>Title</span>
+          <span>Name</span>
           <input
             id="new-document-title"
-            aria-label="New document title"
+            aria-label="New document name"
             value={newDocument.title}
             autoFocus
             onChange={(event) => {
@@ -844,25 +1112,9 @@ export const DocumentWorkspace = ({
             ))}
           </select>
         </label>
-        <label htmlFor="new-document-path">
-          <span>Path</span>
-          <input
-            id="new-document-path"
-            aria-label="New document path"
-            placeholder={defaultDocumentPath(
-              newDocument.role,
-              createUniqueDocumentId(newDocument.title || "document", documents),
-            )}
-            value={newDocument.path}
-            onChange={(event) => {
-              const path = event.currentTarget.value;
-              setNewDocument((current) => ({
-                ...current,
-                path,
-              }));
-            }}
-          />
-        </label>
+        <p className="document-meta">
+          Folder is assigned by the project. File name is generated from the document name.
+        </p>
         <label htmlFor="new-document-summary">
           <span>Summary</span>
           <textarea
@@ -905,10 +1157,10 @@ export const DocumentWorkspace = ({
       >
         <h3>Rename Markdown document</h3>
         <label htmlFor="rename-document-title">
-          <span>Title</span>
+          <span>Name</span>
           <input
             id="rename-document-title"
-            aria-label="Rename document title"
+            aria-label="Rename document name"
             value={renameDraft.title}
             autoFocus
             onChange={(event) => {
@@ -917,18 +1169,9 @@ export const DocumentWorkspace = ({
             }}
           />
         </label>
-        <label htmlFor="rename-document-path">
-          <span>Path</span>
-          <input
-            id="rename-document-path"
-            aria-label="Rename document path"
-            value={renameDraft.path}
-            onChange={(event) => {
-              const path = event.currentTarget.value;
-              setRenameDraft((current) => (current ? { ...current, path } : current));
-            }}
-          />
-        </label>
+        <p className="document-meta">
+          Folder is assigned by the project. Renaming changes the document name and generated file name only.
+        </p>
         <div className="document-dialog-actions">
           <button
             type="button"
@@ -945,11 +1188,64 @@ export const DocumentWorkspace = ({
             className="primary-button"
             disabled={
               renamingDocumentId === renameDraft.documentId ||
-              renameDraft.title.trim().length === 0 ||
-              renameDraft.path.trim().length === 0
+              renameDraft.title.trim().length === 0
             }
           >
             {renamingDocumentId === renameDraft.documentId ? "Renaming..." : "Rename"}
+          </button>
+        </div>
+      </form>
+    </div>
+  ) : null;
+
+  const renameDirectoryDialogNode = renameDirectoryDialogOpen && renameDirectoryDraft ? (
+    <div className="document-dialog-backdrop">
+      <form
+        className="document-dialog"
+        role="dialog"
+        aria-label="Rename working directory"
+        onSubmit={(event) => void renameWorkingDirectory(event)}
+      >
+        <h3>Rename working directory</h3>
+        <p className="document-meta">
+          Parent folder is assigned by the project: {getDocumentDirectory(renameDirectoryDraft.directoryPath)}.
+          Renaming changes only the working directory name.
+        </p>
+        <label htmlFor="rename-working-directory-name">
+          <span>Name</span>
+          <input
+            id="rename-working-directory-name"
+            aria-label="Rename working directory name"
+            value={renameDirectoryDraft.name}
+            autoFocus
+            onChange={(event) => {
+              const name = event.currentTarget.value;
+              setRenameDirectoryDraft((current) =>
+                current ? { ...current, name } : current,
+              );
+            }}
+          />
+        </label>
+        <div className="document-dialog-actions">
+          <button
+            type="button"
+            disabled={renamingDirectoryPath === renameDirectoryDraft.directoryPath}
+            onClick={() => {
+              setRenameDirectoryDialogOpen(false);
+              setRenameDirectoryDraft(null);
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={
+              renamingDirectoryPath === renameDirectoryDraft.directoryPath ||
+              renameDirectoryDraft.name.trim().length === 0
+            }
+          >
+            {renamingDirectoryPath === renameDirectoryDraft.directoryPath ? "Renaming..." : "Rename"}
           </button>
         </div>
       </form>
@@ -966,6 +1262,7 @@ export const DocumentWorkspace = ({
         {contextMenuNode}
         {createDialogNode}
         {renameDialogNode}
+        {renameDirectoryDialogNode}
         <header className="document-toolbar">
           <div>
             <p className="eyebrow">Documents</p>
@@ -974,13 +1271,75 @@ export const DocumentWorkspace = ({
           </div>
         </header>
         <div className="document-file-browser" aria-label="Project document files">
-          {sortedDocuments.length === 0 ? (
+          {fileBrowserEntries.length === 0 ? (
             <div className="document-empty">
               <h3>No Markdown documents</h3>
               <p>The project document manifest has not been created yet.</p>
             </div>
           ) : (
-            sortedDocuments.map((entry) => {
+            fileBrowserEntries.map((browserEntry) => {
+              if (browserEntry.kind === "directory") {
+                const { path, roles: directoryRoles } = browserEntry.entry;
+                const directoryDocuments = workingDirectoryDocuments.get(path) ?? [];
+                const expanded = expandedDirectoryPaths.has(path);
+                return (
+                  <div key={`directory-group-${path}`} className="document-directory-group">
+                    <button
+                      type="button"
+                      className="document-file-row document-directory-row"
+                      aria-label={`Working directory ${path}`}
+                      aria-expanded={expanded}
+                      onClick={() => toggleWorkingDirectory(path)}
+                      onContextMenu={(event) => openDocumentContextMenu(event, null, path)}
+                      title={path}
+                    >
+                      <span className="document-file-name">
+                        <span aria-hidden="true">{expanded ? "[-]" : "[+]"}</span> {getDirectoryName(path)}/
+                      </span>
+                      <span className="document-file-path">{path}</span>
+                      <span className="document-file-meta">
+                        Working dir: {directoryRoles.map((role) => role.name).join(", ")} / {directoryDocuments.length} docs
+                      </span>
+                    </button>
+                    {expanded ? (
+                      <div className="document-directory-children" role="list">
+                        {directoryDocuments.length === 0 ? (
+                          <div className="document-file-row document-empty-directory-row" role="listitem">
+                            <span className="document-file-name">No Markdown files</span>
+                            <span className="document-file-path">{path}</span>
+                            <span className="document-file-meta">Right-click the working dir to create one</span>
+                          </div>
+                        ) : (
+                          directoryDocuments.map((entry) => {
+                            const metadocRole = roleByMetadocId.get(entry.id);
+                            return (
+                              <button
+                                key={entry.id}
+                                type="button"
+                                className="document-file-row document-directory-child-row"
+                                onClick={() => onSelectDocument(entry.id)}
+                                onContextMenu={(event) => openDocumentContextMenu(event, entry.id)}
+                                title={entry.path}
+                              >
+                                <span className="document-file-name">{getDocumentFileName(entry.path)}</span>
+                                <span className="document-file-path">{getDocumentDirectory(entry.path)}</span>
+                                <span className="document-file-meta">
+                                  {metadocRole
+                                    ? `Metadoc: ${metadocRole.name}`
+                                    : entry.role
+                                      ? `${getAgentRoleLabel(entry.role, roles)} tag`
+                                      : "Ordinary doc"} / {entry.status}
+                                </span>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }
+              const entry = browserEntry.entry;
               const metadocRole = roleByMetadocId.get(entry.id);
               return (
                 <button
@@ -1018,6 +1377,7 @@ export const DocumentWorkspace = ({
       {contextMenuNode}
       {createDialogNode}
       {renameDialogNode}
+      {renameDirectoryDialogNode}
       <header className="document-toolbar">
         <div>
           <p className="eyebrow">Markdown</p>

@@ -1,5 +1,8 @@
 import type { AgentConfig } from "./types";
-import type { AgentAvailableModel } from "./modelCatalog";
+import {
+  DEEPSEEK_V4_PRO_MODEL_ID,
+  type AgentAvailableModel,
+} from "./modelCatalog";
 import {
   parseAgentContextWindowTokens,
   resolveAgentContextWindowTokens,
@@ -19,9 +22,10 @@ const parseRepetitionPenalty = (value: string | undefined) => {
 export const getAgentConfigFromEnv = (
   env: AgentConfigEnv,
   availableModels?: AgentAvailableModel[],
+  modelOverride?: string | null,
 ): AgentConfig => {
   const testMode = readFlag(env, "MANGAMAKER_AGENT_TEST_MODE");
-  const model = env.MANGAMAKER_AGENT_MODEL?.trim() || null;
+  const model = modelOverride?.trim() || env.MANGAMAKER_AGENT_MODEL?.trim() || null;
   const apiKeyConfigured = Boolean(env.OPENROUTER_API_KEY?.trim());
   const envContextWindowTokens = parseAgentContextWindowTokens(
     env.MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS ?? env.MANGAMAKER_AGENT_CONTEXT_WINDOW,
@@ -40,6 +44,7 @@ export const getAgentConfigFromEnv = (
       enabled: true,
       provider: "test",
       model: model ?? "mangamaker-test-agent",
+      modelCapability: "multimodal",
       apiKeyConfigured,
       testMode: true,
       visionEnabled: true,
@@ -53,6 +58,7 @@ export const getAgentConfigFromEnv = (
       enabled: false,
       provider: "unavailable",
       model,
+      modelCapability: null,
       apiKeyConfigured: false,
       testMode: false,
       visionEnabled: false,
@@ -67,12 +73,13 @@ export const getAgentConfigFromEnv = (
       enabled: false,
       provider: "unavailable",
       model: null,
+      modelCapability: null,
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
       repetitionPenalty,
       ...contextWindow,
-      reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the multimodal Agent.",
+      reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the Agent.",
     };
   }
 
@@ -81,23 +88,27 @@ export const getAgentConfigFromEnv = (
       enabled: false,
       provider: "unavailable",
       model,
+      modelCapability: null,
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
       repetitionPenalty,
       ...contextWindow,
       reason:
-        "Configured model is not in the MangaMaker Agent allowlist. Use a DeepSeek or Kimi model that supports image input, text output, and JSON response_format.",
+        `Configured model is not in the MangaMaker Agent allowlist. Use a Kimi/Qwen/DeepSeek multimodal JSON model, or ${DEEPSEEK_V4_PRO_MODEL_ID} for text-only document work.`,
     };
   }
+
+  const modelCapability = configuredModel?.capability ?? (model === DEEPSEEK_V4_PRO_MODEL_ID ? "metadoc" : "multimodal");
 
   return {
     enabled: true,
     provider: "openrouter",
     model,
+    modelCapability,
     apiKeyConfigured: true,
     testMode: false,
-    visionEnabled: true,
+    visionEnabled: modelCapability === "multimodal",
     repetitionPenalty,
     ...contextWindow,
   };

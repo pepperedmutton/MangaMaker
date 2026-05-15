@@ -59,6 +59,7 @@ const RangeInput = ({
 
 type InspectorProps = {
   page: Page | null;
+  pageDisplayName?: string;
   activeTool: ToolMode;
   onExportProjectPdf: () => void;
   onExportProjectJpgZip: () => void;
@@ -1251,6 +1252,7 @@ const getRecommendedNextStepKey = (page: Page) => {
 
 export const Inspector = ({
   page,
+  pageDisplayName,
   activeTool,
   onExportProjectPdf,
   onExportProjectJpgZip,
@@ -1301,7 +1303,7 @@ export const Inspector = ({
         <>
           <section>
             <p className="eyebrow">{t("inspector.page")}</p>
-            <h3>{page.name}</h3>
+            <h3>{pageDisplayName ?? page.name}</h3>
             <p>
               {page.width} x {page.height}
             </p>

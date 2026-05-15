@@ -4,6 +4,7 @@ import {
   createAgentRequestTraceMetadata,
   AgentRunError,
   getAgentConfig,
+  getAgentModels,
   getAgentRequestTraceFromError,
   listAgentRuns,
   publishAgentDebugSnapshot,
@@ -26,6 +27,7 @@ import {
 import { getAgentContext } from "../agent/context";
 import { createAgentDebugSnapshot, setLatestAgentDebugSnapshot } from "../agent/debug";
 import { createProjectRole, deleteProjectRole, readProjectDocument } from "../agent/documents";
+import { AGENT_PRIME_DIRECTIVE_DOCUMENT_ID } from "../agent/documentSchema";
 import { buildAgentHarness, createAgentHarnessToolResult, executeAgentHarnessToolCall } from "../agent/harness";
 import {
   createAgentToolCallKey,
@@ -38,20 +40,25 @@ import {
   MIN_AGENT_CONTEXT_WINDOW_TOKENS,
   parseAgentContextWindowTokens,
 } from "../agent/contextWindow";
+import { AGENT_MODEL_PRESETS } from "../agent/modelCatalog";
 import {
   createAgentRoleMetadocPath,
+  type AgentDocument,
   type AgentDocumentManifest,
 } from "../agent/documentSchema";
+import { isAgentDocumentMutationToolName } from "../agent/documentEditTools";
 import {
   AGENT_ROLES,
   DEFAULT_AGENT_ROLE_ID,
   createAgentRoleId,
+  createAgentRoleWorkingDirectory,
   getAgentRole,
+  getAgentRoleWorkingDirectory,
   type AgentRoleDefinition,
   type AgentRoleId,
 } from "../agent/roles";
 import { DEFAULT_AGENT_SYSTEM_PROMPT, migrateAgentSystemPrompt } from "../agent/systemPrompt";
-import { executeCommandPlan, previewCommandPlan } from "../agent/tools";
+import { executeCommandPlan } from "../agent/tools";
 import type {
   AgentChatMessage,
   AgentChatRequest,
@@ -65,8 +72,10 @@ import type {
   AgentRunEvent,
   AgentRunStep,
   AgentRequestTrace,
+  AgentTaskProgress,
   AgentToolCallRequest,
   AgentToolLogEntry,
+  AgentAvailableModel,
 } from "../agent/types";
 import { AgentCommandPlan as AgentCommandPlanView } from "./AgentCommandPlan";
 import { AgentMessageList } from "./AgentMessageList";
@@ -171,6 +180,16 @@ const createErrorLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] => {
   return [createLog(step.kind === "error" ? "agentRun" : step.kind, "error", step.error ?? step.summary)];
 };
 
+const createHarnessStatusLogsFromStep = (step: AgentRunStep): AgentToolLogEntry[] => {
+  if (step.status !== "success" || step.kind !== "tool_call") {
+    return [];
+  }
+  if (!step.summary.toLowerCase().includes("suppressed")) {
+    return [];
+  }
+  return [createLog("agentHarness", "success", step.summary)];
+};
+
 const stepIncludesBackendDocumentWrite = (step: AgentRunStep) => {
   if (step.kind !== "tool_result" || step.status !== "success") {
     return false;
@@ -180,7 +199,7 @@ const stepIncludesBackendDocumentWrite = (step: AgentRunStep) => {
     if (!isRecord(entry)) {
       return false;
     }
-    return entry.toolName === "writeDocument";
+    return typeof entry.toolName === "string" && isAgentDocumentMutationToolName(entry.toolName);
   });
 };
 
@@ -232,14 +251,63 @@ const sanitizePlan = (plan: AgentCommandPlan | null | undefined): AgentCommandPl
   if (!plan || !Array.isArray(plan.commands) || plan.commands.length === 0) {
     return null;
   }
-  return previewCommandPlan({
-    summary: plan.summary || "Command plan",
-    commands: plan.commands.map((command) => ({
-      commandId: command.commandId,
-      payload: command.payload ?? {},
-      reason: command.reason,
-    })),
-  });
+  return null;
+};
+
+const getActiveRunStepSummary = (run: AgentRun | null) => {
+  const step = [...(run?.steps ?? [])].reverse().find((entry) =>
+    entry.status === "running" || entry.status === "waiting",
+  );
+  return step ? `${step.kind.replace(/_/g, " ")}: ${step.summary}` : null;
+};
+
+const AgentTaskProgressView = ({
+  progress,
+  run,
+}: {
+  progress: AgentTaskProgress | null | undefined;
+  run: AgentRun | null;
+}) => {
+  const activeStepSummary = getActiveRunStepSummary(run);
+  if (!progress && !activeStepSummary) {
+    return null;
+  }
+  const percent = typeof progress?.percent === "number"
+    ? Math.max(0, Math.min(100, progress.percent))
+    : null;
+  return (
+    <section className="agent-task-progress" aria-label="Agent task progress">
+      <div className="agent-task-progress-header">
+        <div>
+          <h3>Task Progress</h3>
+          <p>{progress?.objective ?? "Waiting for Agent task plan."}</p>
+        </div>
+        <span>{progress?.status?.replace(/_/g, " ") ?? run?.status.replace(/_/g, " ") ?? "pending"}</span>
+      </div>
+      {percent !== null ? (
+        <div className="agent-task-progress-bar" aria-label="Agent progress percent">
+          <span style={{ width: `${percent}%` }} />
+        </div>
+      ) : null}
+      <div className="agent-task-progress-meta">
+        {progress?.phase ? <span>Phase: {progress.phase.replace(/_/g, " ")}</span> : null}
+        {progress?.nextAction ? <span>Next: {progress.nextAction}</span> : null}
+        {activeStepSummary ? <span>Backend: {activeStepSummary}</span> : null}
+      </div>
+      {progress?.steps?.length ? (
+        <ol>
+          {progress.steps.map((step) => (
+            <li key={step.id} className={`agent-task-step-${step.status}`}>
+              <span>{step.title}</span>
+              <small>{step.status.replace(/_/g, " ")}</small>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      {progress?.stopCondition ? <p className="agent-muted">Stop: {progress.stopCondition}</p> : null}
+      {progress?.stopReason ? <p className="agent-muted">Stopped: {progress.stopReason}</p> : null}
+    </section>
+  );
 };
 
 const MAX_AGENT_TOOL_ROUNDS = 24;
@@ -247,7 +315,9 @@ const MAX_AGENT_TOOL_CALLS = 72;
 const MAX_AGENT_TOOL_CALLS_PER_ROUND = 24;
 const MAX_DUPLICATE_TOOL_GUIDED_RETRIES = 4;
 const MAX_FINAL_ANSWER_ONLY_REPAIRS = 1;
-const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and prepare bounded command plans.";
+const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and update project documents.";
+const AGENT_PAGE_COMMAND_PLAN_DISABLED_MESSAGE =
+  "Built-in Agent page/canvas edits are disabled. I can inspect pages and renders, then record proposed changes with Markdown document tools.";
 const AGENT_COMMAND_PLAN_NO_CHANGE_MESSAGE = "The plan executed, but the project state did not change.";
 const RESTORABLE_RUN_STATUSES = new Set(["queued", "running", "waiting_for_tool", "waiting_for_confirmation"]);
 const CANCELLABLE_RUN_STATUSES = new Set<AgentRun["status"]>([
@@ -308,6 +378,18 @@ const toolReuseOptionsForContext = (context: AgentContextSnapshot) => ({
   currentPageId: context.currentPage?.id ?? context.selectedPageId,
 });
 
+const harnessOptionsForConfig = (
+  config: AgentConfig | null,
+  activeRole: AgentRoleDefinition,
+  primeDirective?: AgentDocument | null,
+  modelCapabilityOverride?: AgentConfig["modelCapability"],
+) => ({
+  modelCapability: modelCapabilityOverride ?? config?.modelCapability ?? "multimodal" as const,
+  activeMetadocId: activeRole.metadocId,
+  activeRoleWorkingDirectory: getAgentRoleWorkingDirectory(activeRole),
+  ...(primeDirective ? { primeDirective } : {}),
+});
+
 const runMatchesConversationContext = (
   run: AgentRun | null | undefined,
   contextId: string | null,
@@ -340,7 +422,7 @@ const createDuplicateToolGuidanceNotice = (toolResults: AgentHarnessToolResult[]
     "MangaMaker internal harness notice: your previous requested tool calls were exact duplicates of results already supplied in this run.",
     uniqueTools.length > 0 ? `Duplicate tools satisfied from cache: ${uniqueTools.join(", ")}.` : "Duplicate tool calls were satisfied from cache.",
     "Use the existing dynamicToolResults and completedToolCallIndex. Do not request the same toolName/input again.",
-    "Complete the creator's task now by returning either a final answer or a pendingCommandPlan. requestedToolCalls should be empty unless a genuinely different missing tool is required.",
+    "Complete the creator's task now by returning a final answer or a document write. pendingCommandPlan must be null, and requestedToolCalls should be empty unless a genuinely different missing tool is required.",
   ].join("\n");
 };
 
@@ -385,9 +467,13 @@ const coerceFinalAnswerOnlyPayload = (payload: AgentChatResponse): AgentChatResp
 
 const describeToolCallForLog = (call: { toolName: string; input: unknown }) => {
   const input = readRecord(call.input);
-  if (call.toolName === "writeDocument") {
-    const content = typeof input.content === "string" ? input.content : "";
-    return `documentId=${String(input.id ?? "unknown")}; title=${String(input.title ?? "untitled")}; contentLength=${content.length}`;
+  if (isAgentDocumentMutationToolName(call.toolName)) {
+    const content = typeof input.content === "string"
+      ? input.content
+      : typeof input.newText === "string"
+        ? input.newText
+        : "";
+    return `documentId=${String(input.documentId ?? input.id ?? "unknown")}; title=${String(input.title ?? "untitled")}; contentLength=${content.length}`;
   }
   if (call.toolName === "readDocument" || call.toolName === "validateDocumentAgainstProject") {
     return `documentId=${String(input.documentId ?? "unknown")}`;
@@ -411,8 +497,10 @@ const runtimeConfigKeyForProject = (projectId: string) => `${RUNTIME_CONFIG_KEY_
 
 type AgentRuntimeConfig = {
   systemPrompt: string;
+  currentTaskPin: string;
   contextWindowTokens: number | null;
   repetitionPenalty: number | null;
+  modelId: string | null;
 };
 
 const parseRepetitionPenaltyInput = (value: unknown) => {
@@ -427,37 +515,64 @@ const loadRuntimeConfig = (projectId: string): AgentRuntimeConfig => {
   try {
     const raw = window.localStorage.getItem(runtimeConfigKeyForProject(projectId));
     if (!raw) {
-      return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null, repetitionPenalty: null };
+      return {
+        systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT,
+        currentTaskPin: "",
+        contextWindowTokens: null,
+        repetitionPenalty: null,
+        modelId: null,
+      };
     }
     const parsed = JSON.parse(raw) as {
       systemPrompt?: unknown;
+      currentTaskPin?: unknown;
       contextWindowTokens?: unknown;
       repetitionPenalty?: unknown;
+      modelId?: unknown;
     };
     return {
       systemPrompt:
         typeof parsed.systemPrompt === "string" && parsed.systemPrompt.trim().length > 0
           ? migrateAgentSystemPrompt(parsed.systemPrompt)
           : DEFAULT_AGENT_SYSTEM_PROMPT,
+      currentTaskPin: typeof parsed.currentTaskPin === "string" ? parsed.currentTaskPin : "",
       contextWindowTokens: parseAgentContextWindowTokens(parsed.contextWindowTokens),
       repetitionPenalty: parseRepetitionPenaltyInput(parsed.repetitionPenalty),
+      modelId:
+        typeof parsed.modelId === "string" && parsed.modelId.trim().length > 0
+          ? parsed.modelId.trim()
+          : null,
     };
   } catch {
-    return { systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT, contextWindowTokens: null, repetitionPenalty: null };
+    return {
+      systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT,
+      currentTaskPin: "",
+      contextWindowTokens: null,
+      repetitionPenalty: null,
+      modelId: null,
+    };
   }
 };
 
 const saveRuntimeConfig = (
   projectId: string,
-  config: { systemPrompt: string; contextWindowTokens: number | null; repetitionPenalty: number | null },
+  config: {
+    systemPrompt: string;
+    currentTaskPin: string;
+    contextWindowTokens: number | null;
+    repetitionPenalty: number | null;
+    modelId: string | null;
+  },
 ) => {
   try {
     window.localStorage.setItem(
       runtimeConfigKeyForProject(projectId),
       JSON.stringify({
         systemPrompt: config.systemPrompt,
+        currentTaskPin: config.currentTaskPin,
         contextWindowTokens: config.contextWindowTokens,
         repetitionPenalty: config.repetitionPenalty,
+        modelId: config.modelId,
         updatedAt: new Date().toISOString(),
       }),
     );
@@ -470,6 +585,11 @@ const formatTokenCount = (tokens: number | null | undefined) =>
   typeof tokens === "number" && Number.isFinite(tokens)
     ? new Intl.NumberFormat("en-US").format(tokens)
     : "unknown";
+
+const formatAgentModelOption = (model: AgentAvailableModel) => {
+  const mode = model.capability === "metadoc" ? "text-only" : "multimodal";
+  return `${model.name} (${model.id}, ${mode}, ${formatTokenCount(model.contextLength)} ctx)`;
+};
 
 export const AgentSidebar = ({
   selectedDocumentId = null,
@@ -492,6 +612,8 @@ export const AgentSidebar = ({
   const [contextSnapshot, setContextSnapshot] = useState<AgentContextSnapshot | null>(null);
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
+  const [availableModels, setAvailableModels] = useState<AgentAvailableModel[]>([]);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   const [lastWarning, setLastWarning] = useState<string | null>(null);
   const [conversationContextScope, setConversationContextScope] = useState<ConversationContextScope | null>(null);
   const [conversationContextId, setConversationContextId] = useState<string | null>(null);
@@ -499,6 +621,8 @@ export const AgentSidebar = ({
   const [conversationContextLoaded, setConversationContextLoaded] = useState(false);
   const [activeRoleId, setActiveRoleId] = useState<AgentRoleId>(DEFAULT_AGENT_ROLE_ID);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_AGENT_SYSTEM_PROMPT);
+  const [currentTaskPin, setCurrentTaskPin] = useState("");
+  const [selectedModelId, setSelectedModelId] = useState("");
   const [contextWindowInput, setContextWindowInput] = useState(String(DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS));
   const [repetitionPenaltyInput, setRepetitionPenaltyInput] = useState("1.05");
   const [configPanelOpen, setConfigPanelOpen] = useState(false);
@@ -520,17 +644,16 @@ export const AgentSidebar = ({
   const continuingToolBudgetRunRef = useRef<{ runId: string; previousModelTurnIndex: number } | null>(null);
   const toolBudgetActionRunIdRef = useRef<string | null>(null);
   const currentAgentOperationRef = useRef<AgentLocalOperation | null>(null);
+  const cancelledOperationRunIdsRef = useRef(new Set<string>());
   const conversationContextTouchedRef = useRef(false);
   const conversationContextIdRef = useRef<string | null>(null);
   const conversationFingerprintRef = useRef("");
   const [newRole, setNewRole] = useState({
     name: "",
-    title: "",
-    prompt: "",
     metadocMode: "new" as "new" | "existing",
     metadocId: "",
-    metadocTitle: "",
-    metadocPath: "",
+    workingDirectory: createAgentRoleWorkingDirectory("role"),
+    workingDirectoryTouched: false,
   });
   const messages = useMemo(
     () =>
@@ -653,6 +776,7 @@ export const AgentSidebar = ({
       const stepLogs = [
         ...createModelDebugLogsFromStep(step),
         ...createBackendToolLogsFromStep(step),
+        ...createHarnessStatusLogsFromStep(step),
         ...createErrorLogsFromStep(step),
       ];
       if (stepLogs.length === 0) {
@@ -704,9 +828,27 @@ export const AgentSidebar = ({
           : {}),
       contextWindowTokens: effectiveContextWindowTokens,
       repetitionPenalty: effectiveRepetitionPenalty,
+      ...(effectiveModelId ? { modelOverride: effectiveModelId } : {}),
+      ...(currentTaskPin.trim() ? { currentTaskPin: currentTaskPin.trim() } : {}),
       requestTrace: createAgentRequestTraceMetadata(stage),
     }, (run, event) => {
       if (operationId && isAgentOperationCancelled(operationId)) {
+        const cancelKey = `${operationId}:${run.id}`;
+        if (
+          !cancelledOperationRunIdsRef.current.has(cancelKey) &&
+          !run.id.startsWith("agent-run-tauri") &&
+          CANCELLABLE_RUN_STATUSES.has(run.status)
+        ) {
+          cancelledOperationRunIdsRef.current.add(cancelKey);
+          void cancelAgentRun(run.id, { projectId: run.projectId })
+            .then((cancelledRun) => {
+              recordAgentRunUpdate(cancelledRun);
+              setActiveRun(null);
+            })
+            .catch((error) => {
+              appendLog(createLog("agentRun", "error", error instanceof Error ? error.message : String(error)));
+            });
+        }
         return;
       }
       recordAgentRunUpdate(run, event);
@@ -737,12 +879,18 @@ export const AgentSidebar = ({
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([getAgentConfig(), getAgentContext()]).then(async ([configResult, contextResult]) => {
+    void Promise.allSettled([getAgentConfig(), getAgentContext(), getAgentModels()]).then(async ([
+      configResult,
+      contextResult,
+      modelsResult,
+    ]) => {
       if (!active) {
         return;
       }
+      let backendModelId: string | null = null;
       if (configResult.status === "fulfilled") {
         setConfig(configResult.value);
+        backendModelId = configResult.value.model;
       } else {
         const message =
           configResult.reason instanceof Error ? configResult.reason.message : String(configResult.reason);
@@ -750,6 +898,7 @@ export const AgentSidebar = ({
           enabled: false,
           provider: "unavailable",
           model: null,
+          modelCapability: null,
           apiKeyConfigured: false,
           testMode: false,
           visionEnabled: false,
@@ -760,6 +909,14 @@ export const AgentSidebar = ({
           reason: message,
         });
         setConfigError(message);
+      }
+      if (modelsResult.status === "fulfilled") {
+        setAvailableModels(modelsResult.value);
+        setModelsError(null);
+      } else {
+        const message =
+          modelsResult.reason instanceof Error ? modelsResult.reason.message : String(modelsResult.reason);
+        setModelsError(message);
       }
       if (contextResult.status === "fulfilled") {
         setContextSnapshot(contextResult.value);
@@ -772,6 +929,12 @@ export const AgentSidebar = ({
         const backendRepetitionPenalty =
           configResult.status === "fulfilled" ? configResult.value.repetitionPenalty : 1.05;
         setSystemPrompt(runtimeConfig.systemPrompt);
+        setCurrentTaskPin(runtimeConfig.currentTaskPin);
+        const defaultModelId =
+          configResult.status === "fulfilled" && configResult.value.testMode
+            ? ""
+            : backendModelId ?? "";
+        setSelectedModelId(runtimeConfig.modelId ?? defaultModelId);
         setContextWindowInput(String(runtimeConfig.contextWindowTokens ?? backendContextWindow));
         setRepetitionPenaltyInput(String(runtimeConfig.repetitionPenalty ?? backendRepetitionPenalty));
       }
@@ -804,10 +967,20 @@ export const AgentSidebar = ({
     }
     saveRuntimeConfig(conversationContextScope.projectId, {
       systemPrompt,
+      currentTaskPin,
       contextWindowTokens: parseAgentContextWindowTokens(contextWindowInput),
       repetitionPenalty: parseRepetitionPenaltyInput(repetitionPenaltyInput),
+      modelId: selectedModelId.trim() || null,
     });
-  }, [contextWindowInput, conversationContextLoaded, conversationContextScope, repetitionPenaltyInput, systemPrompt]);
+  }, [
+    contextWindowInput,
+    conversationContextLoaded,
+    conversationContextScope,
+    currentTaskPin,
+    repetitionPenaltyInput,
+    selectedModelId,
+    systemPrompt,
+  ]);
 
   useEffect(() => {
     if (busy) {
@@ -856,6 +1029,21 @@ export const AgentSidebar = ({
     parseRepetitionPenaltyInput(repetitionPenaltyInput) ??
     config?.repetitionPenalty ??
     1.05;
+  const backendConfiguredModel = config?.model ?? "";
+  const effectiveModelId = selectedModelId.trim() || backendConfiguredModel;
+  const selectedAvailableModel = useMemo(
+    () => availableModels.find((model) => model.id === effectiveModelId) ?? null,
+    [availableModels, effectiveModelId],
+  );
+  const effectiveModelCapability =
+    config?.testMode
+      ? config.modelCapability
+      : selectedAvailableModel?.capability ?? config?.modelCapability ?? null;
+  const effectiveModelContextMax = selectedAvailableModel?.contextLength ?? config?.contextWindowMaxTokens ?? null;
+  const agentBackendUsable =
+    config?.testMode === true
+      ? config.enabled
+      : Boolean(config?.apiKeyConfigured && effectiveModelId && (selectedAvailableModel || availableModels.length === 0));
 
   const configSummary = useMemo(() => {
     if (!config) {
@@ -863,19 +1051,36 @@ export const AgentSidebar = ({
     }
     const contextLabel = `context ${formatTokenCount(effectiveContextWindowTokens)} tokens`;
     const repetitionLabel = `repetition penalty ${effectiveRepetitionPenalty.toFixed(2)}`;
+    const capabilityLabel = effectiveModelCapability === "metadoc"
+      ? "text-only document model"
+      : effectiveModelCapability === "multimodal"
+        ? "multimodal model"
+        : "model capability unavailable";
     const modeLabel = config.testMode
       ? "Test mode"
-      : `OpenRouter - ${config.model ?? "model not set"}`;
+      : `OpenRouter - ${effectiveModelId || "model not set"}`;
     if (config.testMode) {
-      return `${modeLabel} - ${config.visionEnabled ? "vision enabled" : "vision unavailable"} - ${contextLabel} - ${repetitionLabel}`;
+      return `${modeLabel} - ${capabilityLabel} - ${config.visionEnabled ? "vision enabled" : "vision unavailable"} - ${contextLabel} - ${repetitionLabel}`;
     }
-    if (!config.enabled) {
+    if (!agentBackendUsable) {
+      if (effectiveModelId && availableModels.length > 0 && !selectedAvailableModel) {
+        return `Selected model is not available for MangaMaker Agent: ${effectiveModelId}`;
+      }
       return config.reason ?? "Agent backend is not configured.";
     }
-    return `${modeLabel} - ${
-      config.visionEnabled ? "vision enabled" : "vision unavailable"
+    return `${modeLabel} - ${capabilityLabel} - ${
+      effectiveModelCapability === "multimodal" ? "vision enabled" : "vision unavailable"
     } - ${contextLabel} - ${repetitionLabel}`;
-  }, [config, effectiveContextWindowTokens, effectiveRepetitionPenalty]);
+  }, [
+    agentBackendUsable,
+    config,
+    availableModels.length,
+    effectiveContextWindowTokens,
+    effectiveModelCapability,
+    effectiveModelId,
+    effectiveRepetitionPenalty,
+    selectedAvailableModel,
+  ]);
   const activeRole = useMemo(
     () => (availableRoles.length > 0 ? getAgentRole(activeRoleId, availableRoles) : null),
     [activeRoleId, availableRoles],
@@ -1049,12 +1254,10 @@ export const AgentSidebar = ({
     setRoleError(null);
     setNewRole({
       name: "",
-      title: "",
-      prompt: "",
       metadocMode: metadocId ? "existing" : "new",
       metadocId: metadocId ?? ordinaryDocuments[0]?.id ?? "",
-      metadocTitle: "",
-      metadocPath: "",
+      workingDirectory: createAgentRoleWorkingDirectory(createAgentRoleId("role", availableRoles)),
+      workingDirectoryTouched: false,
     });
     setRoleDialogOpen(true);
   };
@@ -1076,19 +1279,20 @@ export const AgentSidebar = ({
       return;
     }
     const roleId = createAgentRoleId(name, availableRoles);
+    const workingDirectory =
+      newRole.workingDirectory.trim() || createAgentRoleWorkingDirectory(roleId);
+    if (!workingDirectory) {
+      setRoleError("Working directory is required.");
+      return;
+    }
     setRoleSaving(true);
     setRoleError(null);
     try {
       const manifest = await createProjectRole(projectId, {
         id: roleId,
         name,
-        title: newRole.title.trim() || name,
-        prompt: newRole.prompt.trim() || undefined,
-        ...(newRole.metadocMode === "existing"
-          ? { metadocId: newRole.metadocId }
-          : {
-              metadocTitle: name,
-            }),
+        workingDirectory,
+        ...(newRole.metadocMode === "existing" ? { metadocId: newRole.metadocId } : {}),
       });
       setLocalDocumentManifest(manifest);
       setActiveRoleId(roleId);
@@ -1251,7 +1455,7 @@ export const AgentSidebar = ({
       appendLog(createLog(
         "agentVerification",
         "error",
-        "The model claimed a document or project change, but this run has no verified writeDocument result or command execution result. The raw modelResponse is shown for debugging and was not saved into Conversation Context.",
+        "The model claimed a document or project change, but this run has no verified document mutation result or command execution result. The raw modelResponse is shown for debugging and was not saved into Conversation Context.",
       ));
     }
     if (!options.suppressMessage && !isHarnessDiagnostic && !unverifiedMutationClaim) {
@@ -1259,6 +1463,10 @@ export const AgentSidebar = ({
     }
     for (const log of payload.toolLogs ?? []) {
       appendLog(log);
+    }
+    if (payload.pendingCommandPlan) {
+      setLastWarning(AGENT_PAGE_COMMAND_PLAN_DISABLED_MESSAGE);
+      appendLog(createLog("agentWarning", "error", AGENT_PAGE_COMMAND_PLAN_DISABLED_MESSAGE));
     }
     const plan = sanitizePlan(payload.pendingCommandPlan);
     if (!plan) {
@@ -1440,7 +1648,7 @@ export const AgentSidebar = ({
         if (finalAnswerOnlyRepairCount < MAX_FINAL_ANSWER_ONLY_REPAIRS) {
           finalAnswerOnlyRepairCount += 1;
           appendLog(createLog("agentChat", "pending", "Repairing final-answer-only response without executing tools"));
-          const harness = buildAgentHarness(context, dynamicToolResults);
+          const harness = buildAgentHarness(context, dynamicToolResults, harnessOptionsForConfig(config, activeRoleSnapshot));
           const repairRequest = {
             messages: toAgentWireMessages(messages, createFinalAnswerOnlyRepairNotice(payload)),
             ...(runConversationContextId ? { conversationContextId: runConversationContextId } : {}),
@@ -1533,7 +1741,7 @@ export const AgentSidebar = ({
         );
         const toolCallKey = createAgentToolCallKey(call);
         if (reusableResult) {
-          const duplicateResult = call.toolName === "writeDocument"
+          const duplicateResult = isAgentDocumentMutationToolName(call.toolName)
             ? createDuplicateToolCallSkippedResult(call, undefined, reusableResult)
             : createCachedAgentToolResult(call, reusableResult);
           toolResults.push(duplicateResult);
@@ -1542,9 +1750,9 @@ export const AgentSidebar = ({
           continue;
         }
         appendLog(createLog(call.toolName, "pending", call.reason));
-        const toolResult = await executeAgentHarnessToolCall(context, call);
+        const toolResult = await executeAgentHarnessToolCall(context, call, harnessOptionsForConfig(config, activeRoleSnapshot));
         toolResults.push(toolResult);
-        if (call.toolName === "writeDocument") {
+        if (isAgentDocumentMutationToolName(call.toolName)) {
           onDocumentsChanged?.();
         }
         completedToolCalls.add(toolCallKey);
@@ -1576,7 +1784,7 @@ export const AgentSidebar = ({
       }
       const forceFinalAnswerOnly = duplicateOnlyRoundCount >= MAX_DUPLICATE_TOOL_GUIDED_RETRIES;
       appendLog(createLog("agentChat", "pending", `Waiting for model response after ${toolResults.length} tool result(s)`));
-      const harness = buildAgentHarness(context, dynamicToolResults);
+      const harness = buildAgentHarness(context, dynamicToolResults, harnessOptionsForConfig(config, activeRoleSnapshot));
       const duplicateGuidanceNotice = forceFinalAnswerOnly
         ? createFinalAnswerOnlyNotice(toolResults)
         : duplicateOnly
@@ -2086,6 +2294,31 @@ export const AgentSidebar = ({
           )} objects, viewing ${context.currentPage?.name ?? "no page"}`,
         ),
       );
+      appendLog(createLog("readPrimeDirective", "pending", AGENT_PRIME_DIRECTIVE_DOCUMENT_ID));
+      const primeDirective = await readProjectDocument(context.project.id, AGENT_PRIME_DIRECTIVE_DOCUMENT_ID);
+      if (isAgentOperationCancelled(operationId)) {
+        return;
+      }
+      const primeDirectiveContentLimit = 12000;
+      const primeDirectiveResult = createAgentHarnessToolResult("readPrimeDirective", {
+        documentId: AGENT_PRIME_DIRECTIVE_DOCUMENT_ID,
+      }, {
+        document: {
+          id: primeDirective.id,
+          title: primeDirective.title,
+          path: primeDirective.path,
+          status: primeDirective.status,
+          summary: primeDirective.summary ?? "",
+          content: primeDirective.content.slice(0, primeDirectiveContentLimit),
+          contentLength: primeDirective.content.length,
+          truncated: primeDirective.content.length > primeDirectiveContentLimit,
+        },
+        priority:
+          "Pinned project-level directive. Interpret role metadocs, creator requests, page evidence, and output documents through this directive.",
+        conflictRule:
+          "If role instructions, chat, or ordinary documents conflict with PrimeDirective.md, follow PrimeDirective.md and report the conflict.",
+      });
+      appendLog(createLog("readPrimeDirective", "success", primeDirective.path));
       appendLog(createLog("readMetadoc", "pending", activeRole.metadocId));
       const activeMetadoc = await readProjectDocument(context.project.id, activeRole.metadocId);
       if (isAgentOperationCancelled(operationId)) {
@@ -2099,9 +2332,12 @@ export const AgentSidebar = ({
         role: {
           id: activeRole.id,
           name: activeRole.name,
-          title: activeRole.title,
           metadocId: activeRole.metadocId,
+          workingDirectory: getAgentRoleWorkingDirectory(activeRole),
         },
+        priority: "Pinned role prompt. This metadoc is the active role prompt/definition only; it is not the role's work-output log.",
+        outputRule:
+          "Write durable role output only to ordinary Markdown documents under the role working directory. Do not mutate this metadoc through Agent tools.",
         document: {
           id: activeMetadoc.id,
           title: activeMetadoc.title,
@@ -2114,8 +2350,12 @@ export const AgentSidebar = ({
         },
       });
       appendLog(createLog("readMetadoc", "success", activeMetadoc.path));
-      const dynamicToolResults: AgentHarnessToolResult[] = [metadocResult];
-      const harness = buildAgentHarness(context, dynamicToolResults);
+      const dynamicToolResults: AgentHarnessToolResult[] = [primeDirectiveResult, metadocResult];
+      const harness = buildAgentHarness(
+        context,
+        dynamicToolResults,
+        harnessOptionsForConfig(config, activeRole, primeDirective, effectiveModelCapability),
+      );
       appendLog(
         createLog(
           "agentHarness",
@@ -2167,6 +2407,11 @@ export const AgentSidebar = ({
       if (currentAgentOperationRef.current?.id === operationId) {
         currentAgentOperationRef.current = null;
       }
+      for (const cancelKey of Array.from(cancelledOperationRunIdsRef.current)) {
+        if (cancelKey.startsWith(`${operationId}:`)) {
+          cancelledOperationRunIdsRef.current.delete(cancelKey);
+        }
+      }
       localRunControlRef.current = false;
       setBusy(false);
     }
@@ -2207,7 +2452,7 @@ export const AgentSidebar = ({
   const activeRunBlocksInput = Boolean(
     activeRun?.status === "waiting_for_tool" && !activeRunIsContinuingToolBudget,
   );
-  const agentPromptDisabled = config?.enabled !== true || !activeRole;
+  const agentPromptDisabled = !agentBackendUsable || !activeRole;
   const agentSendDisabled =
     agentPromptDisabled ||
     !conversationContextLoaded ||
@@ -2224,11 +2469,12 @@ export const AgentSidebar = ({
         ? "Resume or stop the paused backend Agent run. You can still type a draft here."
       : activeRunCanStop || busy
         ? "Agent is running. You can type a draft while waiting."
-      : config?.enabled
+      : agentBackendUsable
       ? activeRole
         ? "Ask the agent..."
         : "Create an Agent role first."
       : "Configure the Agent backend first.";
+  const activeTaskProgress = activeRun?.latestResponse?.taskProgress ?? null;
 
   useEffect(() => {
     if (!busy) {
@@ -2252,6 +2498,11 @@ export const AgentSidebar = ({
       <section className="agent-config" aria-label="Agent configuration status">
         <h3>Configuration</h3>
         <p>{configSummary}</p>
+        {effectiveModelCapability === "metadoc" ? (
+          <p className="agent-warning">
+            This text-only model cannot inspect pages, images, or renders. It uses PrimeDirective.md and the active role metadoc as pinned context, then reads/writes Markdown documents as needed.
+          </p>
+        ) : null}
         {activeRun ? (
           <div className="agent-run-status-row">
             <p className="agent-run-status">
@@ -2263,6 +2514,8 @@ export const AgentSidebar = ({
         {lastWarning ? <p className="agent-warning">{lastWarning}</p> : null}
       </section>
 
+      <AgentTaskProgressView progress={activeTaskProgress} run={activeRun} />
+
       <details
         className="agent-manual-config"
         aria-label="Agent manual config"
@@ -2271,6 +2524,47 @@ export const AgentSidebar = ({
       >
         <summary>Agent Config</summary>
         <div className="agent-config-editor">
+          <label>
+            <span>Model</span>
+            <select
+              aria-label="Agent model"
+              value={selectedModelId}
+              disabled={config?.testMode === true || busy}
+              onChange={(event) => setSelectedModelId(event.currentTarget.value)}
+            >
+              <option value="">
+                {backendConfiguredModel ? `Use backend default (${backendConfiguredModel})` : "Select a model"}
+              </option>
+              {AGENT_MODEL_PRESETS.map((preset) => {
+                const model = availableModels.find((entry) => entry.id === preset.id);
+                return (
+                  <option
+                    key={preset.id}
+                    value={preset.id}
+                    disabled={availableModels.length > 0 && !model}
+                  >
+                    {preset.label}: {model ? formatAgentModelOption(model) : preset.id}
+                  </option>
+                );
+              })}
+              {availableModels
+                .filter((model) => !AGENT_MODEL_PRESETS.some((preset) => preset.id === model.id))
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {formatAgentModelOption(model)}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <p className="agent-muted">
+            Effective model: {effectiveModelId || "not set"}.{" "}
+            {effectiveModelCapability === "metadoc"
+              ? "DeepSeek text-only mode can read and write Markdown documents but cannot inspect images."
+              : effectiveModelCapability === "multimodal"
+                ? "Multimodal mode can use page/render screenshots when requested."
+                : "Select an allowlisted model to enable the Agent."}
+          </p>
+          {modelsError ? <p className="agent-warning">{modelsError}</p> : null}
           <label>
             <span>System prompt</span>
             <textarea
@@ -2290,6 +2584,25 @@ export const AgentSidebar = ({
             </button>
           </div>
           <label>
+            <span>Current Task Pin</span>
+            <textarea
+              aria-label="Agent current task pin"
+              rows={5}
+              value={currentTaskPin}
+              spellCheck={false}
+              placeholder="Optional high-priority constraints for the current task. Leave empty for automatic task extraction from the latest message."
+              onChange={(event) => setCurrentTaskPin(event.currentTarget.value)}
+            />
+          </label>
+          <p className="agent-muted">
+            This is inserted into the Current Task Packet above ordinary chat history. Use it for constraints that must not be pushed out by a long conversation.
+          </p>
+          <div className="agent-config-actions">
+            <button type="button" onClick={() => setCurrentTaskPin("")}>
+              Clear task pin
+            </button>
+          </div>
+          <label>
             <span>Context window tokens</span>
             <input
               aria-label="Agent context window tokens"
@@ -2303,7 +2616,7 @@ export const AgentSidebar = ({
           <p className="agent-muted">
             Effective {formatTokenCount(effectiveContextWindowTokens)} tokens; backend default{" "}
             {formatTokenCount(config?.contextWindowTokens)} tokens, model max{" "}
-            {formatTokenCount(config?.contextWindowMaxTokens)}.
+            {formatTokenCount(effectiveModelContextMax)}.
           </p>
           <label>
             <span>Repetition penalty</span>
@@ -2398,9 +2711,11 @@ export const AgentSidebar = ({
         </label>
         {activeRole ? (
           <>
-            <p>{activeRole.title}</p>
             <p>
-              Metadoc: {activeRoleMetadoc?.path ?? activeRole.metadocId}
+              Role prompt: {activeRoleMetadoc?.path ?? activeRole.metadocId}
+            </p>
+            <p>
+              Working dir: {getAgentRoleWorkingDirectory(activeRole)}
             </p>
           </>
         ) : (
@@ -2458,18 +2773,13 @@ export const AgentSidebar = ({
                 autoFocus
                 onChange={(event) => {
                   const name = event.currentTarget.value;
-                  setNewRole((current) => ({ ...current, name }));
-                }}
-              />
-            </label>
-            <label>
-              <span>Title</span>
-              <input
-                aria-label="New role title"
-                value={newRole.title}
-                onChange={(event) => {
-                  const title = event.currentTarget.value;
-                  setNewRole((current) => ({ ...current, title }));
+                  setNewRole((current) => ({
+                    ...current,
+                    name,
+                    workingDirectory: current.workingDirectoryTouched
+                      ? current.workingDirectory
+                      : createAgentRoleWorkingDirectory(createAgentRoleId(name || "role", availableRoles)),
+                  }));
                 }}
               />
             </label>
@@ -2513,21 +2823,30 @@ export const AgentSidebar = ({
               </label>
             ) : (
               <p className="agent-muted">
-                Metadoc will be created as {createAgentRoleMetadocPath(newRole.name || "role")}.
+                Metadoc will be created as {createAgentRoleMetadocPath(newRole.name || "role")} and used as the role prompt.
               </p>
             )}
+            <p className="agent-muted">
+              Edit the role prompt by editing the metadoc after the role is created.
+            </p>
             <label>
-              <span>Role prompt</span>
-              <textarea
-                aria-label="New role prompt"
-                rows={4}
-                value={newRole.prompt}
+              <span>Working dir</span>
+              <input
+                aria-label="New role working directory"
+                value={newRole.workingDirectory}
                 onChange={(event) => {
-                  const prompt = event.currentTarget.value;
-                  setNewRole((current) => ({ ...current, prompt }));
+                  const workingDirectory = event.currentTarget.value;
+                  setNewRole((current) => ({
+                    ...current,
+                    workingDirectory,
+                    workingDirectoryTouched: true,
+                  }));
                 }}
               />
             </label>
+            <p className="agent-muted">
+              Working dir stores this role's durable output documents. It must be a directory under docs/, not a prompt.
+            </p>
             {roleError ? <p className="document-error">{roleError}</p> : null}
             <div className="document-dialog-actions">
               <button type="button" disabled={roleSaving} onClick={() => setRoleDialogOpen(false)}>
@@ -2536,7 +2855,7 @@ export const AgentSidebar = ({
               <button
                 type="submit"
                 className="primary-button"
-                disabled={roleSaving || newRole.name.trim().length === 0}
+                disabled={roleSaving || newRole.name.trim().length === 0 || newRole.workingDirectory.trim().length === 0}
               >
                 {roleSaving ? "Creating..." : "Create role"}
               </button>

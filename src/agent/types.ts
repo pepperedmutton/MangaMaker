@@ -5,6 +5,7 @@ import type {
   AgentDocumentMeta,
 } from "./documentSchema";
 import type { AgentRoleDefinition, AgentRoleId } from "./roles";
+import type { AgentModelCapability } from "./modelCatalog";
 
 export type AgentDangerLevel = "safe" | "normal" | "destructive";
 
@@ -47,6 +48,44 @@ export type AgentCommandPlan = {
   requiresConfirmation: boolean;
 };
 
+export type AgentTaskStepStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export type AgentTaskProgressStatus =
+  | "planning"
+  | "running"
+  | "needs_tool"
+  | "waiting_for_user"
+  | "completed"
+  | "blocked";
+
+export type AgentTaskProgressPhase =
+  | "planning"
+  | "gathering_context"
+  | "editing_document"
+  | "validating"
+  | "reporting"
+  | "complete"
+  | "blocked";
+
+export type AgentTaskProgressStep = {
+  id: string;
+  title: string;
+  status: AgentTaskStepStatus;
+  stopCondition?: string;
+};
+
+export type AgentTaskProgress = {
+  objective: string;
+  phase: AgentTaskProgressPhase;
+  status: AgentTaskProgressStatus;
+  steps: AgentTaskProgressStep[];
+  currentStepId?: string;
+  stopCondition: string;
+  stopReason?: string;
+  nextAction?: string;
+  percent?: number;
+};
+
 export type AgentChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -61,6 +100,46 @@ export type AgentConversationContext = {
   updatedAt: string;
   messages: AgentChatMessage[];
   storagePath?: string;
+};
+
+export type AgentCurrentTaskRecentMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type AgentCurrentTaskToolResultIndexEntry = {
+  index: number;
+  toolName: string;
+  inputSummary: string;
+  resultKeys: string[];
+  createdAt: string;
+  status?: "verified_write" | "blocked" | "cache" | "skipped";
+};
+
+export type AgentCurrentTaskPacket = {
+  version: 1;
+  generatedAt: string;
+  priority: "current_task";
+  latestCreatorInstruction: string;
+  pinnedTaskInstructions?: string;
+  objective: string;
+  constraints: string[];
+  acceptanceCriteria: string[];
+  activeRole?: {
+    id: string;
+    name: string;
+    metadocId: string;
+    workingDirectory?: string;
+  };
+  activeDocumentId?: string | null;
+  conversationPolicy: {
+    latestCreatorInstructionWins: true;
+    olderMessagesAreReferenceOnly: true;
+    ignoreHarnessDiagnosticsAsCreatorIntent: true;
+  };
+  recentConversationReference: AgentCurrentTaskRecentMessage[];
+  completedToolResultIndex: AgentCurrentTaskToolResultIndexEntry[];
+  nextActionHint: string;
 };
 
 export type AgentToolLogEntry = {
@@ -325,6 +404,7 @@ export type AgentConfig = {
   enabled: boolean;
   provider: "openrouter" | "test" | "unavailable";
   model: string | null;
+  modelCapability: AgentModelCapability | null;
   apiKeyConfigured: boolean;
   testMode: boolean;
   visionEnabled: boolean;
@@ -341,6 +421,7 @@ export type AgentAvailableModel = {
   contextLength: number | null;
   inputModalities: string[];
   outputModalities: string[];
+  capability: AgentModelCapability;
 };
 
 export type AgentChatRequest = {
@@ -349,6 +430,8 @@ export type AgentChatRequest = {
   conversationContextFingerprint?: string;
   conversationContextUpdatedAt?: string;
   systemPrompt?: string;
+  currentTask?: AgentCurrentTaskPacket;
+  currentTaskPin?: string;
   agentContext: AgentContextSnapshot;
   activeRoleId?: AgentRoleId;
   activeRole?: AgentRoleDefinition;
@@ -356,6 +439,7 @@ export type AgentChatRequest = {
   harness?: AgentHarnessSnapshot;
   canvasSnapshot?: AgentCanvasSnapshot | null;
   approvedCommandPlan?: AgentCommandPlan | null;
+  modelOverride?: string;
   contextWindowTokens?: number;
   repetitionPenalty?: number;
   finalAnswerOnly?: boolean;
@@ -371,6 +455,7 @@ export type AgentChatResponse = {
   usedVision?: boolean;
   warning?: string;
   visionUnavailableReason?: string;
+  taskProgress?: AgentTaskProgress;
   requestTrace?: AgentRequestTrace;
   modelDebug?: {
     rawAssistantContent?: string;
@@ -424,17 +509,33 @@ export type AgentHarnessSnapshot = {
   initialToolResults: AgentHarnessToolResult[];
   dynamicToolResults?: AgentHarnessToolResult[];
   completedToolCallIndex?: AgentCompletedToolCallIndexEntry[];
+  taskProtocol: {
+    requiredResponseField: "taskProgress";
+    planningRequired: boolean;
+    maxSteps: number;
+    stopRule: string;
+    progressRule: string;
+    actionRule: string;
+    completionRule: string;
+  };
   resourcePolicy: {
+    modelCapability: AgentModelCapability;
+    metadocOnly: boolean;
+    activeMetadocId?: string;
+    activeRoleWorkingDirectory?: string;
+    roleMetadocPurpose?: "role-prompt-definition-only";
+    pinnedContext?: string[];
+    evictableContext?: string[];
     allPagesReadable: boolean;
     assetsReadableOnDemand: boolean;
     documentsReadableOnDemand: boolean;
     documentsWritableOnDemand: boolean;
-    sysmlReadableOnDemand?: boolean;
-    sysmlWritableOnDemand?: boolean;
-    sysmlValidationProvider?: "official-pilot" | "unavailable";
-    sysmlStandardReference?: "overview-preloaded-topic-tools" | "unavailable";
+    documentsCreatableByAgent?: boolean;
+    documentWriteScope?: "activeRoleWorkingDirectoryOnly";
+    primeDirectiveDocumentId?: string;
+    primeDirectivePreloaded?: boolean;
     inlineDataUrlsRedactedFromPrompt: boolean;
-    projectMutationPath: "commandPlanOnly";
+    projectMutationPath: "documentOnly";
     pagePanelBoundary?: string;
   };
 };

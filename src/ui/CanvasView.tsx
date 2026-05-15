@@ -22,6 +22,7 @@ import {
   clampBubbleMoveRectToWorkspace,
   clampBubbleRectToWorkspace,
   clampElementMoveRectToWorkspace,
+  clampPanelRectToWorkspace,
   clampTextBoxMoveToWorkspace,
   getBubbleBasePoints,
   getPageWorkspace,
@@ -31,7 +32,9 @@ import {
   getBubbleTailBaseLocalPoint,
   isPointInPolygon,
   panImageViewBox,
+  preservePanelImageViewBox,
   scaleBubbleLocalPoint,
+  scalePanelPoints,
   snapMoveValue,
   zoomImageViewBox,
 } from "../domain/helpers";
@@ -774,6 +777,39 @@ const ResizeHandles = ({
     }
   };
 
+  const getHandleAnchor = (handleKey: ResizeHandle, sourceRect: typeof rect) => {
+    switch (handleKey) {
+      case "top-left":
+        return { x: sourceRect.x, y: sourceRect.y };
+      case "top-right":
+        return { x: sourceRect.x + sourceRect.width, y: sourceRect.y };
+      case "bottom-left":
+        return { x: sourceRect.x, y: sourceRect.y + sourceRect.height };
+      case "bottom-right":
+        return { x: sourceRect.x + sourceRect.width, y: sourceRect.y + sourceRect.height };
+      case "top":
+        return { x: sourceRect.x + sourceRect.width * 0.5, y: sourceRect.y };
+      case "right":
+        return { x: sourceRect.x + sourceRect.width, y: sourceRect.y + sourceRect.height * 0.5 };
+      case "bottom":
+        return { x: sourceRect.x + sourceRect.width * 0.5, y: sourceRect.y + sourceRect.height };
+      case "left":
+        return { x: sourceRect.x, y: sourceRect.y + sourceRect.height * 0.5 };
+    }
+  };
+
+  const positionHandleNode = (
+    event: KonvaEventObject<DragEvent>,
+    handleKey: ResizeHandle,
+    sourceRect: typeof rect,
+  ) => {
+    const anchor = getHandleAnchor(handleKey, sourceRect);
+    event.target.position({
+      x: anchor.x * scale - size / 2,
+      y: anchor.y * scale - size / 2,
+    });
+  };
+
   const handleDragStart = (
     handleKey: ResizeHandle,
     event: KonvaEventObject<DragEvent>,
@@ -803,6 +839,7 @@ const ResizeHandles = ({
       resizeBehavior === "anchored"
         ? computeAnchoredRect(dragStateRef.current.handleKey, pointer.x, pointer.y, initialRect)
         : computeScaledRect(dragStateRef.current.handleKey, pointer.x, pointer.y, initialRect);
+    positionHandleNode(event, dragStateRef.current.handleKey, nextRect);
     onLiveChange?.(nextRect);
   };
 
@@ -826,6 +863,7 @@ const ResizeHandles = ({
       resizeBehavior === "anchored"
         ? computeAnchoredRect(handleKey, pointer.x, pointer.y, initialRect)
         : computeScaledRect(handleKey, pointer.x, pointer.y, initialRect);
+    positionHandleNode(event, handleKey, nextRect);
     onLiveChange?.(null);
     onCommit(handleKey, nextRect);
   };
@@ -858,6 +896,10 @@ const ResizeHandles = ({
           strokeWidth={1.5}
           cornerRadius={2}
           draggable
+          dragBoundFunc={() => ({
+            x: handle.x * scale - size / 2,
+            y: handle.y * scale - size / 2,
+          })}
           onMouseDown={(event) => {
             if (event.evt.button === 0) {
               event.cancelBubble = true;
@@ -1077,8 +1119,44 @@ const PanelNode = ({
     lastDeltaX: number;
     lastDeltaY: number;
   } | null>(null);
-  const displayPoints = livePoints ?? panel.points;
-  const displayRect = liveRect ?? { x: panel.x, y: panel.y, width: panel.width, height: panel.height };
+  const resolvePanelResizeRect = (rect: { x: number; y: number; width: number; height: number }) =>
+    clampPanelRectToWorkspace(page, rect);
+  const displayPanel = useMemo<Panel>(() => {
+    if (!liveRect) {
+      return panel;
+    }
+    const nextPoints = scalePanelPoints(
+      panel.points,
+      panel.width,
+      panel.height,
+      liveRect.width,
+      liveRect.height,
+    );
+    return {
+      ...panel,
+      ...liveRect,
+      points: nextPoints,
+      image: panel.image
+        ? {
+            ...panel.image,
+            viewBox: preservePanelImageViewBox(
+              panel,
+              liveRect,
+              panel.image.sourceWidth ?? panel.image.viewBox.width,
+              panel.image.sourceHeight ?? panel.image.viewBox.height,
+              panel.image.viewBox,
+            ),
+          }
+        : null,
+    };
+  }, [liveRect, panel]);
+  const displayPoints = livePoints ?? displayPanel.points;
+  const displayRect = {
+    x: displayPanel.x,
+    y: displayPanel.y,
+    width: displayPanel.width,
+    height: displayPanel.height,
+  };
   const clipPoints = displayPoints.flatMap((point) => [point.x * scale, point.y * scale]);
 
   const translateEdgePoints = (
@@ -1325,7 +1403,7 @@ const PanelNode = ({
   };
 
   const renderImage = () => {
-    const metrics = getPanelImageRenderMetrics(panel, scale);
+    const metrics = getPanelImageRenderMetrics(displayPanel, scale);
     if (!image || !metrics) {
       return null;
     }
@@ -1356,9 +1434,9 @@ const PanelNode = ({
   return (
     <>
       <Group
-        x={panel.x * scale}
-        y={panel.y * scale}
-        draggable={activeTool === "select" && !showImagePreview}
+        x={displayPanel.x * scale}
+        y={displayPanel.y * scale}
+        draggable={activeTool === "select" && !showImagePreview && !liveRect}
         onContextMenu={(event) => {
           event.cancelBubble = true;
           handleContextMenu(event);
@@ -1431,11 +1509,11 @@ const PanelNode = ({
             ctx.closePath();
           }}
         >
-          <Rect width={panel.width * scale} height={panel.height * scale} fill={panel.style.fill} />
+          <Rect width={displayPanel.width * scale} height={displayPanel.height * scale} fill={panel.style.fill} />
           {!showImagePreview ? renderImage() : null}
         </Group>
         {showImagePreview ? (
-          <SelectedPanelImagePreview page={page} panel={panel} scale={scale} image={image} />
+          <SelectedPanelImagePreview page={page} panel={displayPanel} scale={scale} image={image} />
         ) : null}
         <Line
           points={clipPoints}
@@ -1461,8 +1539,8 @@ const PanelNode = ({
         <>
           <Line
             points={displayPoints.flatMap((point) => [
-              (panel.x + point.x) * scale,
-              (panel.y + point.y) * scale,
+              (displayPanel.x + point.x) * scale,
+              (displayPanel.y + point.y) * scale,
             ])}
             closed
             stroke="rgba(0,0,0,0.001)"
@@ -1532,8 +1610,8 @@ const PanelNode = ({
           />
           <Line
             points={displayPoints.flatMap((point) => [
-              (panel.x + point.x) * scale,
-              (panel.y + point.y) * scale,
+              (displayPanel.x + point.x) * scale,
+              (displayPanel.y + point.y) * scale,
             ])}
             closed
             stroke="#c36d2f"
@@ -1544,18 +1622,18 @@ const PanelNode = ({
           />
           {displayPoints.map((point, edgeIndex) => {
             const nextPoint = displayPoints[(edgeIndex + 1) % displayPoints.length];
-            const centerX = panel.x + (point.x + nextPoint.x) * 0.5;
-            const centerY = panel.y + (point.y + nextPoint.y) * 0.5;
+            const centerX = displayPanel.x + (point.x + nextPoint.x) * 0.5;
+            const centerY = displayPanel.y + (point.y + nextPoint.y) * 0.5;
             const edgeAngle = (Math.atan2(nextPoint.y - point.y, nextPoint.x - point.x) * 180) / Math.PI;
             return (
               <Group key={`${panel.id}-edge-controls-${edgeIndex}`}>
                 <Line
                   key={`${panel.id}-edge-drag-${edgeIndex}`}
                   points={[
-                    (panel.x + point.x) * scale,
-                    (panel.y + point.y) * scale,
-                    (panel.x + nextPoint.x) * scale,
-                    (panel.y + nextPoint.y) * scale,
+                    (displayPanel.x + point.x) * scale,
+                    (displayPanel.y + point.y) * scale,
+                    (displayPanel.x + nextPoint.x) * scale,
+                    (displayPanel.y + nextPoint.y) * scale,
                   ]}
                   stroke="rgba(195,109,47,0.001)"
                   strokeWidth={18}
@@ -1662,8 +1740,8 @@ const PanelNode = ({
           })}
           {!showImagePreview ? (
             <Circle
-              x={(panel.x + panel.width * 0.5) * scale}
-              y={(panel.y + panel.height * 0.5) * scale}
+              x={(displayPanel.x + displayPanel.width * 0.5) * scale}
+              y={(displayPanel.y + displayPanel.height * 0.5) * scale}
               radius={POINT_HANDLE_RADIUS * 1.5}
               fill="#ffffff"
               stroke="#c36d2f"
@@ -1753,24 +1831,30 @@ const PanelNode = ({
             rect={displayRect}
             scale={scale}
             color="#c36d2f"
-            onLiveChange={setLiveRect}
+            resizeBehavior="anchored"
+            onLiveChange={(nextRect) => {
+              setLiveRect(nextRect ? resolvePanelResizeRect(nextRect) : null);
+            }}
             onCommit={(_, nextRect) => {
-              setLiveRect(null);
+              const resolvedRect = resolvePanelResizeRect(nextRect);
+              setLiveRect(resolvedRect);
               void executeCommand("resizePanel", {
                 pageId: page.id,
                 panelId: panel.id,
-                x: nextRect.x,
-                y: nextRect.y,
-                width: Math.max(GRID_SIZE, nextRect.width),
-                height: Math.max(GRID_SIZE, nextRect.height),
+                x: resolvedRect.x,
+                y: resolvedRect.y,
+                width: resolvedRect.width,
+                height: resolvedRect.height,
+              }).finally(() => {
+                setLiveRect(null);
               });
             }}
           />
           {displayPoints.map((point, index) => (
             <Circle
               key={`${panel.id}-point-${index}`}
-              x={(panel.x + point.x) * scale}
-              y={(panel.y + point.y) * scale}
+              x={(displayPanel.x + point.x) * scale}
+              y={(displayPanel.y + point.y) * scale}
               radius={POINT_HANDLE_RADIUS}
               fill="#ffffff"
               stroke="#c36d2f"

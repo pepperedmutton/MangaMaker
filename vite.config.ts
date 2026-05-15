@@ -8,6 +8,7 @@ import { defineConfig, type PreviewServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import {
   AGENT_DEFAULT_DOCUMENT_DEFINITIONS,
+  AGENT_PRIME_DIRECTIVE_DOCUMENT_ID,
   agentDocumentManifestSchema,
   agentDocumentMetaSchema,
   agentDocumentSchema,
@@ -15,23 +16,52 @@ import {
   buildAgentDocumentMarkdown,
   createAgentRoleMetadocDocumentId,
   createAgentRoleMetadocPath,
+  createAgentRoleMetadocPathForRole,
+  createUniqueAgentDocumentPathFromTitle,
   createDefaultAgentRolesForDocuments,
   createAgentDocumentMeta,
+  normalizeAgentDocumentDirectoryPath,
+  normalizeAgentRoleMetadocFileStem,
   type AgentDocument,
   type AgentDocumentManifest,
   type AgentDocumentMeta,
 } from "./src/agent/documentSchema";
 import {
+  AGENT_ROLE_METADOC_PROMPT,
   agentRoleDefinitionSchema,
   createAgentRoleId,
+  getAgentRoleWorkingDirectory,
   getAgentRole,
   type AgentRoleDefinition,
 } from "./src/agent/roles";
 import {
+  AGENT_METADOC_ONLY_PROTOCOL_SYSTEM_PROMPT,
   AGENT_PROTOCOL_SYSTEM_PROMPT,
   DEFAULT_AGENT_SYSTEM_PROMPT,
   normalizeAgentSystemPrompt,
+  normalizeMetadocOnlyAgentSystemPrompt,
 } from "./src/agent/systemPrompt";
+import {
+  applyAppendDocumentEdit,
+  applyEditDocumentLinesEdit,
+  applyReplaceDocumentSectionEdit,
+  applyReplaceDocumentTextEdit,
+  createDocumentLinesResult,
+  incrementalDocumentEditFailureReason,
+  isIncrementalDocumentEditVerifiedNoop,
+  isAgentDocumentMutationToolName,
+  isVerifiedAgentDocumentMutationResult,
+  type AppendDocumentInput,
+  type EditDocumentLinesInput,
+  type IncrementalDocumentEdit,
+  type ReplaceDocumentSectionInput,
+  type ReplaceDocumentTextInput,
+} from "./src/agent/documentEditTools";
+import {
+  AGENT_DOCUMENT_WRITE_SCOPE,
+  createAgentDocumentWriteScopeBlockedResult,
+  validateExistingAgentDocumentWriteScope,
+} from "./src/agent/documentWriteScope";
 import {
   OpenRouterEmptyAssistantContentError,
   OpenRouterNonJsonResponseError,
@@ -66,22 +96,7 @@ import {
   isAgentMutationCompletionClaim,
   sanitizeAgentConversationMessages,
 } from "./src/agent/conversationSanitizer";
-import { resolveSysmlPilotRuntimeConfig, toPublicSysmlConfig } from "./src/sysml/config";
-import { validateSysmlWithPilot } from "./src/sysml/pilotAdapter";
-import {
-  deleteSysmlFile,
-  ensureSysmlRepository,
-  listSysmlFiles,
-  readAllSysmlValidationFiles,
-  readSysmlFile,
-  writeSysmlFile,
-} from "./src/sysml/repository";
-import {
-  getSysmlStandardOverview,
-  readSysmlStandardReferenceTopic,
-  SYSML_STANDARD_REFERENCE_TOPIC_IDS,
-} from "./src/sysml/standardReference";
-import type { SysmlValidationFileInput } from "./src/sysml/types";
+import { compileAgentCurrentTaskPacket, type AgentCurrentTaskPacket } from "./src/agent/contextCompiler";
 
 const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projects";
 const PROJECT_META_FILE = ".latest_project";
@@ -97,7 +112,6 @@ const AGENT_RUNS_DIR = "agent-runs";
 const AGENT_RUN_FILE = "run.json";
 const API_BASE = "/__mangamaker__/persistence";
 const AGENT_API_BASE = "/__mangamaker__/agent";
-const SYSML_API_BASE = "/__mangamaker__/sysml";
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const AGENT_TEST_MODE = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
@@ -130,7 +144,7 @@ const parseBoundedNumberEnv = (
   }
   return Math.min(max, Math.max(min, parsed));
 };
-const OPENROUTER_REQUEST_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.MANGAMAKER_OPENROUTER_TIMEOUT_MS, 120000);
+const OPENROUTER_REQUEST_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.MANGAMAKER_OPENROUTER_TIMEOUT_MS, 300000);
 const OPENROUTER_MAX_TOKENS = parsePositiveIntegerEnv(
   process.env.MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS ?? process.env.MANGAMAKER_AGENT_MAX_TOKENS,
   16384,
@@ -829,7 +843,15 @@ const normalizeAgentRolesForDocuments = (
     ) {
       continue;
     }
-    normalizedRoles.push(agentRoleDefinitionSchema.parse(role));
+    const parsedRole = agentRoleDefinitionSchema.parse(role);
+    normalizedRoles.push({
+      ...parsedRole,
+      title: parsedRole.name,
+      prompt: AGENT_ROLE_METADOC_PROMPT,
+      workingDirectory: normalizeAgentDocumentDirectoryPath(
+        parsedRole.workingDirectory ?? getAgentRoleWorkingDirectory(parsedRole),
+      ),
+    });
     usedRoleIds.add(role.id);
     usedMetadocIds.add(role.metadocId);
   }
@@ -838,6 +860,118 @@ const normalizeAgentRolesForDocuments = (
 
 const createDefaultAgentRoleList = (documents: AgentDocumentMeta[]) =>
   normalizeAgentRolesForDocuments(createDefaultAgentRolesForDocuments(documents), documents);
+
+const ensureAgentDefaultDocumentFile = async (
+  projectDir: string,
+  definition: (typeof AGENT_DEFAULT_DOCUMENT_DEFINITIONS)[number],
+  now: string,
+  documentMap: Map<string, AgentDocumentMeta>,
+) => {
+  let changed = false;
+  const existing = documentMap.get(definition.id);
+  const meta = existing
+    ? agentDocumentMetaSchema.parse({
+        ...existing,
+        title: existing.title || definition.title,
+        summary: existing.summary ?? definition.summary,
+        path: normalizeAgentDocumentPath(existing.path || definition.path, existing.id),
+      })
+    : createAgentDocumentMeta(definition, now);
+  if (!existing || JSON.stringify(existing) !== JSON.stringify(meta)) {
+    documentMap.set(meta.id, meta);
+    changed = true;
+  }
+  const documentPath = resolvePathInsideProjectDir(
+    projectDir,
+    normalizeAgentDocumentPath(meta.path, meta.id),
+  );
+  const stats = await fsp.stat(documentPath).catch(() => null);
+  if (!stats?.isFile()) {
+    await fsp.mkdir(path.dirname(documentPath), { recursive: true });
+    await fsp.writeFile(documentPath, `${buildAgentDocumentMarkdown(meta, definition.body)}\n`, "utf8");
+    changed = true;
+  }
+  return changed;
+};
+
+const pathsEqual = (left: string, right: string) =>
+  process.platform === "win32"
+    ? path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
+    : path.resolve(left) === path.resolve(right);
+
+const migrateRoleMetadocDocumentPaths = async (
+  projectDir: string,
+  documents: AgentDocumentMeta[],
+  roles: AgentRoleDefinition[],
+  now: string,
+) => {
+  let changed = false;
+  const documentsById = new Map(documents.map((document) => [document.id, document]));
+  const normalizedPathOwner = new Map<string, string>();
+  for (const document of documents) {
+    normalizedPathOwner.set(document.path.toLowerCase(), document.id);
+  }
+
+  for (const role of roles) {
+    const document = documentsById.get(role.metadocId);
+    if (!document) {
+      continue;
+    }
+    const expectedPath = normalizeAgentDocumentPath(createAgentRoleMetadocPathForRole(role), document.id);
+    if (document.path === expectedPath) {
+      continue;
+    }
+    const conflictingDocumentId = normalizedPathOwner.get(expectedPath.toLowerCase());
+    if (conflictingDocumentId && conflictingDocumentId !== document.id) {
+      throw new Error(
+        `Cannot rename metadoc for role "${role.name}" to ${expectedPath}; that path is already used by ${conflictingDocumentId}.`,
+      );
+    }
+
+    const previousPath = normalizeAgentDocumentPath(document.path, document.id);
+    const previousAbsolutePath = resolvePathInsideProjectDir(projectDir, previousPath);
+    const nextAbsolutePath = resolvePathInsideProjectDir(projectDir, expectedPath);
+    const sameAbsolutePath = pathsEqual(previousAbsolutePath, nextAbsolutePath);
+    const previousRaw = sameAbsolutePath
+      ? await fsp.readFile(previousAbsolutePath, "utf8").catch(() => null)
+      : await fsp.readFile(previousAbsolutePath, "utf8").catch(() => null);
+    const nextExists = sameAbsolutePath
+      ? false
+      : Boolean(await fsp.stat(nextAbsolutePath).catch(() => null));
+
+    if (!sameAbsolutePath && previousRaw !== null && nextExists) {
+      throw new Error(
+        `Cannot rename metadoc for role "${role.name}" to ${expectedPath}; a file already exists at that path.`,
+      );
+    }
+
+    const nextDocument = agentDocumentMetaSchema.parse({
+      ...document,
+      path: expectedPath,
+      updatedAt: now,
+    });
+    const content = previousRaw !== null
+      ? agentDocumentFromMarkdown(document, previousRaw).content
+      : "";
+    if (previousRaw !== null || !nextExists) {
+      await fsp.mkdir(path.dirname(nextAbsolutePath), { recursive: true });
+      await writeFileAtomically(nextAbsolutePath, `${buildAgentDocumentMarkdown(nextDocument, content)}\n`);
+    }
+    if (!sameAbsolutePath && previousRaw !== null) {
+      await fsp.rm(previousAbsolutePath, { force: true });
+    }
+
+    normalizedPathOwner.delete(document.path.toLowerCase());
+    normalizedPathOwner.set(expectedPath.toLowerCase(), document.id);
+    documentsById.set(document.id, nextDocument);
+    changed = true;
+  }
+
+  return {
+    changed,
+    documents: Array.from(documentsById.values()).sort((left, right) => left.path.localeCompare(right.path)),
+  };
+};
 
 const ensureProjectDocuments = async (projectId: string): Promise<AgentDocumentManifest> => {
   const now = new Date().toISOString();
@@ -854,28 +988,31 @@ const ensureProjectDocuments = async (projectId: string): Promise<AgentDocumentM
   }
 
   let changed = !existingManifest;
+  const primeDirectiveDefinition = AGENT_DEFAULT_DOCUMENT_DEFINITIONS.find(
+    (definition) => definition.id === AGENT_PRIME_DIRECTIVE_DOCUMENT_ID,
+  );
+  if (primeDirectiveDefinition) {
+    changed =
+      (await ensureAgentDefaultDocumentFile(projectDir, primeDirectiveDefinition, now, documentMap)) ||
+      changed;
+  }
   if (!existingManifest) {
     for (const definition of AGENT_DEFAULT_DOCUMENT_DEFINITIONS) {
-      const meta = createAgentDocumentMeta(definition, now);
-      documentMap.set(meta.id, meta);
-      const documentPath = resolvePathInsideProjectDir(
-        projectDir,
-        normalizeAgentDocumentPath(meta.path, meta.id),
-      );
-      const stats = await fsp.stat(documentPath).catch(() => null);
-      if (!stats?.isFile()) {
-        await fsp.mkdir(path.dirname(documentPath), { recursive: true });
-        await fsp.writeFile(documentPath, `${buildAgentDocumentMarkdown(meta, definition.body)}\n`, "utf8");
-      }
+      await ensureAgentDefaultDocumentFile(projectDir, definition, now, documentMap);
     }
   }
 
-  const documents = Array.from(documentMap.values()).sort((left, right) => left.path.localeCompare(right.path));
+  let documents = Array.from(documentMap.values()).sort((left, right) => left.path.localeCompare(right.path));
   const existingRoles = existingManifest?.roles ?? [];
   const roles =
     existingManifest && existingManifest.roleSetupVersion > 0
       ? normalizeAgentRolesForDocuments(existingRoles, documents)
       : createDefaultAgentRoleList(documents);
+  const pathMigration = await migrateRoleMetadocDocumentPaths(projectDir, documents, roles, now);
+  if (pathMigration.changed) {
+    documents = pathMigration.documents;
+    changed = true;
+  }
   if (
     existingManifest &&
     (existingManifest.roleSetupVersion === 0 ||
@@ -1073,13 +1210,21 @@ const writeAgentDocumentFile = async (
     throw new Error("Agent document id is required.");
   }
   const role = documentInput.role ?? existing?.role;
+  const title = documentInput.title ?? existing?.title ?? id;
+  const defaultDocumentPath = createUniqueAgentDocumentPathFromTitle(
+    title,
+    `${AGENT_DOCS_DIR}/${sanitizePathComponent(String(role ?? "general"), "role")}`,
+    manifest.documents,
+    id,
+    id,
+  );
   const meta = agentDocumentSchema.omit({ content: true }).parse({
     id,
-    title: documentInput.title ?? existing?.title ?? id,
+    title,
     ...(role ? { role } : {}),
     status: documentInput.status ?? existing?.status ?? "draft",
     path: normalizeAgentDocumentPath(
-      documentInput.path ?? existing?.path ?? `${AGENT_DOCS_DIR}/${sanitizePathComponent(String(role ?? "general"), "role")}/${sanitizePathComponent(id, "document")}.md`,
+      documentInput.path ?? existing?.path ?? defaultDocumentPath,
       id,
     ),
     relatedPageIds: documentInput.relatedPageIds ?? existing?.relatedPageIds ?? [],
@@ -1219,6 +1364,9 @@ const deleteAgentDocumentFile = async (
 ): Promise<AgentDocumentManifest> => {
   const manifest = await ensureProjectDocuments(projectId);
   const meta = resolveAgentDocumentMeta(manifest, documentId);
+  if (meta.id === AGENT_PRIME_DIRECTIVE_DOCUMENT_ID) {
+    throw new Error("PrimeDirective.md is required for every project and cannot be deleted.");
+  }
   const projectDir = await resolveProjectDirById(projectId, false);
   const documentPath = resolvePathInsideProjectDir(
     projectDir,
@@ -1238,11 +1386,212 @@ const deleteAgentDocumentFile = async (
   });
 };
 
-type AgentRoleInput = Partial<Omit<AgentRoleDefinition, "metadocId">> & {
+const normalizeAgentWorkingDirectoryPath = (value: string) => {
+  const raw = value.trim();
+  if (!raw) {
+    throw new Error("Agent working directory path is required.");
+  }
+  const withForwardSlashes = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (withForwardSlashes.split("/").some((part) => part === "..")) {
+    throw new Error("Agent working directory must stay under docs/.");
+  }
+  if (/\.md$/i.test(withForwardSlashes)) {
+    throw new Error("Agent working directory must be a directory path, not a Markdown file.");
+  }
+  return normalizeAgentDocumentDirectoryPath(withForwardSlashes);
+};
+
+const agentDirectoryPathsEqual = (left: string, right: string) =>
+  left.toLowerCase() === right.toLowerCase();
+
+const agentDocumentPathIsUnderDirectory = (documentPath: string, directoryPath: string) => {
+  const normalizedDocumentPath = documentPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const normalizedDirectoryPath = normalizeAgentWorkingDirectoryPath(directoryPath);
+  return normalizedDocumentPath.toLowerCase().startsWith(`${normalizedDirectoryPath.toLowerCase()}/`);
+};
+
+const replaceAgentDirectoryPrefix = (documentPath: string, fromDirectory: string, toDirectory: string) => {
+  const suffix = documentPath.replace(/\\/g, "/").slice(fromDirectory.length);
+  return `${toDirectory}${suffix}`;
+};
+
+const rewriteAgentDocumentAtPath = async (
+  projectDir: string,
+  meta: AgentDocumentMeta,
+  previousMeta?: AgentDocumentMeta,
+) => {
+  const documentPath = resolvePathInsideProjectDir(projectDir, normalizeAgentDocumentPath(meta.path, meta.id));
+  const raw = await fsp.readFile(documentPath, "utf8").catch(() => null);
+  const content = raw === null
+    ? ""
+    : agentDocumentFromMarkdown(previousMeta ?? meta, raw).content;
+  await fsp.mkdir(path.dirname(documentPath), { recursive: true });
+  await writeFileAtomically(documentPath, `${buildAgentDocumentMarkdown(meta, content)}\n`);
+};
+
+const renameAgentWorkingDirectory = async (
+  projectId: string,
+  directoryPath: string,
+  nextDirectoryPath: string,
+): Promise<AgentDocumentManifest> => {
+  const fromDirectory = normalizeAgentWorkingDirectoryPath(directoryPath);
+  const toDirectory = normalizeAgentWorkingDirectoryPath(nextDirectoryPath);
+  if (agentDirectoryPathsEqual(fromDirectory, toDirectory)) {
+    return ensureProjectDocuments(projectId);
+  }
+  if (
+    toDirectory.toLowerCase().startsWith(`${fromDirectory.toLowerCase()}/`) ||
+    fromDirectory.toLowerCase().startsWith(`${toDirectory.toLowerCase()}/`)
+  ) {
+    throw new Error("Agent working directory cannot be renamed into itself or one of its nested directories.");
+  }
+
+  const manifest = await ensureProjectDocuments(projectId);
+  const now = new Date().toISOString();
+  const rolesToMove = manifest.roles.filter((role) =>
+    agentDirectoryPathsEqual(getAgentRoleWorkingDirectory(role), fromDirectory),
+  );
+  const documentsToMove = manifest.documents.filter((document) =>
+    agentDocumentPathIsUnderDirectory(document.path, fromDirectory),
+  );
+  const projectDir = await resolveProjectDirById(projectId, true);
+  const fromAbsolutePath = resolvePathInsideProjectDir(projectDir, fromDirectory);
+  const toAbsolutePath = resolvePathInsideProjectDir(projectDir, toDirectory);
+  const fromStats = await fsp.stat(fromAbsolutePath).catch(() => null);
+  if (rolesToMove.length === 0 && documentsToMove.length === 0 && !fromStats?.isDirectory()) {
+    throw new Error(`Agent working directory not found: ${fromDirectory}`);
+  }
+
+  const targetPaths = new Map<string, string>();
+  for (const document of documentsToMove) {
+    targetPaths.set(
+      document.id,
+      normalizeAgentDocumentPath(replaceAgentDirectoryPrefix(document.path, fromDirectory, toDirectory), document.id),
+    );
+  }
+  for (const document of manifest.documents) {
+    if (targetPaths.has(document.id)) {
+      continue;
+    }
+    if ([...targetPaths.values()].some((targetPath) => targetPath.toLowerCase() === document.path.toLowerCase())) {
+      throw new Error(`Cannot rename working directory to ${toDirectory}; document path already exists: ${document.path}`);
+    }
+  }
+
+  if (!pathsEqual(fromAbsolutePath, toAbsolutePath) && fromStats?.isDirectory()) {
+    const targetStats = await fsp.stat(toAbsolutePath).catch(() => null);
+    if (targetStats) {
+      const targetEntries = targetStats.isDirectory()
+        ? await fsp.readdir(toAbsolutePath).catch(() => [])
+        : ["file"];
+      if (targetEntries.length > 0) {
+        throw new Error(`Cannot rename working directory to ${toDirectory}; target directory already exists.`);
+      }
+      await fsp.rm(toAbsolutePath, { recursive: true, force: true });
+    }
+    await fsp.mkdir(path.dirname(toAbsolutePath), { recursive: true });
+    await fsp.rename(fromAbsolutePath, toAbsolutePath);
+  } else {
+    await fsp.mkdir(toAbsolutePath, { recursive: true });
+  }
+
+  const movedDocumentsById = new Map<string, AgentDocumentMeta>();
+  for (const document of manifest.documents) {
+    const targetPath = targetPaths.get(document.id);
+    movedDocumentsById.set(
+      document.id,
+      targetPath
+        ? agentDocumentMetaSchema.parse({ ...document, path: targetPath, updatedAt: now })
+        : document,
+    );
+  }
+
+  for (const document of documentsToMove) {
+    const nextDocument = movedDocumentsById.get(document.id);
+    if (nextDocument) {
+      await rewriteAgentDocumentAtPath(projectDir, nextDocument, document);
+    }
+  }
+
+  for (const role of rolesToMove) {
+    const metadoc = movedDocumentsById.get(role.metadocId);
+    if (!metadoc) {
+      continue;
+    }
+    const metadocPath = resolvePathInsideProjectDir(projectDir, normalizeAgentDocumentPath(metadoc.path, metadoc.id));
+    const raw = await fsp.readFile(metadocPath, "utf8").catch(() => null);
+    if (raw === null || !raw.includes(fromDirectory)) {
+      continue;
+    }
+    const body = agentDocumentFromMarkdown(metadoc, raw).content.replaceAll(fromDirectory, toDirectory);
+    const nextMetadoc = agentDocumentMetaSchema.parse({ ...metadoc, updatedAt: now });
+    movedDocumentsById.set(nextMetadoc.id, nextMetadoc);
+    await writeFileAtomically(metadocPath, `${buildAgentDocumentMarkdown(nextMetadoc, body)}\n`);
+  }
+
+  const nextDocuments = Array.from(movedDocumentsById.values()).sort((left, right) => left.path.localeCompare(right.path));
+  const nextRoles = manifest.roles.map((role) =>
+    agentDirectoryPathsEqual(getAgentRoleWorkingDirectory(role), fromDirectory)
+      ? agentRoleDefinitionSchema.parse({ ...role, workingDirectory: toDirectory })
+      : role,
+  );
+  return writeAgentDocumentManifestFile({
+    projectId,
+    updatedAt: now,
+    roleSetupVersion: 1,
+    documents: nextDocuments,
+    roles: normalizeAgentRolesForDocuments(nextRoles, nextDocuments),
+  });
+};
+
+const deleteAgentWorkingDirectory = async (
+  projectId: string,
+  directoryPath: string,
+): Promise<AgentDocumentManifest> => {
+  const directory = normalizeAgentWorkingDirectoryPath(directoryPath);
+  const manifest = await ensureProjectDocuments(projectId);
+  const rolesToDelete = manifest.roles.filter((role) =>
+    agentDirectoryPathsEqual(getAgentRoleWorkingDirectory(role), directory),
+  );
+  const documentsToDelete = manifest.documents.filter((document) =>
+    agentDocumentPathIsUnderDirectory(document.path, directory),
+  );
+  if (documentsToDelete.some((document) => document.id === AGENT_PRIME_DIRECTIVE_DOCUMENT_ID)) {
+    throw new Error("PrimeDirective.md cannot be deleted through working directory deletion.");
+  }
+  const projectDir = await resolveProjectDirById(projectId, false);
+  const directoryAbsolutePath = resolvePathInsideProjectDir(projectDir, directory);
+  const directoryStats = await fsp.stat(directoryAbsolutePath).catch(() => null);
+  if (rolesToDelete.length === 0 && documentsToDelete.length === 0 && !directoryStats?.isDirectory()) {
+    throw new Error(`Agent working directory not found: ${directory}`);
+  }
+  await fsp.rm(directoryAbsolutePath, { recursive: true, force: true });
+  const deletedDocumentIds = new Set(documentsToDelete.map((document) => document.id));
+  const deletedRoleIds = new Set(rolesToDelete.map((role) => role.id));
+  const now = new Date().toISOString();
+  const nextDocuments = manifest.documents
+    .filter((document) => !deletedDocumentIds.has(document.id))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return writeAgentDocumentManifestFile({
+    projectId,
+    updatedAt: now,
+    roleSetupVersion: 1,
+    documents: nextDocuments,
+    roles: normalizeAgentRolesForDocuments(
+      manifest.roles.filter((role) => !deletedRoleIds.has(role.id)),
+      nextDocuments,
+    ),
+  });
+};
+
+type AgentRoleInput = {
+  id?: string;
   name?: string;
   metadocId?: string;
-  metadocTitle?: string;
-  metadocPath?: string;
+  workingDirectory?: string;
+  defaultAutonomy?: AgentRoleDefinition["defaultAutonomy"];
+  allowedCommandGroups?: string[];
+  preferredTools?: string[];
 };
 
 const createAgentRoleWithMetadocFile = async (
@@ -1262,6 +1611,23 @@ const createAgentRoleWithMetadocFile = async (
   if (manifest.roles.some((role) => role.id === id)) {
     throw new Error(`Agent role already exists: ${id}`);
   }
+  const metadocFileStem = normalizeAgentRoleMetadocFileStem(name, id).toLowerCase();
+  if (
+    manifest.roles.some(
+      (role) => normalizeAgentRoleMetadocFileStem(role.name, role.id).toLowerCase() === metadocFileStem,
+    )
+  ) {
+    throw new Error(`Agent role metadoc filename already exists for role name: ${name}`);
+  }
+  const rawWorkingDirectory = roleInput.workingDirectory?.trim() || getAgentRoleWorkingDirectory({ id });
+  if (rawWorkingDirectory.replace(/\\/g, "/").split("/").some((part) => part === "..")) {
+    throw new Error("Agent role working directory must stay under docs/.");
+  }
+  if (/\.md$/i.test(rawWorkingDirectory.trim())) {
+    throw new Error("Agent role working directory must be a directory path, not a Markdown file.");
+  }
+  const workingDirectory = normalizeAgentDocumentDirectoryPath(rawWorkingDirectory);
+  const projectDir = await resolveProjectDirById(projectId, true);
 
   let documents = [...manifest.documents];
   let metadocId = roleInput.metadocId?.trim() ?? "";
@@ -1274,7 +1640,7 @@ const createAgentRoleWithMetadocFile = async (
     const metadocPath = createAgentRoleMetadocPath(name, id);
     const meta = agentDocumentMetaSchema.parse({
       id: metadocId,
-      title: roleInput.metadocTitle?.trim() || name,
+      title: name,
       role: id,
       status: "draft",
       path: normalizeAgentDocumentPath(metadocPath, metadocId),
@@ -1288,23 +1654,24 @@ const createAgentRoleWithMetadocFile = async (
     if (documents.some((document) => document.path.toLowerCase() === meta.path.toLowerCase())) {
       throw new Error(`Agent document path already exists: ${meta.path}`);
     }
-    const projectDir = await resolveProjectDirById(projectId, true);
     const documentPath = resolvePathInsideProjectDir(projectDir, meta.path);
     await fsp.mkdir(path.dirname(documentPath), { recursive: true });
     const body = [
       `# ${name}`,
       "",
-      "## Role",
+      "## Role Prompt",
       "",
-      roleInput.title?.trim() || name,
+      `Operate as ${name} in this MangaMaker project.`,
       "",
       "## Responsibilities",
       "",
       "- Define this role's working rules.",
-      "- Record this role's durable output here.",
+      "- Treat this metadoc as role prompt and role definition only.",
+      `- Record durable role output under \`${workingDirectory}/\`.`,
       "",
-      "## Output Log",
+      "## Context Priority",
       "",
+      "Pinned context is the system prompt, `docs/PrimeDirective.md`, and this role prompt. Working output can be evicted from the model window and reread on demand.",
     ].join("\n");
     await fsp.writeFile(documentPath, `${buildAgentDocumentMarkdown(meta, body)}\n`, "utf8");
     documents = documents.concat(meta).sort((left, right) => left.path.localeCompare(right.path));
@@ -1313,25 +1680,29 @@ const createAgentRoleWithMetadocFile = async (
   if (manifest.roles.some((role) => role.metadocId === metadocId)) {
     throw new Error(`Metadoc is already bound to a role: ${metadocId}`);
   }
+  await fsp.mkdir(resolvePathInsideProjectDir(projectDir, workingDirectory), { recursive: true });
 
   const role = agentRoleDefinitionSchema.parse({
     id,
     name,
-    title: roleInput.title?.trim() || name,
+    title: name,
     metadocId,
+    workingDirectory,
     defaultAutonomy: roleInput.defaultAutonomy,
     allowedCommandGroups: roleInput.allowedCommandGroups,
     preferredTools: roleInput.preferredTools,
-    prompt: roleInput.prompt?.trim() ||
-      `Operate as ${name}. Use the preloaded active metadoc first and record durable output there. Request other documents or resources only when the creator's task needs missing evidence.`,
+    prompt: AGENT_ROLE_METADOC_PROMPT,
     builtIn: false,
   });
+  const roles = normalizeAgentRolesForDocuments(manifest.roles.concat(role), documents);
+  const pathMigration = await migrateRoleMetadocDocumentPaths(projectDir, documents, roles, now);
+  documents = pathMigration.documents;
   return writeAgentDocumentManifestFile({
     projectId,
     updatedAt: now,
     roleSetupVersion: 1,
     documents,
-    roles: normalizeAgentRolesForDocuments(manifest.roles.concat(role), documents),
+    roles: normalizeAgentRolesForDocuments(roles, documents),
   });
 };
 
@@ -1464,17 +1835,28 @@ type AgentChatPayload = {
   conversationContextFingerprint?: string;
   conversationContextUpdatedAt?: string;
   systemPrompt?: string;
+  currentTask?: AgentCurrentTaskPacket;
+  currentTaskPin?: string;
   agentContext?: AgentContextPayload;
   activeRoleId?: string;
   activeRole?: AgentRoleDefinition;
   activeDocumentId?: string | null;
   harness?: {
+    tools?: unknown[];
     initialToolResults?: AgentHarnessToolResult[];
     dynamicToolResults?: AgentHarnessToolResult[];
     completedToolCallIndex?: unknown[];
+    resourcePolicy?: {
+      modelCapability?: AgentModelCapability;
+      metadocOnly?: boolean;
+      activeMetadocId?: string;
+      activeRoleWorkingDirectory?: string;
+      [key: string]: unknown;
+    };
   };
   canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
   approvedCommandPlan?: AgentCommandPlan | null;
+  modelOverride?: string;
   contextWindowTokens?: number;
   repetitionPenalty?: number;
   finalAnswerOnly?: boolean;
@@ -1605,6 +1987,7 @@ type AgentRunPublic = {
 };
 
 type AgentRunState = AgentRunPublic & {
+  runInstanceId?: string;
   payload: AgentChatPayload;
   dynamicToolResults: AgentHarnessToolResult[];
   serverToolCallCount?: number;
@@ -1612,6 +1995,7 @@ type AgentRunState = AgentRunPublic & {
   duplicateToolCallStreak?: number;
   finalAnswerOnlyRepairCount?: number;
   documentWriteRepairCount?: number;
+  incompleteNoActionRepairCount?: number;
   documentWriteBlockedToolCount?: number;
 };
 
@@ -1674,31 +2058,63 @@ type AgentAvailableModel = {
   contextLength: number | null;
   inputModalities: string[];
   outputModalities: string[];
+  capability: "multimodal" | "metadoc";
 };
 
+type AgentModelCapability = AgentAvailableModel["capability"];
+
+const DEEPSEEK_V4_PRO_MODEL_ID = "deepseek/deepseek-v4-pro";
+const QWEN_3_6_FLASH_MODEL_ID = "qwen/qwen3.6-flash";
+
 const isAllowedAgentModelProvider = (modelId: string) =>
-  modelId.startsWith("deepseek/") || modelId.startsWith("moonshotai/") || modelId.startsWith("~moonshotai/");
+  modelId.startsWith("deepseek/") ||
+  modelId.startsWith("moonshotai/") ||
+  modelId.startsWith("~moonshotai/") ||
+  modelId.startsWith("qwen/");
+
+const supportsAgentJsonTextOutput = (model: OpenRouterModelMetadata) => {
+  const outputModalities = model.architecture?.output_modalities ?? [];
+  const supportedParameters = model.supported_parameters ?? [];
+  return outputModalities.includes("text") && supportedParameters.includes("response_format");
+};
+
+const getAgentModelCapability = (model: OpenRouterModelMetadata): AgentAvailableModel["capability"] | null => {
+  const inputModalities = model.architecture?.input_modalities ?? [];
+  if (
+    isAllowedAgentModelProvider(model.id) &&
+    inputModalities.includes("image") &&
+    supportsAgentJsonTextOutput(model)
+  ) {
+    return "multimodal";
+  }
+  if (
+    model.id === DEEPSEEK_V4_PRO_MODEL_ID &&
+    inputModalities.includes("text") &&
+    !inputModalities.includes("image") &&
+    supportsAgentJsonTextOutput(model)
+  ) {
+    return "metadoc";
+  }
+  return null;
+};
 
 const filterAllowedAgentModels = (models: OpenRouterModelMetadata[]): AgentAvailableModel[] =>
   models
-    .filter((model) => {
-      const inputModalities = model.architecture?.input_modalities ?? [];
-      const outputModalities = model.architecture?.output_modalities ?? [];
-      const supportedParameters = model.supported_parameters ?? [];
-      return (
-        isAllowedAgentModelProvider(model.id) &&
-        inputModalities.includes("image") &&
-        outputModalities.includes("text") &&
-        supportedParameters.includes("response_format")
-      );
+    .map((model) => {
+      const capability = getAgentModelCapability(model);
+      if (!capability) {
+        return null;
+      }
+      return {
+        id: model.id,
+        name: model.name ?? model.id,
+        contextLength: typeof model.context_length === "number" ? model.context_length : null,
+        inputModalities: model.architecture?.input_modalities ?? [],
+        outputModalities: model.architecture?.output_modalities ?? [],
+        capability,
+      };
     })
-    .map((model) => ({
-      id: model.id,
-      name: model.name ?? model.id,
-      contextLength: typeof model.context_length === "number" ? model.context_length : null,
-      inputModalities: model.architecture?.input_modalities ?? [],
-      outputModalities: model.architecture?.output_modalities ?? [],
-    }))
+    .filter((model): model is AgentAvailableModel => model !== null)
     .sort((a, b) => a.id.localeCompare(b.id));
 
 let agentModelsCache: { fetchedAt: number; models: AgentAvailableModel[] } | null = null;
@@ -1845,8 +2261,20 @@ const attachTraceToResponse = (value: unknown, trace: AgentRequestTrace) => ({
 const agentRunStates = new Map<string, AgentRunState>();
 const agentRunSubscribers = new Map<string, Set<ServerResponse>>();
 const agentRunPersistQueues = new Map<string, Promise<void>>();
+const supersededAgentRunKeys = new Set<string>();
 
-const createAgentRunId = () => `agent-run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const CURRENT_AGENT_RUN_PREFIX = "agent-run-current";
+
+const createAgentRunStorageKey = (projectId: string, runId: string) => `${projectId}:${runId}`;
+
+const createAgentRunId = (roleId: string) => {
+  const readableRole = sanitizePathComponent(roleId, DEFAULT_AGENT_CONVERSATION_ROLE_ID).slice(0, 48);
+  const roleHash = createHash("sha1").update(roleId).digest("hex").slice(0, 10);
+  return `${CURRENT_AGENT_RUN_PREFIX}-${readableRole}-${roleHash}`;
+};
+
+const isCurrentAgentRunId = (runId: string) => runId.startsWith(`${CURRENT_AGENT_RUN_PREFIX}-`);
+const createAgentRunInstanceId = () => `agent-run-instance-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const createAgentRunStepId = () => `agent-step-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const toPublicAgentRun = (run: AgentRunState): AgentRunPublic => ({
@@ -1867,6 +2295,97 @@ const toPublicAgentRun = (run: AgentRunState): AgentRunPublic => ({
   ...(run.error ? { error: run.error } : {}),
 });
 
+const AGENT_RUN_LIST_MAX_SCAN = 40;
+const AGENT_RUN_LIST_MAX_STEPS = 80;
+const AGENT_RUN_LIST_MAX_TRACES = 10;
+const AGENT_RUN_LIST_MAX_TRACE_EVENTS = 8;
+const AGENT_RUN_LIST_MAX_STRING = 20_000;
+
+const truncateAgentRunListString = (value: string, maxLength = AGENT_RUN_LIST_MAX_STRING) =>
+  value.length > maxLength
+    ? `${value.slice(0, maxLength)}\n[agent run list truncated ${value.length - maxLength} characters]`
+    : value;
+
+const compactAgentRunListValue = (value: unknown, depth = 0): unknown => {
+  if (typeof value === "string") {
+    return truncateAgentRunListString(value);
+  }
+  if (Array.isArray(value)) {
+    const limit = depth <= 1 ? 80 : 30;
+    return value.slice(0, limit).map((entry) => compactAgentRunListValue(entry, depth + 1));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(record)
+      .filter(([key]) => key !== "rawAssistantContent" && key !== "parsedResponse")
+      .map(([key, entry]) => {
+        if (key === "modelDebug" && entry && typeof entry === "object" && !Array.isArray(entry)) {
+          const debug = entry as Record<string, unknown>;
+          return [
+            key,
+            {
+              redactedForRunList: true,
+              finishReason: debug.finishReason ?? null,
+              promptTokens: debug.promptTokens ?? null,
+              completionTokens: debug.completionTokens ?? null,
+              totalTokens: debug.totalTokens ?? null,
+              rawAssistantContentLength:
+                typeof debug.rawAssistantContent === "string" ? debug.rawAssistantContent.length : null,
+            },
+          ];
+        }
+        return [key, compactAgentRunListValue(entry, depth + 1)];
+      }),
+  );
+};
+
+const compactAgentRunListTrace = (trace: AgentRequestTrace): AgentRequestTrace => ({
+  ...trace,
+  events: trace.events.slice(-AGENT_RUN_LIST_MAX_TRACE_EVENTS),
+});
+
+const compactAgentRunListStep = (step: AgentRunStep): AgentRunStep => ({
+  ...step,
+  ...(step.input !== undefined ? { input: compactAgentRunListValue(step.input) } : {}),
+  ...(step.output !== undefined ? { output: compactAgentRunListValue(step.output) } : {}),
+  ...(step.trace ? { trace: compactAgentRunListTrace(step.trace) } : {}),
+});
+
+const compactAgentRunListResponse = (response: unknown) => {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    return response;
+  }
+  const record = response as Record<string, unknown>;
+  return compactAgentRunListValue({
+    message: typeof record.message === "string" ? truncateAgentRunListString(record.message) : "",
+    pendingCommandPlan: record.pendingCommandPlan ?? null,
+    requestedToolCalls: record.requestedToolCalls ?? [],
+    toolLogs: record.toolLogs ?? undefined,
+    error: record.error ?? undefined,
+    usedVision: record.usedVision ?? undefined,
+    warning: record.warning ?? undefined,
+    visionUnavailableReason: record.visionUnavailableReason ?? undefined,
+    taskProgress: record.taskProgress ?? undefined,
+    requestTrace: record.requestTrace && typeof record.requestTrace === "object"
+      ? compactAgentRunListTrace(record.requestTrace as AgentRequestTrace)
+      : undefined,
+    modelDebug: record.modelDebug ?? undefined,
+  });
+};
+
+const toPublicAgentRunListItem = (run: AgentRunState): AgentRunPublic => {
+  const publicRun = toPublicAgentRun(run);
+  return {
+    ...publicRun,
+    steps: publicRun.steps.slice(-AGENT_RUN_LIST_MAX_STEPS).map(compactAgentRunListStep),
+    trace: publicRun.trace.slice(0, AGENT_RUN_LIST_MAX_TRACES).map(compactAgentRunListTrace),
+    latestResponse: compactAgentRunListResponse(publicRun.latestResponse),
+  };
+};
+
 const getAgentRunProjectDir = async (projectId: string) => {
   const projectDir = await resolveProjectDirById(projectId, true);
   const runsDir = resolvePathInsideProjectDir(projectDir, AGENT_RUNS_DIR);
@@ -1881,7 +2400,33 @@ const getAgentRunFilePath = async (projectId: string, runId: string) => {
   return path.join(runDir, AGENT_RUN_FILE);
 };
 
+const getAgentRunDirPath = async (projectId: string, runId: string) => {
+  const runsDir = await getAgentRunProjectDir(projectId);
+  return resolvePathInsideProjectDir(runsDir, sanitizePathComponent(runId, "run"));
+};
+
+const isSupersededAgentRun = (projectId: string, runId: string) =>
+  supersededAgentRunKeys.has(createAgentRunStorageKey(projectId, runId));
+
+const markAgentRunSuperseded = (projectId: string, runId: string) => {
+  supersededAgentRunKeys.add(createAgentRunStorageKey(projectId, runId));
+};
+
+const isActiveAgentRunStateObject = (run: AgentRunState) => {
+  if (isSupersededAgentRun(run.projectId, run.id)) {
+    return false;
+  }
+  const current = agentRunStates.get(run.id);
+  return !current ||
+    current === run ||
+    (current.runInstanceId && run.runInstanceId && current.runInstanceId === run.runInstanceId) ||
+    (!current.runInstanceId && !run.runInstanceId && current.createdAt === run.createdAt);
+};
+
 const persistAgentRunNow = async (run: AgentRunState) => {
+  if (!isActiveAgentRunStateObject(run)) {
+    return;
+  }
   const runFile = await getAgentRunFilePath(run.projectId, run.id);
   await writeFileAtomically(runFile, `${JSON.stringify(run, null, 2)}\n`);
 };
@@ -1901,12 +2446,81 @@ const persistAgentRun = async (run: AgentRunState) => {
 };
 
 const readPersistedAgentRun = async (projectId: string, runId: string) => {
-  const runFile = await getAgentRunFilePath(projectId, runId);
+  const runsDir = await getAgentRunProjectDir(projectId);
+  const runFile = path.join(runsDir, sanitizePathComponent(runId, "run"), AGENT_RUN_FILE);
   const raw = await fsp.readFile(runFile, "utf8").catch(() => null);
   if (!raw) {
     return null;
   }
   return JSON.parse(raw) as AgentRunState;
+};
+
+const readPersistedAgentRunListHeader = async (projectId: string, runId: string) => {
+  const runsDir = await getAgentRunProjectDir(projectId);
+  const runFile = path.join(runsDir, sanitizePathComponent(runId, "run"), AGENT_RUN_FILE);
+  const handle = await fsp.open(runFile, "r").catch(() => null);
+  if (!handle) {
+    return null;
+  }
+  const chunks: Buffer[] = [];
+  const marker = '\n  "payload"';
+  const maxHeaderBytes = 2 * 1024 * 1024;
+  const buffer = Buffer.alloc(64 * 1024);
+  let text = "";
+  let reachedEof = false;
+  try {
+    while (Buffer.byteLength(text, "utf8") < maxHeaderBytes) {
+      const read = await handle.read(buffer, 0, buffer.length, null);
+      if (read.bytesRead <= 0) {
+        reachedEof = true;
+        break;
+      }
+      chunks.push(Buffer.from(buffer.subarray(0, read.bytesRead)));
+      text = Buffer.concat(chunks).toString("utf8");
+      if (text.includes(marker)) {
+        break;
+      }
+    }
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex < 0) {
+    return reachedEof ? JSON.parse(text) as AgentRunState : null;
+  }
+  const headerText = `${text.slice(0, markerIndex).replace(/,\s*$/, "")}\n}`;
+  return JSON.parse(headerText) as AgentRunState;
+};
+
+const deletePersistedAgentRun = async (projectId: string, runId: string) => {
+  const runDir = await getAgentRunDirPath(projectId, runId);
+  await fsp.rm(runDir, { recursive: true, force: true });
+};
+
+const cleanupSupersededAgentRunsForRole = async (projectId: string, roleId: string, currentRunId: string) => {
+  for (const [runId, run] of agentRunStates) {
+    if (run.projectId === projectId && run.roleId === roleId && runId !== currentRunId) {
+      markAgentRunSuperseded(projectId, runId);
+      agentRunStates.delete(runId);
+    }
+  }
+  const runsDir = await getAgentRunProjectDir(projectId);
+  const entries = await fsp.readdir(runsDir, { withFileTypes: true }).catch(() => []);
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && entry.name !== currentRunId)
+      .map(async (entry) => {
+        const runId = entry.name;
+        const memoryRun = agentRunStates.get(runId);
+        const run = memoryRun ?? (await readPersistedAgentRunListHeader(projectId, runId).catch(() => null));
+        if (!run || run.roleId !== roleId) {
+          return;
+        }
+        markAgentRunSuperseded(projectId, runId);
+        agentRunStates.delete(runId);
+        await deletePersistedAgentRun(projectId, runId);
+      }),
+  );
 };
 
 const latestRunningStepAgeMs = (run: AgentRunState) => {
@@ -1964,10 +2578,14 @@ const broadcastAgentRun = (run: AgentRunState, type: AgentRunEvent["type"] = "ru
 };
 
 const saveAndBroadcastAgentRun = async (run: AgentRunState, type: AgentRunEvent["type"] = "run_updated") => {
+  if (!isActiveAgentRunStateObject(run)) {
+    return false;
+  }
   run.updatedAt = new Date().toISOString();
   agentRunStates.set(run.id, run);
   await persistAgentRun(run);
   broadcastAgentRun(run, type);
+  return true;
 };
 
 const isCancellableAgentRunStatus = (status: AgentRunStatus) =>
@@ -2001,27 +2619,26 @@ const cancelAgentRunState = async (run: AgentRunState, reason: string) => {
 };
 
 const cancelAgentRunsForConversation = async (projectId: string, roleId: string, reason: string) => {
-  const runsDir = await getAgentRunProjectDir(projectId);
-  const entries = await fsp.readdir(runsDir, { withFileTypes: true }).catch(() => []);
-  await Promise.all(
-    entries
-      .filter((entry) => entry.isDirectory())
-      .map(async (entry) => {
-        const run = await getAgentRunState(entry.name, projectId).catch(() => null);
-        if (!run || run.roleId !== roleId) {
-          return;
-        }
-        await cancelAgentRunState(run, reason);
-      }),
-  );
+  const currentRunId = createAgentRunId(roleId);
+  const currentRun = await getAgentRunState(currentRunId, projectId).catch(() => null);
+  if (currentRun?.roleId === roleId) {
+    await cancelAgentRunState(currentRun, reason);
+  }
+  await cleanupSupersededAgentRunsForRole(projectId, roleId, currentRunId);
 };
 
 const getAgentRunState = async (runId: string, projectId?: string | null) => {
+  if (projectId && isSupersededAgentRun(projectId, runId)) {
+    return null;
+  }
   const memoryRun = agentRunStates.get(runId);
   if (memoryRun) {
     return memoryRun;
   }
   if (!projectId) {
+    return null;
+  }
+  if (!isCurrentAgentRunId(runId)) {
     return null;
   }
   const persistedRun = await readPersistedAgentRun(projectId, runId);
@@ -2042,15 +2659,57 @@ const listAgentRunsForProject = async (
     conversationContextFingerprint?: string | null;
   } = {},
 ) => {
+  const limit = Math.max(1, Math.min(100, options.limit ?? 20));
+  if (options.roleId) {
+    const currentRunId = createAgentRunId(options.roleId);
+    await cleanupSupersededAgentRunsForRole(projectId, options.roleId, currentRunId);
+    const run = await getAgentRunState(currentRunId, projectId).catch(() => null);
+    if (!run) {
+      return [];
+    }
+    if (run.roleId !== options.roleId) {
+      return [];
+    }
+    if (options.conversationContextId && run.conversationContextId !== options.conversationContextId) {
+      return [];
+    }
+    if (
+      options.conversationContextFingerprint &&
+      run.conversationContextFingerprint !== options.conversationContextFingerprint
+    ) {
+      return [];
+    }
+    return [toPublicAgentRunListItem(run)];
+  }
+
   const runsDir = await getAgentRunProjectDir(projectId);
   const entries = await fsp.readdir(runsDir, { withFileTypes: true }).catch(() => []);
-  const runs: AgentRunState[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
+  const candidates = (
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory() && isCurrentAgentRunId(entry.name))
+        .map(async (entry) => {
+          const runFile = path.join(runsDir, entry.name, AGENT_RUN_FILE);
+          const stats = await fsp.stat(runFile).catch(() => null);
+          return stats?.isFile()
+            ? {
+                runId: entry.name,
+                mtimeMs: stats.mtimeMs,
+              }
+            : null;
+        }),
+    )
+  )
+    .filter((entry): entry is { runId: string; mtimeMs: number } => entry !== null)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, Math.min(AGENT_RUN_LIST_MAX_SCAN, Math.max(limit * 3, 10)));
+
+  const runs: AgentRunPublic[] = [];
+  for (const candidate of candidates) {
+    if (runs.length >= limit) {
+      break;
     }
-    const runId = entry.name;
-    const run = await getAgentRunState(runId, projectId).catch(() => null);
+    const run = await getAgentRunState(candidate.runId, projectId).catch(() => null);
     if (!run) {
       continue;
     }
@@ -2066,12 +2725,9 @@ const listAgentRunsForProject = async (
     ) {
       continue;
     }
-    runs.push(run);
+    runs.push(toPublicAgentRunListItem(run));
   }
-  return runs
-    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
-    .slice(0, Math.max(1, Math.min(100, options.limit ?? 20)))
-    .map(toPublicAgentRun);
+  return runs.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
 };
 
 const createAgentRunStep = (
@@ -2121,6 +2777,7 @@ const summarizeModelResponseForRun = (response: unknown) => {
       : null,
     warning: typeof record.warning === "string" ? record.warning : null,
     usedVision: typeof record.usedVision === "boolean" ? record.usedVision : null,
+    taskProgress: record.taskProgress ?? null,
     modelDebug: record.modelDebug ?? null,
   };
 };
@@ -2152,7 +2809,11 @@ const SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND = 24;
 const SERVER_AGENT_MAX_DUPLICATE_TOOL_GUIDED_RETRIES = 4;
 const SERVER_AGENT_MAX_FINAL_ANSWER_ONLY_REPAIRS = 1;
 const SERVER_AGENT_MAX_DOCUMENT_WRITE_REPAIRS = 2;
-const SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS = Math.min(45_000, OPENROUTER_REQUEST_TIMEOUT_MS);
+const SERVER_AGENT_MAX_INCOMPLETE_NO_ACTION_REPAIRS = 2;
+const SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS = parsePositiveIntegerEnv(
+  process.env.MANGAMAKER_AGENT_FINAL_ANSWER_TIMEOUT_MS,
+  OPENROUTER_REQUEST_TIMEOUT_MS,
+);
 const AGENT_STALE_RUNNING_MS = Math.max(90_000, SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS + 30_000);
 const SERVER_EXECUTABLE_AGENT_TOOLS = new Set([
   "readProjectSummary",
@@ -2167,18 +2828,72 @@ const SERVER_EXECUTABLE_AGENT_TOOLS = new Set([
   "listDocuments",
   "listRoles",
   "readDocument",
+  "readDocumentLines",
   "searchDocuments",
   "writeDocument",
+  "deleteDocument",
+  "appendDocument",
+  "replaceDocumentSection",
+  "replaceDocumentText",
+  "editDocumentLines",
   "validateDocumentAgainstProject",
-  "readSysmlStandardOverview",
-  "readSysmlStandardReference",
-  "getSysmlStatus",
-  "listSysmlFiles",
-  "readSysmlFile",
-  "writeSysmlFile",
-  "validateSysmlModel",
   "proposeCommandPlan",
 ]);
+
+const METADOC_ONLY_SERVER_AGENT_TOOLS = new Set([
+  "listDocuments",
+  "listRoles",
+  "readDocument",
+  "readDocumentLines",
+  "searchDocuments",
+  "writeDocument",
+  "deleteDocument",
+  "appendDocument",
+  "replaceDocumentSection",
+  "replaceDocumentText",
+  "editDocumentLines",
+  "validateDocumentAgainstProject",
+]);
+
+const getRunModelCapability = (run: AgentRunState): AgentModelCapability => {
+  const policy = asRecord(run.payload.harness?.resourcePolicy);
+  const policyCapability = asString(policy.modelCapability);
+  if (policyCapability === "metadoc" || policyCapability === "multimodal") {
+    return policyCapability;
+  }
+  const model = run.payload.modelOverride?.trim() || process.env.MANGAMAKER_AGENT_MODEL?.trim();
+  return model === DEEPSEEK_V4_PRO_MODEL_ID ? "metadoc" : "multimodal";
+};
+
+const getRunActiveMetadocId = (run: AgentRunState) => {
+  const policy = asRecord(run.payload.harness?.resourcePolicy);
+  return asString(policy.activeMetadocId) || run.payload.activeRole?.metadocId || "";
+};
+
+const getRunActiveRoleWorkingDirectory = (run: AgentRunState) => {
+  const policy = asRecord(run.payload.harness?.resourcePolicy);
+  return asString(policy.activeRoleWorkingDirectory) || (
+    run.payload.activeRole ? getAgentRoleWorkingDirectory(run.payload.activeRole) : ""
+  );
+};
+
+const isMetadocOnlyServerToolCallAllowed = (run: AgentRunState, call: AgentToolCallRequest) => {
+  void run;
+  return METADOC_ONLY_SERVER_AGENT_TOOLS.has(call.toolName);
+};
+
+const createMetadocOnlyServerBlockedResult = (run: AgentRunState, call: AgentToolCallRequest) =>
+  createAgentHarnessToolResult(call.toolName, call.input, {
+    projectUpdatedAt: getPayloadProjectUpdatedAt(run.payload.agentContext),
+    blocked: true,
+    reason:
+      "This Agent model is configured for text-only document work. It cannot read pages, image assets, or renders.",
+    activeMetadocId: getRunActiveMetadocId(run) || null,
+    activeRoleWorkingDirectory: getRunActiveRoleWorkingDirectory(run) || null,
+    allowedTools: Array.from(METADOC_ONLY_SERVER_AGENT_TOOLS),
+    guidance:
+      "Use the preloaded readPrimeDirective and readActiveRoleMetadoc results for pinned context. This mode is document-only: it may read/list/search any Markdown document and write only under the active role working directory, but it cannot inspect pages, images, or renders.",
+  });
 
 const createAgentHarnessToolResult = (
   toolName: string,
@@ -2402,6 +3117,38 @@ const documentResultSummary = (document: AgentDocument) => ({
   contentLength: document.content.length,
 });
 
+const incrementalDocumentEditSummary = (
+  document: AgentDocument,
+  edit: IncrementalDocumentEdit,
+) => ({
+  saved: true,
+  verified: true,
+  changed: edit.changed,
+  edit,
+  document: documentResultSummary(document),
+});
+
+const incrementalDocumentNoWriteSummary = (
+  document: AgentDocument,
+  edit: Parameters<typeof incrementalDocumentEditSummary>[1],
+) => {
+  const verified = isIncrementalDocumentEditVerifiedNoop(edit);
+  return {
+    saved: verified,
+    verified,
+    changed: false,
+    alreadyApplied: verified,
+    edit,
+    document: documentResultSummary(document),
+    reason: verified
+      ? "The requested document edit was already present, so no file write was needed."
+      : incrementalDocumentEditFailureReason(edit),
+    guidance: verified
+      ? "Treat this document edit as complete. Do not call the same document mutation again."
+      : "Do not report the document edit as completed. Use the available document content to choose a correct heading/text target or ask for clarification.",
+  };
+};
+
 const documentLookupFailureResult = (
   requestedDocumentId: string,
   error: unknown,
@@ -2412,7 +3159,7 @@ const documentLookupFailureResult = (
   error: error instanceof Error ? error.message : String(error),
   availableDocuments: availableDocuments.map(documentIndexEntry),
   guidance:
-    "Use one of the available document ids or paths. For role output, prefer the active role metadoc instead of inventing a new document id.",
+    "Use one of the available document ids or paths. The Agent may edit or delete only existing ordinary Markdown documents under the active role working directory; if the target is missing, ask the creator to create it manually first.",
 });
 
 type AgentDocumentLookupFailure = ReturnType<typeof documentLookupFailureResult>;
@@ -2566,6 +3313,9 @@ const executeServerAgentToolCall = async (
   const context = run.payload.agentContext;
   const input = asRecord(call.input);
   const projectId = run.projectId;
+  if (getRunModelCapability(run) === "metadoc" && !isMetadocOnlyServerToolCallAllowed(run, call)) {
+    return createMetadocOnlyServerBlockedResult(run, call);
+  }
   if (call.toolName === "readProjectSummary") {
     return createProjectStateToolResult(context, call.toolName, call.input, {
       project: context?.project ?? { id: run.projectId, title: "", pageCount: 0 },
@@ -2669,7 +3419,11 @@ const executeServerAgentToolCall = async (
     });
   }
   if (call.toolName === "listCommandManifest") {
-    return createAgentHarnessToolResult(call.toolName, call.input, context?.commandManifest ?? []);
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      available: false,
+      reason:
+        "Canvas/page command plans are disabled for the built-in Agent. Use editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument for existing Markdown documents. The Agent cannot create documents.",
+    });
   }
   if (call.toolName === "listDocuments") {
     const manifest = await ensureProjectDocuments(projectId);
@@ -2679,8 +3433,8 @@ const executeServerAgentToolCall = async (
       roles: manifest.roles.map((role) => ({
         id: role.id,
         name: role.name,
-        title: role.title,
         metadocId: role.metadocId,
+        workingDirectory: role.workingDirectory ?? null,
         defaultAutonomy: role.defaultAutonomy,
         preferredTools: role.preferredTools,
       })),
@@ -2692,11 +3446,30 @@ const executeServerAgentToolCall = async (
     return createAgentHarnessToolResult(call.toolName, call.input, {
       projectId: manifest.projectId,
       updatedAt: manifest.updatedAt,
-      roles: manifest.roles,
+      roles: manifest.roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        metadocId: role.metadocId,
+        workingDirectory: role.workingDirectory ?? null,
+        defaultAutonomy: role.defaultAutonomy,
+        preferredTools: role.preferredTools,
+        metadocIsRolePrompt: true,
+      })),
     });
   }
   if (call.toolName === "readDocument") {
     return createAgentHarnessToolResult(call.toolName, call.input, await readAgentDocumentFileForTool(projectId, asString(input.documentId)));
+  }
+  if (call.toolName === "readDocumentLines") {
+    const document = await readAgentDocumentFileForTool(projectId, asString(input.documentId));
+    if (isDocumentLookupFailure(document)) {
+      return createAgentHarnessToolResult(call.toolName, call.input, document);
+    }
+    return createAgentHarnessToolResult(call.toolName, call.input, createDocumentLinesResult(document, {
+      documentId: document.id,
+      startLine: typeof input.startLine === "number" ? input.startLine : undefined,
+      endLine: typeof input.endLine === "number" ? input.endLine : undefined,
+    }));
   }
   if (call.toolName === "searchDocuments") {
     return createAgentHarnessToolResult(call.toolName, call.input, await searchAgentDocumentsForTool(projectId, {
@@ -2707,14 +3480,40 @@ const executeServerAgentToolCall = async (
   }
   if (call.toolName === "writeDocument") {
     const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const manifest = await ensureProjectDocuments(projectId);
+    const documentId = asString(input.id);
+    const existing = manifest.documents.find((document) => document.id === documentId) ?? null;
+    let scopedWritePath = existing?.path ?? "";
+    const activeRoleWorkingDirectory = getRunActiveRoleWorkingDirectory(run);
+    const existingScopeBlock = existing
+      ? validateExistingAgentDocumentWriteScope({
+          toolName: call.toolName,
+          document: existing,
+          requestedPath: asString(input.path) || null,
+          activeRoleWorkingDirectory,
+        })
+      : null;
+    if (existingScopeBlock) {
+      return createAgentHarnessToolResult(call.toolName, call.input, existingScopeBlock);
+    }
+    if (!existing) {
+      return createAgentHarnessToolResult(call.toolName, call.input, createAgentDocumentWriteScopeBlockedResult({
+        toolName: call.toolName,
+        requestedDocumentId: documentId,
+        requestedPath: asString(input.path) || null,
+        activeRoleWorkingDirectory,
+        reason:
+          `Document ${documentId || "(missing id)"} does not exist. The Agent is not allowed to create Markdown documents; create the document manually first.`,
+      }));
+    }
     let writeResult: AgentDocumentWriteResult;
     try {
       writeResult = await writeAgentDocumentFile(projectId, {
-        id: asString(input.id),
+        id: documentId,
         title: asString(input.title),
         role: asString(input.role) || undefined,
         status: (asString(input.status) || undefined) as AgentDocumentMeta["status"] | undefined,
-        path: asString(input.path) || undefined,
+        path: scopedWritePath,
         relatedPageIds: Array.isArray(input.relatedPageIds)
           ? input.relatedPageIds.filter((entry): entry is string => typeof entry === "string")
           : undefined,
@@ -2749,7 +3548,277 @@ const executeServerAgentToolCall = async (
       alreadyApplied: writeResult.alreadyApplied,
       repaired: writeResult.repaired,
       document: documentResultSummary(writeResult.document),
+      ...(!writeResult.changed && !writeResult.alreadyApplied
+        ? {
+            reason:
+              "writeDocument saved and verified the existing document, but the submitted content and metadata matched the current document. No document content changed.",
+            guidance:
+              "Do not report this as a completed edit unless the requested change was already present. If the creator asked for a change, inspect the target and retry with different content.",
+          }
+        : {}),
     });
+  }
+  if (call.toolName === "deleteDocument") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const documentId = asString(input.documentId);
+    const document = await readAgentDocumentFileForTool(projectId, documentId);
+    if (isDocumentLookupFailure(document)) {
+      return createAgentHarnessToolResult(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+        deleted: false,
+        operationId,
+      });
+    }
+    const activeRoleWorkingDirectory = getRunActiveRoleWorkingDirectory(run);
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      activeRoleWorkingDirectory,
+    });
+    if (scopeBlock) {
+      return createAgentHarnessToolResult(call.toolName, call.input, scopeBlock);
+    }
+    const manifest = await deleteAgentDocumentFile(projectId, document.id);
+    const stillPresent = manifest.documents.some((entry) => entry.id === document.id);
+    return createAgentHarnessToolResult(call.toolName, call.input, {
+      saved: !stillPresent,
+      verified: !stillPresent,
+      changed: !stillPresent,
+      deleted: !stillPresent,
+      operationId,
+      document: documentResultSummary(document),
+      documentCount: manifest.documents.length,
+      guidance: stillPresent
+        ? "The delete operation did not verify; do not report completion."
+        : "The requested document was deleted and verified absent from the manifest.",
+    });
+  }
+  if (call.toolName === "appendDocument") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const editInput = {
+      ...input,
+      operationId,
+      documentId: asString(input.documentId),
+      content: typeof input.content === "string" ? input.content : "",
+      heading: asString(input.heading) || undefined,
+      createHeadingIfMissing: typeof input.createHeadingIfMissing === "boolean" ? input.createHeadingIfMissing : undefined,
+    } as AppendDocumentInput;
+    const document = await readAgentDocumentFileForTool(projectId, editInput.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return createAgentHarnessToolResult(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: asString(input.path) || null,
+      activeRoleWorkingDirectory: getRunActiveRoleWorkingDirectory(run),
+    });
+    if (scopeBlock) {
+      return createAgentHarnessToolResult(call.toolName, call.input, scopeBlock);
+    }
+    const applied = applyAppendDocumentEdit(document, { ...editInput, path: document.path });
+    if (!applied.edit.changed) {
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const writeResult = await writeAgentDocumentFile(projectId, {
+        ...applied.writePayload,
+        lastAgentRunId: run.id,
+      });
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentEditSummary(writeResult.document, applied.edit));
+    } catch (error) {
+      if (isCancelledAgentRun(run)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return createAgentHarnessToolResult(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
+  }
+  if (call.toolName === "replaceDocumentSection") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const editInput = {
+      ...input,
+      operationId,
+      documentId: asString(input.documentId),
+      heading: asString(input.heading),
+      content: typeof input.content === "string" ? input.content : "",
+      headingLevel: typeof input.headingLevel === "number" ? input.headingLevel : undefined,
+      occurrence: typeof input.occurrence === "number" ? input.occurrence : undefined,
+      createIfMissing: typeof input.createIfMissing === "boolean" ? input.createIfMissing : undefined,
+      contentIncludesHeading: typeof input.contentIncludesHeading === "boolean" ? input.contentIncludesHeading : undefined,
+    } as ReplaceDocumentSectionInput;
+    const document = await readAgentDocumentFileForTool(projectId, editInput.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return createAgentHarnessToolResult(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: asString(input.path) || null,
+      activeRoleWorkingDirectory: getRunActiveRoleWorkingDirectory(run),
+    });
+    if (scopeBlock) {
+      return createAgentHarnessToolResult(call.toolName, call.input, scopeBlock);
+    }
+    const applied = applyReplaceDocumentSectionEdit(document, { ...editInput, path: document.path });
+    if (!applied.edit.changed) {
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const writeResult = await writeAgentDocumentFile(projectId, {
+        ...applied.writePayload,
+        lastAgentRunId: run.id,
+      });
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentEditSummary(writeResult.document, applied.edit));
+    } catch (error) {
+      if (isCancelledAgentRun(run)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return createAgentHarnessToolResult(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
+  }
+  if (call.toolName === "replaceDocumentText") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const editInput = {
+      ...input,
+      operationId,
+      documentId: asString(input.documentId),
+      oldText: typeof input.oldText === "string" ? input.oldText : "",
+      newText: typeof input.newText === "string" ? input.newText : "",
+      replaceAll: typeof input.replaceAll === "boolean" ? input.replaceAll : undefined,
+    } as ReplaceDocumentTextInput;
+    const document = await readAgentDocumentFileForTool(projectId, editInput.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return createAgentHarnessToolResult(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: asString(input.path) || null,
+      activeRoleWorkingDirectory: getRunActiveRoleWorkingDirectory(run),
+    });
+    if (scopeBlock) {
+      return createAgentHarnessToolResult(call.toolName, call.input, scopeBlock);
+    }
+    const applied = applyReplaceDocumentTextEdit(document, { ...editInput, path: document.path });
+    if (!applied.edit.changed) {
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const writeResult = await writeAgentDocumentFile(projectId, {
+        ...applied.writePayload,
+        lastAgentRunId: run.id,
+      });
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentEditSummary(writeResult.document, applied.edit));
+    } catch (error) {
+      if (isCancelledAgentRun(run)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return createAgentHarnessToolResult(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
+  }
+  if (call.toolName === "editDocumentLines") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const editInput = {
+      ...input,
+      operationId,
+      documentId: asString(input.documentId),
+      operations: Array.isArray(input.operations) ? input.operations : [],
+    } as EditDocumentLinesInput;
+    const document = await readAgentDocumentFileForTool(projectId, editInput.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return createAgentHarnessToolResult(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: asString(input.path) || null,
+      activeRoleWorkingDirectory: getRunActiveRoleWorkingDirectory(run),
+    });
+    if (scopeBlock) {
+      return createAgentHarnessToolResult(call.toolName, call.input, scopeBlock);
+    }
+    const applied = applyEditDocumentLinesEdit(document, { ...editInput, path: document.path });
+    if (!applied.edit.changed) {
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const writeResult = await writeAgentDocumentFile(projectId, {
+        ...applied.writePayload,
+        lastAgentRunId: run.id,
+      });
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentEditSummary(writeResult.document, applied.edit));
+    } catch (error) {
+      if (isCancelledAgentRun(run)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return createAgentHarnessToolResult(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended incremental document edit.",
+        });
+      }
+      throw error;
+    }
   }
   if (call.toolName === "validateDocumentAgainstProject") {
     return createAgentHarnessToolResult(
@@ -2758,54 +3827,11 @@ const executeServerAgentToolCall = async (
       await validateAgentDocumentAgainstPayloadProject(projectId, context, { documentId: asString(input.documentId) }),
     );
   }
-  if (call.toolName === "readSysmlStandardOverview") {
-    return createAgentHarnessToolResult(call.toolName, call.input, getSysmlStandardOverview());
-  }
-  if (call.toolName === "readSysmlStandardReference") {
-    const topicId = asString(input.topic);
-    if (!SYSML_STANDARD_REFERENCE_TOPIC_IDS.includes(topicId as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number])) {
-      throw new Error(`Unsupported SysML standard reference topic: ${topicId}`);
-    }
-    return createAgentHarnessToolResult(
-      call.toolName,
-      call.input,
-      readSysmlStandardReferenceTopic(topicId as (typeof SYSML_STANDARD_REFERENCE_TOPIC_IDS)[number]),
-    );
-  }
-  if (call.toolName === "getSysmlStatus") {
-    return createAgentHarnessToolResult(call.toolName, call.input, toPublicSysmlConfig(resolveSysmlPilotRuntimeConfig()));
-  }
-  if (call.toolName === "listSysmlFiles") {
-    return createAgentHarnessToolResult(call.toolName, call.input, await ensureSysmlRepository(projectId));
-  }
-  if (call.toolName === "readSysmlFile") {
-    return createAgentHarnessToolResult(call.toolName, call.input, await readSysmlFile(projectId, asString(input.path)));
-  }
-  if (call.toolName === "writeSysmlFile") {
-    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
-    return createAgentHarnessToolResult(call.toolName, call.input, await writeSysmlFile(projectId, {
-      path: asString(input.path),
-      content: typeof input.content === "string" ? input.content : "",
-      operationId,
-    }));
-  }
-  if (call.toolName === "validateSysmlModel") {
-    const requestedPaths = Array.isArray(input.paths)
-      ? input.paths.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-      : [];
-    const files = requestedPaths.length > 0
-      ? await Promise.all(requestedPaths.map((entry) => readSysmlFile(projectId, entry).then((file) => ({
-          path: file.path,
-          content: file.content,
-        }))))
-      : await readAllSysmlValidationFiles(projectId);
-    return createAgentHarnessToolResult(call.toolName, call.input, await validateSysmlWithPilot(files));
-  }
   if (call.toolName === "proposeCommandPlan") {
     return createAgentHarnessToolResult(call.toolName, call.input, {
       accepted: false,
       reason:
-        "Return this plan as pendingCommandPlan in the final JSON response so MangaMaker can validate schemas and apply confirmation policy.",
+        "Canvas/page command plans are disabled for the built-in Agent. Persist intent in existing Markdown documents with editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument, or describe the manual editor steps for the creator. The Agent cannot create documents.",
     });
   }
   return null;
@@ -2846,9 +3872,25 @@ const executeServerAgentToolCalls = async (
     currentPageId: getPayloadCurrentPage(run.payload.agentContext)?.id ?? null,
   };
   for (const call of executableCalls) {
+    if (call.toolName === "toolInputError") {
+      const input = asRecord(call.input);
+      toolResults.push(createAgentHarnessToolResult(call.toolName, call.input, {
+        ok: false,
+        blocked: true,
+        error: asString(input.error) || "The requested tool input did not match its inputSchema.",
+        attemptedToolName: asString(input.attemptedToolName) || "unknown",
+        requestedToolCallIndex:
+          typeof input.requestedToolCallIndex === "number" ? input.requestedToolCallIndex : null,
+        guidance:
+          asString(input.guidance) ||
+          "Repair the requested tool call and return a corrected requestedToolCalls entry.",
+      }));
+      executedToolCallCount += 1;
+      continue;
+    }
     if (
       runIsInDocumentWriteRequiredMode(run) &&
-      call.toolName !== "writeDocument" &&
+      !isAgentDocumentMutationToolName(call.toolName) &&
       !canRequestMissingVisualEvidenceDuringDocumentWriteRepair(run, call)
     ) {
       toolResults.push(createDocumentWriteRequiredToolResult(call));
@@ -2858,7 +3900,7 @@ const executeServerAgentToolCalls = async (
     const reusableResult = findReusableAgentToolResult(run.dynamicToolResults, call, reuseOptions);
     if (reusableResult) {
       toolResults.push(
-        call.toolName === "writeDocument"
+        isAgentDocumentMutationToolName(call.toolName)
           ? createDuplicateToolCallSkippedResult(call, undefined, reusableResult)
           : createCachedAgentToolResult(call, reusableResult),
       );
@@ -2938,9 +3980,9 @@ const fetchAllowedAgentModels = async (): Promise<AgentAvailableModel[]> => {
   return models;
 };
 
-const getCurrentAgentConfig = async () => {
+const getCurrentAgentConfig = async (modelOverride?: string | null) => {
   const testMode = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
-  const model = process.env.MANGAMAKER_AGENT_MODEL?.trim() || null;
+  const model = modelOverride?.trim() || process.env.MANGAMAKER_AGENT_MODEL?.trim() || null;
   const apiKeyConfigured = Boolean(process.env.OPENROUTER_API_KEY?.trim());
   const createContextWindowFields = (modelContextLength?: number | null) =>
     resolveAgentContextWindowTokens({
@@ -2954,6 +3996,7 @@ const getCurrentAgentConfig = async () => {
       enabled: true,
       provider: "test" as const,
       model: model ?? "mangamaker-test-agent",
+      modelCapability: "multimodal" as const,
       apiKeyConfigured,
       testMode: true,
       visionEnabled: true,
@@ -2967,6 +4010,7 @@ const getCurrentAgentConfig = async () => {
       enabled: false,
       provider: "unavailable" as const,
       model,
+      modelCapability: null,
       apiKeyConfigured: false,
       testMode: false,
       visionEnabled: false,
@@ -2980,12 +4024,13 @@ const getCurrentAgentConfig = async () => {
       enabled: false,
       provider: "unavailable" as const,
       model: null,
+      modelCapability: null,
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
       repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
       ...createContextWindowFields(null),
-      reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the multimodal Agent.",
+      reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the Agent.",
     };
   }
   let availableModels: AgentAvailableModel[];
@@ -2996,6 +4041,7 @@ const getCurrentAgentConfig = async () => {
       enabled: false,
       provider: "unavailable" as const,
       model,
+      modelCapability: null,
       apiKeyConfigured: true,
       testMode: false,
       visionEnabled: false,
@@ -3016,16 +4062,18 @@ const getCurrentAgentConfig = async () => {
       repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
       ...createContextWindowFields(null),
       reason:
-        "Configured model is not available for MangaMaker Agent. Choose a DeepSeek or Kimi model with image input, text output, and JSON response_format support.",
+        `Configured model is not available for MangaMaker Agent. Choose a Kimi/Qwen/DeepSeek multimodal JSON model, or ${DEEPSEEK_V4_PRO_MODEL_ID} for text-only document work.`,
     };
   }
+  const modelCapability = configuredModel.capability;
   return {
     enabled: true,
     provider: "openrouter" as const,
     model,
+    modelCapability,
     apiKeyConfigured: true,
     testMode: false,
-    visionEnabled: true,
+    visionEnabled: modelCapability === "multimodal",
     repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
     ...createContextWindowFields(configuredModel.contextLength),
     reason: undefined,
@@ -3038,11 +4086,28 @@ const MAX_AGENT_IMAGE_ATTACHMENTS = 8;
 
 const TEST_AGENT_MODELS: AgentAvailableModel[] = [
   {
+    id: DEEPSEEK_V4_PRO_MODEL_ID,
+    name: "DeepSeek: DeepSeek V4 Pro",
+    contextLength: 1_048_576,
+    inputModalities: ["text"],
+    outputModalities: ["text"],
+    capability: "metadoc",
+  },
+  {
     id: "moonshotai/kimi-k2.6",
     name: "MoonshotAI: Kimi K2.6",
     contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
     inputModalities: ["text", "image"],
     outputModalities: ["text"],
+    capability: "multimodal",
+  },
+  {
+    id: QWEN_3_6_FLASH_MODEL_ID,
+    name: "Qwen: Qwen3.6 Flash",
+    contextLength: 1_000_000,
+    inputModalities: ["text", "image", "video"],
+    outputModalities: ["text"],
+    capability: "multimodal",
   },
 ];
 
@@ -3192,9 +4257,31 @@ const compactPageForPrompt = (page: NonNullable<AgentContextPayload["pages"]>[nu
 const compactAgentContextForPrompt = (
   context: AgentContextPayload | undefined,
   budget: AgentPromptBudget,
+  modelCapability: AgentModelCapability,
 ) => {
   if (!context) {
     return {};
+  }
+  if (modelCapability === "metadoc") {
+    return redactPromptValue({
+      project: context.project
+        ? {
+            id: context.project.id,
+            title: context.project.title,
+            type: context.project.type,
+          }
+        : null,
+      resourceAccess: {
+        mode: "metadoc-only",
+        pagesAvailable: false,
+        imageAssetsAvailable: false,
+        rendersAvailable: false,
+        otherDocumentsAvailable: true,
+        documentsReadableVia: "listDocuments/readDocument/readDocumentLines/searchDocuments",
+        documentsWritableVia:
+          "existingWorkingDirectoryDocsOnly: replaceDocumentSection/editDocumentLines/replaceDocumentText/writeDocument/deleteDocument/appendDocument-heading-free-additive-only; document creation is disabled for Agent",
+      },
+    });
   }
   const pages = context.pages ?? [];
   const currentPage =
@@ -3225,8 +4312,8 @@ const compactAgentContextForPrompt = (
       multiplePageRendersAvailableVia: "renderPages",
       rolesAvailableVia: "listRoles",
       documentsAvailableVia: "listDocuments/readDocument/searchDocuments",
-      documentsWritableVia: "writeDocument",
-      commandManifestAvailableVia: "listCommandManifest",
+      documentsWritableVia: "existingWorkingDirectoryDocsOnly: replaceDocumentSection/editDocumentLines/replaceDocumentText/writeDocument/deleteDocument/appendDocument-heading-free-additive-only; document creation is disabled for Agent",
+      pageCommandPlans: "disabled",
       currentCanvasSnapshotAttachedInitially: false,
       visionTokenPolicy: {
         initialImagesAttached: false,
@@ -3243,7 +4330,7 @@ const compactAgentContextForPrompt = (
     counts: {
       pages: pages.length,
       imageAssets: context.imageAssets?.length ?? 0,
-      commands: context.commandManifest?.length ?? 0,
+      commands: 0,
     },
   });
 };
@@ -3271,12 +4358,22 @@ const normalizeAgentChatPayloadForRun = (payload: AgentChatPayload): AgentChatPa
     Number.isFinite(Date.parse(payload.conversationContextUpdatedAt))
       ? payload.conversationContextUpdatedAt
       : undefined;
+  const modelOverride =
+    typeof payload.modelOverride === "string" && payload.modelOverride.trim().length > 0
+      ? payload.modelOverride.trim()
+      : undefined;
+  const currentTaskPin =
+    typeof payload.currentTaskPin === "string" && payload.currentTaskPin.trim().length > 0
+      ? payload.currentTaskPin.trim()
+      : undefined;
   return {
     ...payload,
     messages,
     ...(conversationContextId ? { conversationContextId } : {}),
     conversationContextFingerprint: createAgentConversationFingerprint(messages),
     ...(conversationContextUpdatedAt ? { conversationContextUpdatedAt } : {}),
+    ...(modelOverride ? { modelOverride } : {}),
+    ...(currentTaskPin ? { currentTaskPin } : {}),
   };
 };
 
@@ -3297,14 +4394,21 @@ const DOCUMENT_WRITE_TARGET_TERMS = [
   "markdown",
   "metadoc",
   ".md",
-  "文档",
-  "文件",
-  "正文",
-  "剧情架构",
-  "小说家",
-  "分镜",
-  "配文",
-  "提示词",
+  "file",
+  "story",
+  "outline",
+  "novelist",
+  "storyboard",
+  "caption",
+  "prompt",
+  "\u6587\u6863",
+  "\u6587\u4ef6",
+  "\u6b63\u6587",
+  "\u5267\u60c5\u67b6\u6784",
+  "\u5c0f\u8bf4\u5bb6",
+  "\u5206\u955c",
+  "\u914d\u6587",
+  "\u63d0\u793a\u8bcd",
 ];
 
 const DOCUMENT_WRITE_MUTATION_TERMS = [
@@ -3319,20 +4423,20 @@ const DOCUMENT_WRITE_MUTATION_TERMS = [
   "insert",
   "delete",
   "rename",
-  "修改",
-  "更新",
-  "写入",
-  "保存",
-  "整合",
-  "重构",
-  "改写",
-  "整理",
-  "追加",
-  "补充",
-  "插入",
-  "删除",
-  "新建",
-  "生成",
+  "modify",
+  "record",
+  "persist",
+  "\u5199\u5165",
+  "\u5199\u8fdb",
+  "\u5199\u56de",
+  "\u66f4\u65b0",
+  "\u4fee\u6539",
+  "\u4fdd\u5b58",
+  "\u6574\u5408",
+  "\u6539\u5199",
+  "\u91cd\u5199",
+  "\u8bb0\u5f55",
+  "\u843d\u76d8",
 ];
 
 const containsAnyTerm = (text: string, terms: string[]) => {
@@ -3346,11 +4450,18 @@ const isLikelyDocumentMutationRequest = (text: string) =>
 
 const hasVerifiedDocumentWriteResult = (results: AgentHarnessToolResult[]) =>
   results.some((entry) => {
-    if (entry.toolName !== "writeDocument") {
+    if (!isAgentDocumentMutationToolName(entry.toolName)) {
       return false;
     }
-    const result = asRecord(entry.result);
-    return result.saved === true && result.conflict !== true && result.verified !== false;
+    return isVerifiedAgentDocumentMutationResult(entry.result);
+  });
+
+const getVerifiedDocumentWriteResults = (results: AgentHarnessToolResult[]) =>
+  results.filter((entry) => {
+    if (!isAgentDocumentMutationToolName(entry.toolName)) {
+      return false;
+    }
+    return isVerifiedAgentDocumentMutationResult(entry.result);
   });
 
 const runRequiresVerifiedDocumentWrite = (run: AgentRunState) =>
@@ -3363,9 +4474,9 @@ const runIsInDocumentWriteRequiredMode = (run: AgentRunState) =>
 const DOCUMENT_WRITE_INTENT_TARGET_PATTERN =
   /(?:document|metadoc|markdown|doc|\u6587\u6863|\u8bbe\u5b9a\u6587\u6863|\u89d2\u8272\u6587\u6863|\u751f\u4ea7\u6587\u6863|\u5c0f\u8bf4\u5bb6|\u5267\u60c5\u67b6\u6784|\u914d\u6587\u65b9\u6848)/iu;
 const DOCUMENT_WRITE_INTENT_VERB_PATTERN =
-  /(?:write|update|save|integrate|rewrite|revise|modify|persist|\u5199\u5165|\u5199\u8fdb|\u5199\u56de|\u66f4\u65b0|\u4fee\u6539|\u4fdd\u5b58|\u6574\u5408|\u6539\u5199|\u91cd\u5199|\u8bb0\u5f55|\u843d\u76d8)/iu;
+  /(?:write|update|save|integrate|rewrite|revise|modify|persist|delete|remove|\u5199\u5165|\u5199\u8fdb|\u5199\u56de|\u66f4\u65b0|\u4fee\u6539|\u4fdd\u5b58|\u6574\u5408|\u6539\u5199|\u91cd\u5199|\u8bb0\u5f55|\u843d\u76d8|\u5220\u9664|\u79fb\u9664)/iu;
 const DOCUMENT_WRITE_INTENT_FUTURE_PATTERN =
-  /(?:will|going to|about to|ready to|next I|now I|I can now|\u5c06|\u51c6\u5907|\u4f1a|\u73b0\u5728|\u63a5\u4e0b\u6765|\u9a6c\u4e0a|\u5f00\u59cb|\u9700\u8981).{0,180}(?:write|update|save|integrate|rewrite|revise|modify|persist|\u5199\u5165|\u5199\u8fdb|\u5199\u56de|\u66f4\u65b0|\u4fee\u6539|\u4fdd\u5b58|\u6574\u5408|\u6539\u5199|\u91cd\u5199|\u8bb0\u5f55|\u843d\u76d8)/iu;
+  /(?:will|going to|about to|ready to|next I|now I|I can now|\u5c06|\u51c6\u5907|\u4f1a|\u73b0\u5728|\u63a5\u4e0b\u6765|\u9a6c\u4e0a|\u5f00\u59cb|\u9700\u8981).{0,180}(?:write|update|save|integrate|rewrite|revise|modify|persist|delete|remove|\u5199\u5165|\u5199\u8fdb|\u5199\u56de|\u66f4\u65b0|\u4fee\u6539|\u4fdd\u5b58|\u6574\u5408|\u6539\u5199|\u91cd\u5199|\u8bb0\u5f55|\u843d\u76d8|\u5220\u9664|\u79fb\u9664)/iu;
 const DOCUMENT_WRITE_INTENT_NEGATION_PATTERN =
   /(?:cannot|can't|unable|will not|won't|did not|no document was|no metadoc was|not changed|not updated|not written|\u4e0d\u4f1a|\u4e0d\u80fd|\u65e0\u6cd5|\u6ca1\u6709|\u672a).{0,120}(?:write|update|save|integrate|rewrite|revise|modify|persist|document|metadoc|\u5199\u5165|\u5199\u8fdb|\u5199\u56de|\u66f4\u65b0|\u4fee\u6539|\u4fdd\u5b58|\u6574\u5408|\u6539\u5199|\u91cd\u5199|\u6587\u6863)/iu;
 
@@ -3387,11 +4498,12 @@ const messageIndicatesDocumentWriteIntent = (message: unknown) => {
 };
 
 const createDocumentWriteIntentRepairNotice = (attempt: number) => [
-  "MangaMaker internal harness notice: your previous response said or implied that a Markdown document/metadoc would be written or had been written, but requestedToolCalls did not include writeDocument.",
+  "MangaMaker internal harness notice: your previous response said or implied that a Markdown document/metadoc would be written or had been written, but requestedToolCalls did not include a document mutation tool.",
   "No document was changed.",
   `Repair attempt ${attempt}/${SERVER_AGENT_MAX_DOCUMENT_WRITE_REPAIRS}.`,
-  "If you intend to persist a document/metadoc edit, your next response must request exactly one writeDocument tool call with the full intended Markdown content and a stable operationId.",
-  "Use the active metadoc and existing harness tool results already supplied. Do not request more read/list/search/render tools unless a specific required document or visual render is genuinely missing.",
+    "If you intend to persist a Markdown document edit, your next response must request exactly one document mutation tool call with a stable operationId.",
+  "Use replaceDocumentSection for heading-based section changes, editDocumentLines for arbitrary line-range deletion/replacement/insertion, replaceDocumentText for exact small replacements/deletions, writeDocument only when you need to replace an existing full document, deleteDocument only when the creator explicitly asked to remove an existing document, or appendDocument only for plain heading-free additive notes/log lines. The Agent cannot create documents.",
+    "Use the pinned PrimeDirective.md, active role metadoc, and existing harness tool results already supplied. For role output, write an ordinary document under the active role working directory. Do not request more read/list/search/render tools unless a specific required document or visual render is genuinely missing.",
   "If you do not intend to persist a document edit, return requestedToolCalls: [] and clearly say that no document was changed.",
 ].join("\n");
 
@@ -3413,12 +4525,12 @@ const canRequestMissingVisualEvidenceDuringDocumentWriteRepair = (
   !hasRenderedVisualEvidenceResult(run.dynamicToolResults);
 
 const createMissingDocumentWriteNotice = () => [
-  "MangaMaker internal harness notice: the creator's request appears to require a durable Markdown document/metadoc change.",
-  "Your previous response did not execute a verified writeDocument tool call, so MangaMaker cannot treat the document edit as complete.",
-  "You already have the active metadoc and prior tool results in Agent harness JSON. Do not request more read/list/search tools unless a genuinely named missing document is absent from all supplied results.",
-  "If the edit depends on page composition that has not been visually rendered in this run, request exactly one targeted renderPage/renderPages call, then writeDocument from that evidence.",
-  "If the requested edit should be made, your next tool call should be writeDocument with the full intended Markdown content and a fresh operationId.",
-  "If you cannot safely edit with the available evidence, return no tool calls and say exactly what is missing. Do not claim that the document was updated unless writeDocument succeeds.",
+  "MangaMaker internal harness notice: the creator's request appears to require a durable Markdown document change.",
+  "Your previous response did not execute a document mutation tool call that returned saved=true, verified=true, and changed=true or alreadyApplied=true, so MangaMaker cannot treat the document edit as complete.",
+  "You already have pinned PrimeDirective.md, active role metadoc, active role working directory, and prior tool results in Agent harness JSON. Do not request more read/list/search tools unless a genuinely named missing document is absent from all supplied results.",
+  "If the edit depends on page composition that has not been visually rendered in this run, request exactly one targeted renderPage/renderPages call, then use a document mutation tool from that evidence.",
+  "If the requested edit should be made, your next tool call should be replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId. Do not create documents.",
+  "If you cannot safely edit with the available evidence, return no tool calls and say exactly what is missing. Do not claim that the document was updated unless a document mutation tool succeeds.",
 ].join("\n");
 
 const createDocumentWriteRequiredToolResult = (call: AgentToolCallRequest) =>
@@ -3428,15 +4540,15 @@ const createDocumentWriteRequiredToolResult = (call: AgentToolCallRequest) =>
   }, {
     blocked: true,
     reason:
-      "This run is in document-write-required mode. The creator asked for a durable Markdown/metadoc edit, but no verified writeDocument call has succeeded.",
+      "This run is in document-write-required mode. The creator asked for a durable Markdown edit, but no document mutation tool call has returned saved=true, verified=true, and changed=true or alreadyApplied=true.",
     guidance:
-      "Use the existing harness results and call writeDocument with the full revised Markdown and a fresh operationId. Do not request more read/list/search tools unless a named required document is absent from all supplied results. Request renderPage/renderPages only once when visual page composition is genuinely missing. Do not report completion without a verified writeDocument result.",
+      "Use the existing harness results and call replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId. Do not create documents. Do not request more read/list/search tools unless a named required document is absent from all supplied results. Request renderPage/renderPages only once when visual page composition is genuinely missing. Do not report completion unless the mutation result says changed=true or alreadyApplied=true.",
   });
 
 const createBlockedDocumentWriteToolNotice = (blockedToolCount: number) => [
   "MangaMaker document-write-only repair:",
-  `${blockedToolCount} non-write tool request(s) were blocked because this run already has the needed document/page evidence and still lacks a verified writeDocument result.`,
-  "Your next response must either request writeDocument with the complete revised Markdown and a fresh operationId, or clearly state that you cannot safely perform the edit.",
+  `${blockedToolCount} non-write tool request(s) were blocked because this run already has the needed document/page evidence and still lacks a verified document mutation result.`,
+  "Your next response must either request replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId, or clearly state that you cannot safely perform the edit. Do not create documents.",
   "Do not request readDocument, readPages, listDocuments, searchDocuments, renderPage, renderPages, or other evidence-gathering tools again in this repair step.",
 ].join("\n");
 
@@ -3454,7 +4566,7 @@ const createDuplicateToolGuidanceNotice = (toolResults: AgentHarnessToolResult[]
     "MangaMaker internal harness notice: your previous requested tool calls were exact duplicates of results already supplied in this run.",
     uniqueTools.length > 0 ? `Duplicate tools satisfied from cache: ${uniqueTools.join(", ")}.` : "Duplicate tool calls were satisfied from cache.",
     "Use the existing dynamicToolResults and completedToolCallIndex. Do not request the same toolName/input again.",
-    "Complete the creator's task now by returning either a final answer or a pendingCommandPlan. requestedToolCalls should be empty unless a genuinely different missing tool is required.",
+    "Complete the creator's task now by returning a final answer or a document write. pendingCommandPlan must be null, and requestedToolCalls should be empty unless a genuinely different missing tool is required.",
   ].join("\n");
 };
 
@@ -3493,8 +4605,7 @@ const coerceFinalAnswerOnlyResponse = (
   }
   const toolNames = Array.from(new Set(requestedToolCalls.map((call) => call.toolName))).join(", ");
   const rawMessage = typeof response.message === "string" ? response.message.trim() : "";
-  const looksLikeToolPrelude =
-    /need to|inspect|read|render|tool|查看|读取|渲染|需要先|让我/.test(rawMessage.toLowerCase());
+  const looksLikeToolPrelude = /need to|inspect|read|render|tool/.test(rawMessage.toLowerCase());
   const baseMessage = rawMessage.length > 0 && !looksLikeToolPrelude
     ? rawMessage
     : "The model still tried to request tools instead of producing a final answer. MangaMaker stopped tool execution and kept the run from looping.";
@@ -3507,6 +4618,141 @@ const coerceFinalAnswerOnlyResponse = (
     requestedToolCalls: [],
   };
 };
+
+const describeVerifiedDocumentWrite = (entry: AgentHarnessToolResult) => {
+  const input = asRecord(entry.input);
+  const result = asRecord(entry.result);
+  const document = asRecord(result.document);
+  const target =
+    asString(document.path) ||
+    asString(input.path) ||
+    asString(document.id) ||
+    asString(input.documentId) ||
+    asString(input.id) ||
+    "document";
+  const state = result.changed === true
+    ? "changed"
+    : result.alreadyApplied === true
+      ? "already applied"
+      : "verified";
+  return `${entry.toolName}: ${target} (${state})`;
+};
+
+const createVerifiedDocumentWriteProgressNotice = (verifiedWrites: AgentHarnessToolResult[]) => {
+  const writeSummary = verifiedWrites.length > 0
+    ? verifiedWrites.map(describeVerifiedDocumentWrite).slice(-5).join("; ")
+    : "document write verified";
+  return [
+    "MangaMaker internal harness notice: one or more Markdown document mutation tools returned saved=true, verified=true, and either changed=true or alreadyApplied=true.",
+    `Verified write(s): ${writeSummary}.`,
+    "Update taskProgress against your original stopCondition.",
+    "Decide whether the creator's whole task is complete. If complete, return requestedToolCalls: [], taskProgress.status=\"completed\", taskProgress.phase=\"complete\", and give a final report with stopReason.",
+    "Request more tools only for a distinct unfinished requirement, not to re-check the verified write.",
+  ].join("\n");
+};
+
+const INCOMPLETE_NO_ACTION_MESSAGE_PATTERN =
+  /(?:need to|still need|not complete|not completed|not finished|incomplete|continue|cannot complete|can't complete|unable to complete|requires more|waiting for|\u8fd8\u9700\u8981|\u7ee7\u7eed|\u672a\u5b8c\u6210|\u6ca1\u6709\u5b8c\u6210|\u8fd8\u6ca1\u5b8c\u6210|\u5c1a\u672a|\u65e0\u6cd5\u5b8c\u6210|\u4e0d\u80fd\u5b8c\u6210|\u7f3a\u5c11)/iu;
+
+const getResponseTaskProgressRecord = (response: unknown) =>
+  asRecord(asRecord(response).taskProgress);
+
+const responseHasTerminalCompletedProgress = (response: unknown) => {
+  const taskProgress = getResponseTaskProgressRecord(response);
+  return asString(taskProgress.status) === "completed" || asString(taskProgress.phase) === "complete";
+};
+
+const responseHasTerminalBlockedProgress = (response: unknown) => {
+  const taskProgress = getResponseTaskProgressRecord(response);
+  return asString(taskProgress.status) === "blocked" || asString(taskProgress.phase) === "blocked";
+};
+
+const responseIsWaitingForCreatorInput = (response: unknown) => {
+  const taskProgress = getResponseTaskProgressRecord(response);
+  return asString(taskProgress.status) === "waiting_for_user";
+};
+
+const responseIndicatesIncompleteNoAction = (response: unknown) => {
+  if (responseHasTerminalBlockedProgress(response) || responseIsWaitingForCreatorInput(response)) {
+    return false;
+  }
+  const message = asString(asRecord(response).message).trim();
+  if (message && INCOMPLETE_NO_ACTION_MESSAGE_PATTERN.test(message)) {
+    return true;
+  }
+  if (responseHasTerminalCompletedProgress(response)) {
+    return false;
+  }
+  const taskProgress = getResponseTaskProgressRecord(response);
+  const status = asString(taskProgress.status);
+  const phase = asString(taskProgress.phase);
+  if (["planning", "running", "needs_tool"].includes(status)) {
+    return true;
+  }
+  if (["planning", "gathering_context", "editing_document", "validating", "reporting"].includes(phase)) {
+    return true;
+  }
+  return false;
+};
+
+const getResponseStopReason = (response: unknown) => {
+  const responseRecord = asRecord(response);
+  const taskProgress = getResponseTaskProgressRecord(response);
+  return (
+    asString(taskProgress.stopReason) ||
+    asString(taskProgress.stop_reason) ||
+    asString(responseRecord.warning) ||
+    asString(responseRecord.message) ||
+    "The Agent stopped without requesting a next action."
+  );
+};
+
+const createIncompleteNoActionRepairNotice = (
+  response: unknown,
+  attempt: number,
+) => {
+  const taskProgress = getResponseTaskProgressRecord(response);
+  return [
+    "MangaMaker internal harness notice: your previous response indicated that the creator's task was still incomplete, but it returned requestedToolCalls: [] and pendingCommandPlan: null.",
+    `Repair attempt ${attempt}/${SERVER_AGENT_MAX_INCOMPLETE_NO_ACTION_REPAIRS}.`,
+    `Previous taskProgress.status=${asString(taskProgress.status) || "unknown"}, phase=${asString(taskProgress.phase) || "unknown"}.`,
+    "A no-action response is terminal only when the task is actually complete or explicitly blocked.",
+    "If more work is needed, request the exact next harness tool call now.",
+    "If the task is complete, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status=\"completed\", taskProgress.phase=\"complete\", and a concrete stopReason.",
+    "If you cannot continue safely, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status=\"blocked\", taskProgress.phase=\"blocked\", and a concrete stopReason explaining what is missing.",
+  ].join("\n");
+};
+
+const coerceCompletedTaskProgress = (
+  response: Record<string, unknown>,
+  stopReason: string,
+) => {
+  const current = asRecord(response.taskProgress);
+  const steps = Array.isArray(current.steps) && current.steps.length > 0
+    ? current.steps.map((step) =>
+        step && typeof step === "object" && !Array.isArray(step)
+          ? { ...(step as Record<string, unknown>), status: "completed" }
+          : step,
+      )
+    : [
+        {
+          id: "verified-document-write",
+          title: "Persist Markdown document edit",
+          status: "completed",
+        },
+      ];
+  return {
+    objective: asString(current.objective) || "Complete the creator's document task.",
+    phase: "complete",
+    status: "completed",
+    steps,
+    currentStepId: asString(current.currentStepId) || "verified-document-write",
+    stopCondition: asString(current.stopCondition) || "Stop after the requested document edit is verified.",
+    stopReason,
+    percent: 100,
+  };
+};
+
 
 const getHarnessToolResults = (harness: AgentChatPayload["harness"]) => [
   ...(harness?.initialToolResults ?? []),
@@ -3655,13 +4901,11 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   const harnessResults = getHarnessToolResults(payload.harness);
   const hasDocumentList = harnessResults.some((entry) => entry.toolName === "listDocuments");
   const hasDocumentRead = harnessResults.some((entry) => entry.toolName === "readDocument");
-  const hasDocumentWrite = harnessResults.some((entry) => entry.toolName === "writeDocument");
+  const hasDocumentWrite = harnessResults.some((entry) =>
+    isAgentDocumentMutationToolName(entry.toolName) &&
+    isVerifiedAgentDocumentMutationResult(entry.result)
+  );
   const hasDocumentWriteRequiredNotice = harnessResults.some((entry) => entry.toolName === "documentWriteRequired");
-  const hasSysmlReference = harnessResults.some((entry) => entry.toolName === "readSysmlStandardReference");
-  const hasSysmlStatus = harnessResults.some((entry) => entry.toolName === "getSysmlStatus");
-  const hasSysmlList = harnessResults.some((entry) => entry.toolName === "listSysmlFiles");
-  const hasSysmlWrite = harnessResults.some((entry) => entry.toolName === "writeSysmlFile");
-  const hasSysmlValidation = harnessResults.some((entry) => entry.toolName === "validateSysmlModel");
   const hasMissingDocumentWriteRepairNotice =
     hasDocumentWriteRequiredNotice ||
     normalizedUserHistory.includes("previous response did not execute a verified writedocument") ||
@@ -3699,111 +4943,13 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
             title: "Assistant Metadoc",
             role: "assistant",
             status: "draft",
-            path: "docs/agent/assistant-metadoc.md",
+            path: "docs/roles/Assistant.md",
             summary: "Repaired missing writeDocument call.",
             content: "# Assistant Metadoc\n\n## Repaired Write\n\nThe test Agent repaired a response that claimed a metadoc update without calling writeDocument.\n",
           },
           reason: "Persist the metadoc edit that the previous response claimed without a tool call.",
         },
       ],
-      pendingCommandPlan: null,
-      usedVision: hasVisionInput,
-    };
-  }
-
-  if (normalized.includes("sysml") || normalized.includes("mbse")) {
-    if (!hasSysmlReference) {
-      return {
-        message: "I need to load the relevant SysML v2 harness reference before doing MBSE work.",
-        requestedToolCalls: [
-          {
-            toolName: "readSysmlStandardReference",
-            input: { topic: "pilot-validation-workflow" },
-            reason: "Use the built-in SysML v2/Pilot workflow reference before reading, writing, or validating the model.",
-          },
-        ],
-        pendingCommandPlan: null,
-        usedVision: hasVisionInput,
-      };
-    }
-    if (!hasSysmlStatus) {
-      return {
-        message: "I need to check the SysML v2 Pilot validator status first.",
-        requestedToolCalls: [
-          {
-            toolName: "getSysmlStatus",
-            input: {},
-            reason: "Confirm that the official SysML v2 Pilot validator is configured.",
-          },
-        ],
-        pendingCommandPlan: null,
-        usedVision: hasVisionInput,
-      };
-    }
-    if (!hasSysmlList) {
-      return {
-        message: "I need to list the project SysML model files.",
-        requestedToolCalls: [
-          {
-            toolName: "listSysmlFiles",
-            input: {},
-            reason: "Find project SysML/KerML model files before reading or validating.",
-          },
-        ],
-        pendingCommandPlan: null,
-        usedVision: hasVisionInput,
-      };
-    }
-    if ((normalized.includes("write") || normalized.includes("edit")) && !hasSysmlWrite) {
-      return {
-        message: "I will write a small valid SysML MBSE sample file, then validate the model.",
-        requestedToolCalls: [
-          {
-            toolName: "writeSysmlFile",
-            input: {
-              operationId: "test-agent-write-sysml-mbse-sample",
-              path: "samples/test-agent-mbse.sysml",
-              content: [
-                "package TestAgentMbseSample {",
-                "\tprivate import Parts::*;",
-                "\tprivate import Requirements::*;",
-                "\tprivate import MangaMakerDomain::*;",
-                "",
-                "\tpart testAgentSample: MangaProject {",
-                "\t\tpart page001: ComicPage;",
-                "\t}",
-                "",
-                "\trequirement def TestAgentTraceabilityRequirement :> MangaRequirement;",
-                "}",
-                "",
-              ].join("\n"),
-            },
-            reason: "Persist a bounded SysML MBSE model update.",
-          },
-        ],
-        pendingCommandPlan: null,
-        usedVision: hasVisionInput,
-      };
-    }
-    if (!hasSysmlValidation) {
-      return {
-        message: "I will validate the SysML model with the official Pilot.",
-        requestedToolCalls: [
-          {
-            toolName: "validateSysmlModel",
-            input: {},
-            reason: "Validate the project SysML model after listing or editing.",
-          },
-        ],
-        pendingCommandPlan: null,
-        usedVision: hasVisionInput,
-      };
-    }
-    return {
-      message: hasSysmlWrite
-        ? "I wrote the SysML MBSE model update and ran official Pilot validation."
-        : "I ran official Pilot validation for the project SysML model.",
-      requestedToolCalls: [],
       pendingCommandPlan: null,
       usedVision: hasVisionInput,
     };
@@ -3845,7 +4991,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
               title: "Production Plan",
               role: "producer",
               status: "draft",
-              path: "docs/production/production-plan.md",
+              path: "docs/roles/Producer.md",
               summary: "Updated after visual evidence.",
               content: "# Production Plan\n\n## Visual Evidence Update\n\nThe document edit used a rendered page before writing.\n",
             },
@@ -3915,6 +5061,55 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
+  if (normalized.includes("append document") && !hasDocumentWrite) {
+    return {
+      message: "I will append a durable note to the production plan document.",
+      requestedToolCalls: [
+        {
+          toolName: "appendDocument",
+          input: {
+            operationId: "test-agent-append-production-plan",
+            documentId: "production-plan",
+            heading: "Test Update",
+            content: "The test Agent can append durable Markdown notes without rewriting the full document.",
+          },
+          reason: "Persist an additive document edit with an incremental Markdown tool.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (normalized.includes("write document then keep reading") && !hasDocumentWrite) {
+    return {
+      message: "I will update the production plan document and then try to reread it.",
+      requestedToolCalls: [
+        {
+          toolName: "writeDocument",
+          input: {
+            operationId: "test-agent-write-then-keep-reading",
+            id: "production-plan",
+            title: "Production Plan",
+            role: "producer",
+            status: "draft",
+            path: "docs/roles/Producer.md",
+            summary: "Updated by the test Agent before an unnecessary read.",
+            content: "# Production Plan\n\n## Stop After Write\n\nThe test Agent write should complete the run without another read.\n",
+          },
+          reason: "Persist the document edit.",
+        },
+        {
+          toolName: "readDocument",
+          input: { documentId: "production-plan" },
+          reason: "Unnecessary reread after a verified document write.",
+        },
+      ],
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
   if (normalized.includes("write document") && !hasDocumentWrite) {
     return {
       message: "I will update the production plan document.",
@@ -3927,7 +5122,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
             title: "Production Plan",
             role: "producer",
             status: "draft",
-            path: "docs/production/production-plan.md",
+            path: "docs/roles/Producer.md",
             summary: "Updated by the test Agent.",
             content: "# Production Plan\n\n## Test Update\n\nThe test Agent can write durable Markdown documents.\n",
           },
@@ -3969,7 +5164,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if ((normalized.includes("screenshot tool") || normalized.includes("render page") || latest.includes("截图工具")) && renderedPageResults.length === 0 && pageId) {
+  if ((normalized.includes("screenshot tool") || normalized.includes("render page")) && renderedPageResults.length === 0 && pageId) {
     return {
       message: "I need to inspect the composed page render before answering.",
       requestedToolCalls: [
@@ -3984,7 +5179,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (renderedPageResults.length > 0 && (normalized.includes("screenshot tool") || normalized.includes("render page") || latest.includes("截图工具"))) {
+  if (renderedPageResults.length > 0 && (normalized.includes("screenshot tool") || normalized.includes("render page"))) {
     return {
       message: `I inspected ${renderedPageResults.length} rendered page screenshot(s) and the matching page resources.`,
       pendingCommandPlan: null,
@@ -4012,9 +5207,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
 
   if (
     normalized.includes("title") ||
-    normalized.includes("page count") ||
-    latest.includes("标题") ||
-    latest.includes("页面数量")
+    normalized.includes("page count")
   ) {
     return {
       message: `Project "${context.project?.title ?? "Untitled"}" has ${context.project?.pageCount ?? 0} pages.`,
@@ -4032,7 +5225,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (latest.includes("图片") || normalized.includes("image")) {
+  if (normalized.includes("image")) {
     return {
       message: `I found ${context.imageAssets?.length ?? 0} image assets.`,
       pendingCommandPlan: null,
@@ -4040,8 +5233,25 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (latest.includes("删除") || latest.includes("清空") || normalized.includes("delete") || normalized.includes("clear")) {
-    const targetsPage = latest.includes("页面") || normalized.includes("page");
+  const looksLikePageEditRequest =
+    normalized.includes("delete") ||
+    normalized.includes("clear") ||
+    normalized.includes("save") ||
+    normalized.includes("stroke") ||
+    normalized.includes("text") ||
+    normalized.includes("panel");
+
+  if (looksLikePageEditRequest) {
+    return {
+      message:
+        "Page and canvas edits are disabled for the built-in Agent. I can inspect the page and record proposed changes with Markdown document tools, but I will not execute panel, text, bubble, page, or save commands.",
+      pendingCommandPlan: null,
+      usedVision: hasVisionInput,
+    };
+  }
+
+  if (normalized.includes("delete") || normalized.includes("clear")) {
+    const targetsPage = normalized.includes("page");
     const command =
       targetsPage && pageId
         ? {
@@ -4069,7 +5279,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (latest.includes("保存") || normalized.includes("save")) {
+  if (normalized.includes("save")) {
     return {
       message: "I prepared a save command.",
       pendingCommandPlan: createPlan(
@@ -4081,11 +5291,11 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (latest.includes("描边") || normalized.includes("stroke")) {
+  if (normalized.includes("stroke")) {
     const textId = getSelectedTextId(context);
-    const widthMatch = latest.match(/(?:宽度|width)\s*[:：]?\s*(\d+(?:\.\d+)?)/i) ?? latest.match(/\b(\d+(?:\.\d+)?)\b/);
+    const widthMatch = latest.match(/\b(\d+(?:\.\d+)?)\b/);
     const strokeWidth = widthMatch ? Number(widthMatch[1]) : 4;
-    const strokeColor = latest.includes("红") || normalized.includes("red") ? "#ff0000" : "#111111";
+    const strokeColor = latest.includes("red") || normalized.includes("red") ? "#ff0000" : "#111111";
     return {
       message: textId && pageId ? "I prepared a text stroke update." : "No text object is available for stroke editing.",
       pendingCommandPlan:
@@ -4107,7 +5317,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (normalized.includes("two panels") || latest.includes("两个分镜") || latest.includes("涓や釜鍒嗛暅")) {
+  if (normalized.includes("two panels")) {
     return {
       message: pageId ? "I prepared two panel creation commands." : "No page is available for panel creation.",
       pendingCommandPlan:
@@ -4135,9 +5345,9 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (latest.includes("文字") || latest.includes("文本") || normalized.includes("text")) {
-    const contentMatch = latest.match(/(?:文字|文本|text)\s*[:：]\s*(.+)$/i);
-    const content = contentMatch?.[1]?.trim() || "你好";
+  if (normalized.includes("text")) {
+    const contentMatch = latest.match(/(?:text)\s*[:=]\s*(.+)$/i);
+    const content = contentMatch?.[1]?.trim() || "Sample text";
     return {
       message: pageId ? "I prepared a text creation command." : "No page is available for text creation.",
       pendingCommandPlan:
@@ -4159,7 +5369,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
     };
   }
 
-  if (latest.includes("分镜") || latest.includes("面板") || normalized.includes("panel")) {
+  if (normalized.includes("panel")) {
     return {
       message: pageId ? "I prepared a panel creation command." : "No page is available for panel creation.",
       pendingCommandPlan:
@@ -4182,7 +5392,7 @@ const createTestAgentResponse = (payload: AgentChatPayload) => {
   }
 
   return {
-    message: "I can search the project, read pages on demand, render pages when visual inspection is needed, and prepare command-based edits.",
+    message: "I can search the project, read pages on demand, render pages when visual inspection is needed, and update Markdown documents.",
     pendingCommandPlan: null,
     usedVision: hasVisionInput,
   };
@@ -4236,7 +5446,7 @@ const compactMessagesForOpenRouter = (
   budget: AgentPromptBudget,
 ) => {
   const source = normalizeAgentPayloadMessages(messages);
-  const maxConversationChars = Math.floor(budget.promptCharBudget * 0.45);
+  const maxConversationChars = Math.floor(budget.promptCharBudget * 0.12);
   const result: Array<{ role: "user" | "assistant"; content: string }> = [];
   let usedChars = 0;
   for (let index = source.length - 1; index >= 0; index -= 1) {
@@ -4269,10 +5479,13 @@ const buildOpenRouterMessages = (
   payload: AgentChatPayload,
   includeImage: boolean,
   budget: AgentPromptBudget,
+  modelCapability: AgentModelCapability,
 ) => {
   const systemPrompt = [
-    normalizeAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT),
-    AGENT_PROTOCOL_SYSTEM_PROMPT,
+    modelCapability === "metadoc"
+      ? normalizeMetadocOnlyAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT)
+      : normalizeAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT),
+    modelCapability === "metadoc" ? AGENT_METADOC_ONLY_PROTOCOL_SYSTEM_PROMPT : AGENT_PROTOCOL_SYSTEM_PROMPT,
     payload.finalAnswerOnly
       ? [
           "FINAL ANSWER ONLY MODE.",
@@ -4287,13 +5500,31 @@ const buildOpenRouterMessages = (
   const activeRole = payload.activeRole
     ? agentRoleDefinitionSchema.parse(payload.activeRole)
     : getAgentRole(payload.activeRoleId);
+  const currentTask = compileAgentCurrentTaskPacket({
+    messages: payload.messages ?? [],
+    currentTask: payload.currentTask,
+    currentTaskPin: payload.currentTaskPin,
+    activeRole: {
+      id: activeRole.id,
+      name: activeRole.name,
+      metadocId: activeRole.metadocId,
+      ...(activeRole.workingDirectory ? { workingDirectory: activeRole.workingDirectory } : {}),
+    },
+    activeDocumentId: payload.activeDocumentId ?? null,
+    harness: payload.harness,
+  });
   const contextText = [
-    `Active Agent role: ${activeRole.name} (${activeRole.title})`,
+    `Active Agent role: ${activeRole.name}`,
     `Active role metadoc id: ${activeRole.metadocId}`,
+    `Active role prompt source: use the preloaded readActiveRoleMetadoc document content as the role prompt.`,
+    "Active role metadoc purpose: role prompt and role definition only; do not store production output there or mutate it through Agent document tools.",
+    `Active role working directory: ${getAgentRoleWorkingDirectory(activeRole)}`,
+    "Pinned context priority: system prompt, Current Task Packet, PrimeDirective.md, and active role metadoc. Conversation messages, ordinary documents, page reads, renders, and tool results are evictable working context.",
+    "Current Task Packet is authoritative for the latest creator request. Older conversation messages are reference only and must not override latestCreatorInstruction.",
+    `Current Task Packet JSON:\n${JSON.stringify(currentTask, null, 2)}`,
     `Role default autonomy: ${activeRole.defaultAutonomy}`,
-    `Role instruction: ${activeRole.prompt}`,
     `Active document id: ${payload.activeDocumentId ?? "none"}`,
-    `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext, budget), null, 2)}${harnessText}`,
+    `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext, budget, modelCapability), null, 2)}${harnessText}`,
   ].join("\n\n");
   const imageAttachments = getHarnessImageAttachments(payload.harness);
   const contextContent =
@@ -4350,13 +5581,201 @@ const isRetryableOpenRouterError = (error: unknown) => {
   );
 };
 
+const readOpenRouterStreamTextPart = (value: unknown): string => {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(readOpenRouterStreamTextPart).join("");
+  }
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return "";
+  }
+  if ("message" in record || "pendingCommandPlan" in record || "requestedToolCalls" in record) {
+    return JSON.stringify(record);
+  }
+  return (
+    asString(record.text) ||
+    asString(record.content) ||
+    asString(record.output_text) ||
+    asString(record.input_text)
+  );
+};
+
+const readOpenRouterStreamErrorMessage = (value: unknown): string | null => {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return null;
+  }
+  return (
+    asString(record.message) ||
+    asString(record.error) ||
+    asString(record.reason) ||
+    JSON.stringify(record).slice(0, 500)
+  );
+};
+
+const aggregateOpenRouterStreamChunk = (
+  chunk: unknown,
+  aggregate: {
+    id?: string;
+    model?: string;
+    contentParts: string[];
+    reasoningParts: string[];
+    finishReason: string;
+    usage: unknown;
+  },
+) => {
+  const record = asRecord(chunk);
+  const topLevelError = readOpenRouterStreamErrorMessage(record.error);
+  if (topLevelError) {
+    throw new OpenRouterRetryableError(`OpenRouter stream returned an error object: ${topLevelError}`);
+  }
+  if (typeof record.id === "string") {
+    aggregate.id = record.id;
+  }
+  if (typeof record.model === "string") {
+    aggregate.model = record.model;
+  }
+  if (record.usage) {
+    aggregate.usage = record.usage;
+  }
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const choice = asRecord(choices[0]);
+  const choiceError = readOpenRouterStreamErrorMessage(choice.error);
+  if (choiceError) {
+    throw new OpenRouterRetryableError(`OpenRouter stream choice returned an error object: ${choiceError}`);
+  }
+  const delta = asRecord(choice.delta);
+  const message = asRecord(choice.message);
+  const content =
+    readOpenRouterStreamTextPart(delta.content) ||
+    readOpenRouterStreamTextPart(delta.parsed) ||
+    readOpenRouterStreamTextPart(message.content) ||
+    readOpenRouterStreamTextPart(message.parsed);
+  if (content) {
+    aggregate.contentParts.push(content);
+  }
+  const reasoning =
+    asString(delta.reasoning) ||
+    asString(delta.reasoning_content) ||
+    asString(message.reasoning) ||
+    asString(message.reasoning_content);
+  if (reasoning) {
+    aggregate.reasoningParts.push(reasoning);
+  }
+  const finishReason = asString(choice.finish_reason) || asString(choice.native_finish_reason);
+  if (finishReason) {
+    aggregate.finishReason = finishReason;
+  }
+};
+
+const readOpenRouterStreamBody = async (
+  response: Awaited<ReturnType<typeof fetch>>,
+) => {
+  if (!response.body) {
+    throw new OpenRouterRetryableError("OpenRouter streaming response did not include a readable body.");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventCount = 0;
+  let firstChunkAt: string | null = null;
+  let lastChunkAt: string | null = null;
+  let done = false;
+  const aggregate = {
+    id: undefined as string | undefined,
+    model: undefined as string | undefined,
+    contentParts: [] as string[],
+    reasoningParts: [] as string[],
+    finishReason: "unknown",
+    usage: undefined as unknown,
+  };
+  const processLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(":") || !trimmed.startsWith("data:")) {
+      return;
+    }
+    const data = trimmed.slice("data:".length).trim();
+    if (!data) {
+      return;
+    }
+    if (data === "[DONE]") {
+      done = true;
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new OpenRouterRetryableError(`OpenRouter stream returned invalid JSON chunk: ${message}`);
+    }
+    eventCount += 1;
+    const now = new Date().toISOString();
+    firstChunkAt ??= now;
+    lastChunkAt = now;
+    aggregateOpenRouterStreamChunk(parsed, aggregate);
+  };
+  while (!done) {
+    const read = await reader.read();
+    if (read.done) {
+      break;
+    }
+    buffer += decoder.decode(read.value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      processLine(line);
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    processLine(buffer);
+  }
+  const content = aggregate.contentParts.join("");
+  const reasoning = aggregate.reasoningParts.join("");
+  const parsedResponse = {
+    ...(aggregate.id ? { id: aggregate.id } : {}),
+    object: "chat.completion",
+    ...(aggregate.model ? { model: aggregate.model } : {}),
+    choices: [
+      {
+        index: 0,
+        finish_reason: aggregate.finishReason,
+        native_finish_reason: aggregate.finishReason,
+        message: {
+          role: "assistant",
+          content,
+          ...(reasoning ? { reasoning } : {}),
+        },
+      },
+    ],
+    ...(aggregate.usage ? { usage: aggregate.usage } : {}),
+  };
+  return {
+    raw: `${JSON.stringify(parsedResponse)}\n`,
+    eventCount,
+    firstChunkAt,
+    lastChunkAt,
+    contentLength: content.length,
+    reasoningLength: reasoning.length,
+    finishReason: aggregate.finishReason,
+    done,
+  };
+};
+
 const callOpenRouter = async (
   payload: AgentChatPayload,
   includeImage: boolean,
   requestTrace: AgentRequestTrace,
 ): Promise<{ response: unknown; requestTrace: AgentRequestTrace }> => {
   let trace = requestTrace;
-  const config = await getCurrentAgentConfig();
+  const config = await getCurrentAgentConfig(payload.modelOverride);
   if (!config.enabled || config.provider !== "openrouter" || !config.model) {
     throw new Error(config.reason ?? "Agent is not configured.");
   }
@@ -4373,6 +5792,7 @@ const callOpenRouter = async (
     usedVision: includeImage,
     detail: {
       visionEnabled: config.visionEnabled,
+      modelCapability: config.modelCapability,
       includeImage,
       timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
       maxTokens: OPENROUTER_MAX_TOKENS,
@@ -4408,6 +5828,7 @@ const callOpenRouter = async (
           model: config.model,
           providerRouting: provider,
           includeImage,
+          modelCapability: config.modelCapability,
           imageAttachmentCount: getHarnessImageDataUrls(payload.harness).length,
           messageCount: payload.messages?.length ?? 0,
           initialToolResults: payload.harness?.initialToolResults?.length ?? 0,
@@ -4438,7 +5859,9 @@ const callOpenRouter = async (
           max_tokens: OPENROUTER_MAX_TOKENS,
           reasoning: createOpenRouterReasoningConfig(reasoningMaxTokens),
           response_format: { type: "json_object" },
-          messages: buildOpenRouterMessages(payload, includeImage, promptBudget),
+          stream: true,
+          stream_options: { include_usage: true },
+          messages: buildOpenRouterMessages(payload, includeImage, promptBudget, config.modelCapability ?? "multimodal"),
         }),
         signal: controller.signal,
       });
@@ -4453,12 +5876,33 @@ const callOpenRouter = async (
             response.headers.get("cf-ray"),
         },
       });
-      raw = await response.text();
+      const contentType = response.headers.get("content-type") ?? "";
+      if (response.ok && contentType.toLowerCase().includes("text/event-stream")) {
+        const streamed = await readOpenRouterStreamBody(response);
+        raw = streamed.raw;
+        trace = recordAgentTraceEvent(trace, "openrouter_stream_body_received", {
+          detail: {
+            status: response.status,
+            ok: response.ok,
+            eventCount: streamed.eventCount,
+            firstChunkAt: streamed.firstChunkAt,
+            lastChunkAt: streamed.lastChunkAt,
+            contentLength: streamed.contentLength,
+            reasoningLength: streamed.reasoningLength,
+            finishReason: streamed.finishReason,
+            done: streamed.done,
+            bodyLength: raw.length,
+          },
+        });
+      } else {
+        raw = await response.text();
+      }
       trace = recordAgentTraceEvent(trace, "openrouter_body_received", {
         detail: {
           status: response.status,
           ok: response.ok,
           bodyLength: raw.length,
+          streamed: response.ok && contentType.toLowerCase().includes("text/event-stream"),
         },
       });
     } catch (error) {
@@ -4698,7 +6142,7 @@ const executeAgentModelRequest = async (
     };
   }
 
-  const config = await getCurrentAgentConfig();
+  const config = await getCurrentAgentConfig(payload.modelOverride);
   if (!config.enabled) {
     const message = config.reason ?? "Agent is not configured.";
     trace = recordAgentTraceEvent(trace, "agent_config_unavailable", {
@@ -4710,7 +6154,21 @@ const executeAgentModelRequest = async (
     });
     return {
       response: attachTraceToResponse(
-        { message: "Agent unavailable.", error: message, pendingCommandPlan: null },
+        {
+          message: "Agent unavailable.",
+          error: message,
+          pendingCommandPlan: null,
+          taskProgress: {
+            objective: "Start MangaMaker Agent.",
+            phase: "blocked",
+            status: "blocked",
+            steps: [{ id: "configure-agent", title: "Configure Agent backend", status: "blocked" }],
+            currentStepId: "configure-agent",
+            stopCondition: "Stop until a usable Agent backend is configured.",
+            stopReason: message,
+            percent: 0,
+          },
+        },
         trace,
       ),
       requestTrace: trace,
@@ -4760,7 +6218,9 @@ const startAgentRunModelStep = (
     run.steps.push(step);
     run.status = "running";
     run.pendingToolCalls = [];
-    await saveAndBroadcastAgentRun(run);
+    if (!(await saveAndBroadcastAgentRun(run))) {
+      return;
+    }
 
     let trace = recordAgentTraceEvent(
       createAgentRequestTrace({
@@ -4794,7 +6254,7 @@ const startAgentRunModelStep = (
 
     try {
       const result = await executeAgentModelRequest(run.payload, trace, loadAgentSchema);
-      if (isCancelledAgentRun(run)) {
+      if (isCancelledAgentRun(run) || !isActiveAgentRunStateObject(run)) {
         return;
       }
       trace = result.requestTrace;
@@ -4869,9 +6329,9 @@ const startAgentRunModelStep = (
       const requestedToolCalls = Array.isArray(response.requestedToolCalls)
         ? response.requestedToolCalls
         : [];
+      const hasNoRequestedAction = requestedToolCalls.length === 0 && !response.pendingCommandPlan;
       if (
-        requestedToolCalls.length === 0 &&
-        !response.pendingCommandPlan &&
+        hasNoRequestedAction &&
         !hasVerifiedDocumentWriteResult(run.dynamicToolResults) &&
         messageIndicatesDocumentWriteIntent((response as { message?: unknown }).message)
       ) {
@@ -4884,7 +6344,7 @@ const startAgentRunModelStep = (
             ...createAgentRunStep(
               run.id,
               "retry",
-              "Model claimed a document write without writeDocument; requesting repair",
+              "Model claimed a document write without a document mutation tool; requesting repair",
               "success",
               {
                 reason: "document_write_intent_without_writeDocument",
@@ -4908,7 +6368,7 @@ const startAgentRunModelStep = (
           return;
         }
         const message =
-          "The model claimed or planned a document/metadoc write but did not call writeDocument after repair. No document was changed.";
+          "The model claimed or planned a document/metadoc write but did not call a document mutation tool after repair. No document was changed.";
         run.pendingToolCalls = [];
         run.status = "failed";
         run.error = message;
@@ -4929,6 +6389,63 @@ const startAgentRunModelStep = (
         await saveAndBroadcastAgentRun(run);
         return;
       }
+      if (hasNoRequestedAction && responseIndicatesIncompleteNoAction(response)) {
+        const nextRepairCount = (run.incompleteNoActionRepairCount ?? 0) + 1;
+        if (nextRepairCount <= SERVER_AGENT_MAX_INCOMPLETE_NO_ACTION_REPAIRS) {
+          run.incompleteNoActionRepairCount = nextRepairCount;
+          run.pendingToolCalls = [];
+          run.status = "running";
+          run.steps.push({
+            ...createAgentRunStep(
+              run.id,
+              "retry",
+              "Model returned no action while taskProgress was incomplete; requesting repair",
+              "success",
+              {
+                reason: "incomplete_task_without_tool_or_terminal_status",
+                repairAttempt: nextRepairCount,
+                maxRepairAttempts: SERVER_AGENT_MAX_INCOMPLETE_NO_ACTION_REPAIRS,
+              },
+            ),
+            finishedAt: new Date().toISOString(),
+          });
+          run.payload = {
+            ...run.payload,
+            messages: [
+              ...(run.payload.messages ?? []).filter(
+                (message) => !isAgentHarnessDiagnosticMessage(String(message.content ?? "")),
+              ),
+              { role: "user" as const, content: createIncompleteNoActionRepairNotice(response, nextRepairCount) },
+            ],
+            harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults),
+            finalAnswerOnly: false,
+          };
+          await saveAndBroadcastAgentRun(run);
+          startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);
+          return;
+        }
+        const message =
+          "The model reported that the task was incomplete but did not request a tool, return a command plan, or mark the task as blocked/completed after repair.";
+        run.pendingToolCalls = [];
+        run.status = "failed";
+        run.error = message;
+        run.latestResponse = {
+          ...response,
+          requestedToolCalls: [],
+          warning: message,
+          error: message,
+        };
+        run.steps.push({
+          ...createAgentRunStep(run.id, "error", message, "error", {
+            reason: "incomplete_task_without_tool_or_terminal_status",
+            repairAttempts: run.incompleteNoActionRepairCount ?? 0,
+          }),
+          finishedAt: new Date().toISOString(),
+          error: message,
+        });
+        await saveAndBroadcastAgentRun(run);
+        return;
+      }
       if (requestedToolCalls.length > 0) {
         const toolExecution = await executeServerAgentToolCalls(run, requestedToolCalls);
         const duplicateLoopPauseReason =
@@ -4938,6 +6455,9 @@ const startAgentRunModelStep = (
         run.duplicateToolCallStreak = duplicateToolCallStreak;
         if (toolExecution.toolResults.length > 0) {
           const now = new Date().toISOString();
+          const verifiedWriteNotice = hasVerifiedDocumentWriteResult(toolExecution.toolResults)
+            ? createVerifiedDocumentWriteProgressNotice(getVerifiedDocumentWriteResults(toolExecution.toolResults))
+            : null;
           run.steps.push({
             ...createAgentRunStep(
               run.id,
@@ -4951,6 +6471,16 @@ const startAgentRunModelStep = (
           run.dynamicToolResults = mergeAgentToolResults(run.dynamicToolResults, toolExecution.toolResults);
           run.payload = {
             ...run.payload,
+            ...(verifiedWriteNotice
+              ? {
+                  messages: [
+                    ...(run.payload.messages ?? []).filter(
+                      (message) => !isAgentHarnessDiagnosticMessage(String(message.content ?? "")),
+                    ),
+                    { role: "user" as const, content: verifiedWriteNotice },
+                  ],
+                }
+              : {}),
             harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults),
           };
           run.serverToolCallCount = (run.serverToolCallCount ?? 0) + toolExecution.executedToolCallCount;
@@ -5053,7 +6583,26 @@ const startAgentRunModelStep = (
         });
       } else {
         run.pendingToolCalls = [];
-        run.status = "completed";
+        if (responseHasTerminalBlockedProgress(response)) {
+          const message = getResponseStopReason(response);
+          run.status = "failed";
+          run.error = message;
+          run.latestResponse = {
+            ...response,
+            requestedToolCalls: [],
+            warning: message,
+            error: message,
+          };
+          run.steps.push({
+            ...createAgentRunStep(run.id, "error", message, "error", {
+              reason: "model_reported_blocked",
+            }),
+            finishedAt: new Date().toISOString(),
+            error: message,
+          });
+        } else {
+          run.status = "completed";
+        }
       }
       await saveAndBroadcastAgentRun(run);
     } catch (error) {
@@ -5253,6 +6802,45 @@ const attachWebAgentMiddleware = (
         json(res, 200, await deleteAgentDocumentFile(projectId, documentId));
         return;
       }
+      if (method === "POST" && pathname === `${AGENT_API_BASE}/working-directory`) {
+        const body = await readJsonBody<{
+          projectId?: unknown;
+          directoryPath?: unknown;
+          nextDirectoryPath?: unknown;
+        }>(req);
+        if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
+          json(res, 400, { error: "projectId is required." });
+          return;
+        }
+        if (typeof body.directoryPath !== "string" || body.directoryPath.trim().length === 0) {
+          json(res, 400, { error: "directoryPath is required." });
+          return;
+        }
+        if (typeof body.nextDirectoryPath !== "string" || body.nextDirectoryPath.trim().length === 0) {
+          json(res, 400, { error: "nextDirectoryPath is required." });
+          return;
+        }
+        json(
+          res,
+          200,
+          await renameAgentWorkingDirectory(
+            body.projectId.trim(),
+            body.directoryPath.trim(),
+            body.nextDirectoryPath.trim(),
+          ),
+        );
+        return;
+      }
+      if (method === "DELETE" && pathname === `${AGENT_API_BASE}/working-directory`) {
+        const projectId = url.searchParams.get("projectId")?.trim();
+        const directoryPath = url.searchParams.get("directoryPath")?.trim();
+        if (!projectId || !directoryPath) {
+          json(res, 400, { error: "projectId and directoryPath query parameters are required." });
+          return;
+        }
+        json(res, 200, await deleteAgentWorkingDirectory(projectId, directoryPath));
+        return;
+      }
       if (method === "POST" && pathname === `${AGENT_API_BASE}/role`) {
         const body = await readJsonBody<{ projectId?: unknown; role?: unknown }>(req);
         if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
@@ -5344,8 +6932,12 @@ const attachWebAgentMiddleware = (
           typeof payload.activeRoleId === "string" && payload.activeRoleId.trim().length > 0
             ? payload.activeRoleId.trim()
             : DEFAULT_AGENT_CONVERSATION_ROLE_ID;
+        const runId = createAgentRunId(roleId);
+        supersededAgentRunKeys.delete(createAgentRunStorageKey(projectId, runId));
+        await cleanupSupersededAgentRunsForRole(projectId, roleId, runId);
         const run: AgentRunState = {
-          id: createAgentRunId(),
+          id: runId,
+          runInstanceId: createAgentRunInstanceId(),
           projectId,
           roleId,
           ...(payload.conversationContextId ? { conversationContextId: payload.conversationContextId } : {}),
@@ -5366,6 +6958,7 @@ const attachWebAgentMiddleware = (
             createdAt: entry.createdAt ?? now,
           })),
         };
+        agentRunStates.set(run.id, run);
         await saveAndBroadcastAgentRun(run, "run_snapshot");
         startAgentRunModelStep(run.id, "model_request", loadAgentSchema);
         json(res, 202, toPublicAgentRun(run));
@@ -5568,7 +7161,7 @@ const attachWebAgentMiddleware = (
               status === "success"
                 ? `Executed command plan: ${commandIds.join(", ") || "no commands reported"}`
                 : status === "no_change"
-                  ? "计划执行了但项目状态没有变化。"
+                  ? "Command plan executed but project state did not change."
                   : `Command plan execution failed: ${typeof body.error === "string" ? body.error : "Unknown error"}`,
               status,
               {
@@ -5636,143 +7229,11 @@ const attachWebAgentMiddleware = (
   middlewares.use(handler);
 };
 
-const getRequiredProjectId = (url: URL) => {
-  const projectId = url.searchParams.get("projectId")?.trim();
-  if (!projectId) {
-    throw new Error("projectId query parameter is required.");
-  }
-  return projectId;
-};
-
-const readSysmlFileRequestBody = async (req: IncomingMessage) => {
-  const body = await readJsonBody<{
-    projectId?: unknown;
-    path?: unknown;
-    content?: unknown;
-    operationId?: unknown;
-  }>(req);
-  if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
-    throw new Error("projectId is required.");
-  }
-  if (typeof body.path !== "string" || body.path.trim().length === 0) {
-    throw new Error("path is required.");
-  }
-  return {
-    projectId: body.projectId.trim(),
-    path: body.path.trim(),
-    content: typeof body.content === "string" ? body.content : "",
-    operationId: typeof body.operationId === "string" ? body.operationId.trim() : undefined,
-  };
-};
-
-const attachWebSysmlMiddleware = (
-  middlewares: { use: (handler: (req: IncomingMessage, res: ServerResponse, next: () => void) => void) => void },
-) => {
-  const handler = async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
-    const method = req.method?.toUpperCase() ?? "GET";
-    const host = req.headers.host;
-    const url = new URL(req.url ?? "/", host ? `http://${host}` : "http://localhost");
-    const pathname = url.pathname;
-
-    if (!pathname.startsWith(SYSML_API_BASE)) {
-      next();
-      return;
-    }
-
-    try {
-      if (method === "GET" && pathname === `${SYSML_API_BASE}/config`) {
-        json(res, 200, toPublicSysmlConfig(resolveSysmlPilotRuntimeConfig()));
-        return;
-      }
-
-      if (method === "POST" && pathname === `${SYSML_API_BASE}/init`) {
-        const body = await readJsonBody<{ projectId?: unknown }>(req);
-        if (typeof body.projectId !== "string" || body.projectId.trim().length === 0) {
-          json(res, 400, { error: "projectId is required." });
-          return;
-        }
-        json(res, 200, await ensureSysmlRepository(body.projectId.trim()));
-        return;
-      }
-
-      if (method === "GET" && pathname === `${SYSML_API_BASE}/files`) {
-        const projectId = getRequiredProjectId(url);
-        const shouldInitialize = url.searchParams.get("init") !== "0";
-        json(res, 200, shouldInitialize ? await ensureSysmlRepository(projectId) : await listSysmlFiles(projectId));
-        return;
-      }
-
-      if (method === "GET" && pathname === `${SYSML_API_BASE}/file`) {
-        const projectId = getRequiredProjectId(url);
-        const filePath = url.searchParams.get("path")?.trim();
-        if (!filePath) {
-          json(res, 400, { error: "path query parameter is required." });
-          return;
-        }
-        json(res, 200, await readSysmlFile(projectId, filePath));
-        return;
-      }
-
-      if (method === "POST" && pathname === `${SYSML_API_BASE}/file`) {
-        const body = await readSysmlFileRequestBody(req);
-        json(res, 200, await writeSysmlFile(body.projectId, body));
-        return;
-      }
-
-      if (method === "DELETE" && pathname === `${SYSML_API_BASE}/file`) {
-        const projectId = getRequiredProjectId(url);
-        const filePath = url.searchParams.get("path")?.trim();
-        if (!filePath) {
-          json(res, 400, { error: "path query parameter is required." });
-          return;
-        }
-        json(res, 200, await deleteSysmlFile(projectId, filePath));
-        return;
-      }
-
-      if (method === "POST" && pathname === `${SYSML_API_BASE}/validate`) {
-        const body = await readJsonBody<{
-          projectId?: unknown;
-          files?: unknown;
-        }>(req);
-        const projectId = typeof body.projectId === "string" ? body.projectId.trim() : "";
-        if (!projectId) {
-          json(res, 400, { error: "projectId is required." });
-          return;
-        }
-        const files: SysmlValidationFileInput[] = Array.isArray(body.files)
-          ? body.files
-              .map((entry): SysmlValidationFileInput | null => {
-                if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-                  return null;
-                }
-                const record = entry as Record<string, unknown>;
-                return typeof record.path === "string" && typeof record.content === "string"
-                  ? { path: record.path, content: record.content }
-                  : null;
-              })
-              .filter((entry): entry is SysmlValidationFileInput => entry !== null)
-          : await readAllSysmlValidationFiles(projectId);
-        json(res, 200, await validateSysmlWithPilot(files));
-        return;
-      }
-
-      text(res, 404, "Not Found");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      json(res, 500, { error: message });
-    }
-  };
-
-  middlewares.use(handler);
-};
-
 const requestExpectsJson = (req: IncomingMessage, pathname: string) => {
   const accept = String(req.headers.accept ?? "").toLowerCase();
   const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
   return pathname.startsWith(API_BASE) ||
     pathname.startsWith(AGENT_API_BASE) ||
-    pathname.startsWith(SYSML_API_BASE) ||
     accept.includes("application/json") ||
     contentType.includes("application/json");
 };
@@ -5872,7 +7333,7 @@ const renderPasswordLoginPage = (nextPath: string, errorMessage?: string | null)
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MangaMaker 登录</title>
+    <title>MangaMaker 闂備浇鐨崱鈺佹缂?/title>
     <style>
       :root {
         color-scheme: light;
@@ -5943,13 +7404,13 @@ const renderPasswordLoginPage = (nextPath: string, errorMessage?: string | null)
   <body>
     <main class="auth-card">
       <h1>MangaMaker</h1>
-      <p>请输入访问密码</p>
+      <p>闂佽崵濮村ú銊╁蓟婢跺本顐芥い鎾卞灩缁€鍌炴煏婢舵鍘涢柛鐔风箻濮婂宕掗妶鍛亪闂佷紮闄勯崹鍧楀箚?/p>
       ${errorBlock}
       <form method="post" action="${AUTH_LOGIN_PATH}">
         <input type="hidden" name="next" value="${escapedNext}" />
-        <label for="password">密码</label>
+        <label for="password">闂佽閰ｅ褍螞濞戙垺鍋?/label>
         <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
-        <button type="submit">登录</button>
+        <button type="submit">闂備浇鐨崱鈺佹缂?/button>
       </form>
     </main>
   </body>
@@ -6076,7 +7537,7 @@ const attachWebAuthMiddleware = (
         json(res, 401, { error: "Invalid password" });
         return;
       }
-      text(res, 401, renderPasswordLoginPage(nextPath, "密码错误，请重试。"));
+      text(res, 401, renderPasswordLoginPage(nextPath, "Invalid password, try again."));
       return;
     }
 
@@ -6333,18 +7794,8 @@ const webAgentPlugin = () => ({
   },
 });
 
-const webSysmlPlugin = () => ({
-  name: "mangamaker-sysml-pilot",
-  configureServer(server: ViteDevServer) {
-    attachWebSysmlMiddleware(server.middlewares);
-  },
-  configurePreviewServer(server: PreviewServer) {
-    attachWebSysmlMiddleware(server.middlewares);
-  },
-});
-
 export default defineConfig({
-  plugins: [react(), webAuthPlugin(), webSysmlPlugin(), webAgentPlugin(), webPersistencePlugin()],
+  plugins: [react(), webAuthPlugin(), webAgentPlugin(), webPersistencePlugin()],
   server: {
     allowedHosts: ALLOWED_HOSTS,
   },

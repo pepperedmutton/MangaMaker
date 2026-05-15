@@ -1,3 +1,8 @@
+import {
+  isAgentDocumentMutationToolName,
+  isVerifiedAgentDocumentMutationResult,
+} from "./documentEditTools";
+
 export type AgentToolCallLike = {
   toolName: string;
   input: unknown;
@@ -63,10 +68,17 @@ const hashString = (value: string) => {
 
 const hashStableValue = (value: unknown) => hashString(stableStringify(value));
 
-const createWriteDocumentKeyPayload = (input: unknown) => {
+const createDocumentMutationKeyPayload = (input: unknown) => {
   const record = readRecord(input);
-  const content = typeof record.content === "string" ? record.content : "";
+  const redactString = (key: string) => {
+    const content = typeof record[key] === "string" ? record[key] : "";
+    return {
+      [`${key}Hash`]: hashString(content),
+      [`${key}Length`]: content.length,
+    };
+  };
   return {
+    documentId: typeof record.documentId === "string" ? record.documentId : "",
     id: typeof record.id === "string" ? record.id : "",
     title: typeof record.title === "string" ? record.title : "",
     role: typeof record.role === "string" ? record.role : "",
@@ -76,21 +88,48 @@ const createWriteDocumentKeyPayload = (input: unknown) => {
       ? record.relatedPageIds.filter((entry): entry is string => typeof entry === "string")
       : [],
     summary: typeof record.summary === "string" ? record.summary : "",
-    contentHash: hashString(content),
-    contentLength: content.length,
+    heading: typeof record.heading === "string" ? record.heading : "",
+    headingLevel: typeof record.headingLevel === "number" ? record.headingLevel : null,
+    occurrence: typeof record.occurrence === "number" ? record.occurrence : null,
+    createIfMissing: typeof record.createIfMissing === "boolean" ? record.createIfMissing : null,
+    contentIncludesHeading: typeof record.contentIncludesHeading === "boolean" ? record.contentIncludesHeading : null,
+    replaceAll: typeof record.replaceAll === "boolean" ? record.replaceAll : null,
+    operations: Array.isArray(record.operations)
+      ? record.operations.map((operation) => {
+          const operationRecord = readRecord(operation);
+          const content = typeof operationRecord.content === "string" ? operationRecord.content : "";
+          return {
+            type: typeof operationRecord.type === "string" ? operationRecord.type : "",
+            startLine: typeof operationRecord.startLine === "number" ? operationRecord.startLine : null,
+            endLine: typeof operationRecord.endLine === "number" ? operationRecord.endLine : null,
+            line: typeof operationRecord.line === "number" ? operationRecord.line : null,
+            contentHash: hashString(content),
+            contentLength: content.length,
+          };
+        })
+      : [],
+    ...redactString("content"),
+    ...redactString("oldText"),
+    ...redactString("newText"),
   };
 };
 
 const summarizeToolInputForIndex = (toolName: string, input: unknown) => {
-  if (toolName !== "writeDocument") {
+  if (!isAgentDocumentMutationToolName(toolName)) {
     return input;
   }
   const record = readRecord(input);
-  const content = typeof record.content === "string" ? record.content : "";
   return {
     ...record,
-    content: `[redacted:${content.length}]`,
-    contentHash: hashString(content),
+    ...(typeof record.content === "string"
+      ? { content: `[redacted:${record.content.length}]`, contentHash: hashString(record.content) }
+      : {}),
+    ...(typeof record.oldText === "string"
+      ? { oldText: `[redacted:${record.oldText.length}]`, oldTextHash: hashString(record.oldText) }
+      : {}),
+    ...(typeof record.newText === "string"
+      ? { newText: `[redacted:${record.newText.length}]`, newTextHash: hashString(record.newText) }
+      : {}),
   };
 };
 
@@ -109,16 +148,57 @@ const PROJECT_STATE_SENSITIVE_TOOLS = new Set([
   "proposeCommandPlan",
 ]);
 
+const DOCUMENT_READ_TOOLS = new Set([
+  "readDocument",
+  "readDocumentLines",
+  "readPrimeDirective",
+  "readActiveRoleMetadoc",
+]);
+
+const PINNED_CONTEXT_RESULT_TOOLS = new Set([
+  "readPrimeDirective",
+  "readActiveRoleMetadoc",
+]);
+
 const isProjectStateSensitiveTool = (toolName: string) => PROJECT_STATE_SENSITIVE_TOOLS.has(toolName);
 const isToolBudgetResult = (result: AgentHarnessToolResultLike) => result.toolName === "toolBudget";
 const isToolCallSkippedResult = (result: AgentHarnessToolResultLike) => result.toolName === "toolCallSkipped";
+const isDocumentReadTool = (toolName: string) => DOCUMENT_READ_TOOLS.has(toolName);
+
+const readDocumentIdFromValue = (value: unknown): string | null => {
+  const record = readRecord(value);
+  const directDocumentId = record.documentId;
+  if (typeof directDocumentId === "string" && directDocumentId.trim().length > 0) {
+    return directDocumentId.trim();
+  }
+  const directId = record.id;
+  if (typeof directId === "string" && directId.trim().length > 0) {
+    return directId.trim();
+  }
+  const document = readRecord(record.document);
+  const nestedId = document.id;
+  return typeof nestedId === "string" && nestedId.trim().length > 0 ? nestedId.trim() : null;
+};
+
+const documentIdsMatch = (left: string | null, right: string | null) =>
+  Boolean(left && right && left === right);
+
+const readResultDocumentId = (result: AgentHarnessToolResultLike) =>
+  readDocumentIdFromValue(result.result) ?? readDocumentIdFromValue(result.input);
+
+const documentMutationChangedDocument = (result: AgentHarnessToolResultLike, documentId: string | null) => {
+  if (!documentId || !isAgentDocumentMutationToolName(result.toolName)) {
+    return false;
+  }
+  if (!isVerifiedAgentDocumentMutationResult(result.result)) {
+    return false;
+  }
+  return documentIdsMatch(readResultDocumentId(result), documentId);
+};
 
 export const createAgentToolCallKey = (call: { toolName: string; input: unknown }) => {
-  if (call.toolName === "writeDocument") {
-    const operationId = readOperationId(call.input);
-    if (operationId) {
-      return `${call.toolName}:operationId:${operationId}:inputHash:${hashStableValue(createWriteDocumentKeyPayload(call.input))}`;
-    }
+  if (isAgentDocumentMutationToolName(call.toolName)) {
+    return `${call.toolName}:documentMutation:${hashStableValue(createDocumentMutationKeyPayload(call.input))}`;
   }
   return `${call.toolName}:${stableStringify(call.input ?? {})}`;
 };
@@ -140,9 +220,9 @@ const resultMatchesCurrentProjectState = (
   call: AgentToolCallLike,
   options: AgentToolResultReuseOptions,
 ) => {
-  if (call.toolName === "writeDocument") {
-    const record = readRecord(result.result);
-    return result.toolName === "writeDocument" && record.saved === true && record.conflict !== true && record.verified !== false;
+  if (isAgentDocumentMutationToolName(call.toolName)) {
+    return isAgentDocumentMutationToolName(result.toolName) &&
+      isVerifiedAgentDocumentMutationResult(result.result);
   }
   if (call.toolName === "renderCurrentPage") {
     const currentPageId = options.currentPageId?.trim();
@@ -179,10 +259,16 @@ export const findReusableAgentToolResult = (
   call: AgentToolCallLike,
   options: AgentToolResultReuseOptions = {},
 ) => {
+  const callDocumentId = isDocumentReadTool(call.toolName) ? readDocumentIdFromValue(call.input) : null;
+  let invalidatedByLaterDocumentMutation = false;
   for (let index = results.length - 1; index >= 0; index -= 1) {
     const result = results[index];
+    if (callDocumentId && documentMutationChangedDocument(result, callDocumentId)) {
+      invalidatedByLaterDocumentMutation = true;
+      continue;
+    }
     if (result && isReusableAgentToolResult(result, call, options)) {
-      return result;
+      return invalidatedByLaterDocumentMutation ? null : result;
     }
   }
   return null;
@@ -215,14 +301,15 @@ export const createDuplicateToolCallSkippedResult = (
   createdAt = new Date().toISOString(),
   reusedResult?: AgentHarnessToolResultLike | null,
 ): AgentHarnessToolResultLike => {
-  const operationId = call.toolName === "writeDocument" ? readOperationId(call.input) : null;
+  const operationId = isAgentDocumentMutationToolName(call.toolName) ? readOperationId(call.input) : null;
   const reusedResultRecord = reusedResult ? readRecord(reusedResult.result) : {};
   const writeAlreadyApplied =
     Boolean(operationId) &&
-    reusedResult?.toolName === "writeDocument" &&
+    Boolean(reusedResult) &&
+    isAgentDocumentMutationToolName(reusedResult?.toolName ?? "") &&
     reusedResultRecord.saved === true &&
     reusedResultRecord.conflict !== true &&
-    reusedResultRecord.verified !== false;
+    isVerifiedAgentDocumentMutationResult(reusedResult?.result);
   return {
     toolName: "toolCallSkipped",
     input: {
@@ -242,12 +329,12 @@ export const createDuplicateToolCallSkippedResult = (
       ...(operationId ? { operationId, alreadyApplied: writeAlreadyApplied } : {}),
       reason: operationId
         ? writeAlreadyApplied
-          ? "Duplicate writeDocument operation skipped; the same operationId and document payload were already verified by the harness."
-          : "Duplicate writeDocument operation was not treated as applied because the reusable result was not a verified successful write."
+          ? `Duplicate ${call.toolName} operation skipped; the same document edit was already verified by the harness.`
+          : `Duplicate ${call.toolName} operation was not treated as applied because the reusable result was not a verified successful write.`
         : "Duplicate tool call skipped; the previous result is already present in the harness.",
       guidance: operationId
         ? writeAlreadyApplied
-          ? "Do not call writeDocument again with this exact operationId and document payload. Treat the verified document write as completed unless a different new edit is explicitly needed."
+          ? `Do not call ${call.toolName} again with this same document edit. Treat the verified document write as completed unless a different new edit is explicitly needed.`
           : "Do not report this write as completed. Use a fresh operationId for a new write or inspect the previous write result before answering."
         : "Use the previous result already available in the harness, answer from current evidence, write the document, or request a different missing tool. Do not repeat this same toolName/input.",
     },
@@ -284,28 +371,40 @@ export const createCompletedAgentToolCallIndex = (
   options: AgentToolResultReuseOptions & { limit?: number } = {},
 ): AgentCompletedToolCallIndexEntryLike[] => {
   const latestByKey = new Map<string, AgentCompletedToolCallIndexEntryLike>();
-  for (const result of results) {
+  const invalidatedDocumentIds = new Set<string>();
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const result = results[index];
     if (isToolBudgetResult(result) || isToolCallSkippedResult(result)) {
       continue;
     }
+    const resultDocumentId = readResultDocumentId(result);
+    if (isAgentDocumentMutationToolName(result.toolName)) {
+      const record = readRecord(result.result);
+      if (record.saved === true && record.verified !== false && record.changed !== false && resultDocumentId) {
+        invalidatedDocumentIds.add(resultDocumentId);
+      }
+    }
     const key = createAgentToolCallKey({ toolName: result.toolName, input: result.input });
     const resultRecord = readRecord(result.result);
-    latestByKey.set(key, {
-      key,
-      toolName: result.toolName,
-      input: summarizeToolInputForIndex(result.toolName, result.input),
-      createdAt: result.createdAt,
-      projectUpdatedAt: readResultProjectUpdatedAt(result),
-      resultKeys: Object.keys(resultRecord).sort(),
-      reusableInCurrentProjectState: resultMatchesCurrentProjectState(
-        result,
-        { toolName: result.toolName, input: result.input },
-        options,
-      ),
-    });
+    const reusableInCurrentProjectState = resultMatchesCurrentProjectState(
+      result,
+      { toolName: result.toolName, input: result.input },
+      options,
+    ) && !(isDocumentReadTool(result.toolName) && invalidatedDocumentIds.has(resultDocumentId ?? ""));
+    if (!latestByKey.has(key)) {
+      latestByKey.set(key, {
+        key,
+        toolName: result.toolName,
+        input: summarizeToolInputForIndex(result.toolName, result.input),
+        createdAt: result.createdAt,
+        projectUpdatedAt: readResultProjectUpdatedAt(result),
+        resultKeys: Object.keys(resultRecord).sort(),
+        reusableInCurrentProjectState,
+      });
+    }
   }
   const entries = Array.from(latestByKey.values());
-  return entries.slice(-Math.max(1, options.limit ?? 80));
+  return entries.reverse().slice(-Math.max(1, options.limit ?? 80));
 };
 
 export const mergeAgentToolResults = (
@@ -341,6 +440,7 @@ export const selectAgentDynamicToolResultsForPrompt = (
   const skippedLimit = options.skippedLimit ?? 3;
 
   const latestMeaningful = new Map<string, { index: number; result: AgentHarnessToolResultLike }>();
+  const latestPinnedContext = new Map<string, { index: number; result: AgentHarnessToolResultLike }>();
   const budgetResults: Array<{ index: number; result: AgentHarnessToolResultLike }> = [];
   const skippedResults: Array<{ index: number; result: AgentHarnessToolResultLike }> = [];
   const recentResults = results.slice(-recentLimit).map((result, offset) => ({
@@ -359,6 +459,9 @@ export const selectAgentDynamicToolResultsForPrompt = (
     }
     const key = createAgentToolCallKey({ toolName: result.toolName, input: result.input });
     latestMeaningful.set(key, { index, result });
+    if (PINNED_CONTEXT_RESULT_TOOLS.has(result.toolName)) {
+      latestPinnedContext.set(key, { index, result });
+    }
   });
 
   const selected = new Map<string, { index: number; result: AgentHarnessToolResultLike }>();
@@ -369,6 +472,7 @@ export const selectAgentDynamicToolResultsForPrompt = (
     selected.set(key, entry);
   };
 
+  Array.from(latestPinnedContext.values()).forEach(add);
   Array.from(latestMeaningful.values()).slice(-preservedResultLimit).forEach(add);
   budgetResults.slice(-budgetLimit).forEach(add);
   skippedResults.slice(-skippedLimit).forEach(add);
