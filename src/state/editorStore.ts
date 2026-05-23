@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { commandRegistry } from "../commands/registry";
 import type { CommandDefinition } from "../commands/types";
 import { createBlankProject, DEFAULT_ZOOM } from "../domain/defaults";
+import { normalizeProjectPageNames } from "../domain/pageNaming";
 import { objectTypeSchema, projectSchema, type Project } from "../domain/schema";
 import { resolveInitialLocale, type Locale } from "../i18n";
 import {
@@ -102,12 +103,13 @@ const isPanelImageEditingValid = (project: Project, state: PanelImageEditingStat
 
 const sanitizeProjectState = (
   project: Project,
+  locale: Locale,
   selectedPageId: string | null,
   selection: EditorSelection,
   multiSelection: EditorMultiSelection,
   panelImageEditing: PanelImageEditingState,
 ) => {
-  const nextProject = projectSchema.parse(project);
+  const nextProject = projectSchema.parse(normalizeProjectPageNames(projectSchema.parse(project), locale));
   const nextSelectedPageId = resolveSelectedPageId(nextProject, selectedPageId);
   const nextSelection = isSelectionValid(nextProject, selection) ? selection : null;
   const nextMultiSelection = multiSelection.filter((entry) =>
@@ -269,6 +271,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
             set((state) => ({
               ...sanitizeProjectState(
                 project,
+                state.locale,
                 state.selectedPageId,
                 state.selection,
                 state.multiSelection,
@@ -338,6 +341,10 @@ export const useEditorStore = create<EditorStore>((set, get) => {
 
               const nextLocale =
                 nextPatch.locale !== undefined ? (nextPatch.locale as Locale) : state.locale;
+              const nextProject =
+                nextLocale !== state.locale
+                  ? projectSchema.parse(normalizeProjectPageNames(state.project, nextLocale))
+                  : state.project;
               const nextActiveTool =
                 nextPatch.activeTool !== undefined
                   ? (nextPatch.activeTool as ToolMode)
@@ -364,6 +371,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
 
               if (
                 nextAppView === state.appView &&
+                nextProject === state.project &&
                 nextLocale === state.locale &&
                 nextActiveTool === state.activeTool &&
                 nextTextInsertDefaults === state.textInsertDefaults &&
@@ -382,6 +390,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
 
               return {
                 ...state,
+                project: nextProject,
                 appView: nextAppView,
                 locale: nextLocale,
                 activeTool: nextActiveTool,
@@ -440,6 +449,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
     set((state) => ({
       ...sanitizeProjectState(
         project,
+        state.locale,
         state.selectedPageId,
         state.selection,
         state.multiSelection,

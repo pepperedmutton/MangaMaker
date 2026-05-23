@@ -43,6 +43,7 @@ export const agentRoleDefinitionSchema = z.object({
     "replaceDocumentSection",
     "replaceDocumentText",
     "editDocumentLines",
+    "applyDocumentPatchPlan",
     "writeDocument",
     "deleteDocument",
   ]),

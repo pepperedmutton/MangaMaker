@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { compileAgentCurrentTaskPacket } from "../../src/agent/contextCompiler";
+import { createBoundedDocumentLinesResult } from "../../src/agent/documentEditTools";
 import { createAgentHarnessToolResult } from "../../src/agent/harness";
+import { summarizeAgentToolResultForPrompt } from "../../src/agent/toolResultSummary";
 
 describe("agent context compiler", () => {
   it("promotes the latest creator instruction over old conversation", () => {
@@ -91,5 +93,48 @@ describe("agent context compiler", () => {
       }),
     ]);
     expect(JSON.stringify(packet)).not.toContain("xxxxx");
+  });
+
+  it("lets readDocument carry whole-document content when the model requested it", () => {
+    const summary = summarizeAgentToolResultForPrompt({
+      toolName: "readDocument",
+      input: { documentId: "doc" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      resultHandle: "tool-result-doc",
+      resultByteLength: 6000,
+      result: {
+        id: "doc",
+        title: "Doc",
+        path: "docs/work/doc.md",
+        status: "draft",
+        relatedPageIds: [],
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        summary: "",
+        content: `# Doc\n\n${"x".repeat(5000)}`,
+      },
+    });
+
+    expect(summary.resultHandle).toBe("tool-result-doc");
+    expect(JSON.stringify(summary)).toContain("x".repeat(1000));
+    expect(JSON.stringify(summary)).toContain("Choose readDocument or readDocumentLines based on the task");
+  });
+
+  it("bounds readDocumentLines output when no explicit range is provided", () => {
+    const document = {
+      id: "doc",
+      title: "Doc",
+      status: "draft" as const,
+      path: "docs/work/doc.md",
+      relatedPageIds: [],
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      summary: "",
+      content: Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join("\n"),
+    };
+
+    const result = createBoundedDocumentLinesResult(document, { documentId: "doc" });
+
+    expect(result.lines).toHaveLength(80);
+    expect(result.truncatedAfter).toBe(true);
+    expect(result.maxLineWindow).toBe(120);
   });
 });

@@ -29,6 +29,12 @@ import {
 } from "../../src/agent/contextWindow";
 import { AGENT_MAX_BATCH_READ_PAGES } from "../../src/agent/toolLimits";
 import {
+  AGENT_RUN_MODE_PROFILES,
+  DEFAULT_AGENT_RUN_MODE,
+  getAgentRunModeProfile,
+  parseAgentRunMode,
+} from "../../src/agent/runMode";
+import {
   applyAppendDocumentEdit,
   applyEditDocumentLinesEdit,
   applyReplaceDocumentSectionEdit,
@@ -73,6 +79,7 @@ describe("agent config", () => {
         id: "moonshotai/kimi-k2.6",
         name: "MoonshotAI: Kimi K2.6",
         contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+        maxOutputTokens: 262142,
         inputModalities: ["text", "image"],
         outputModalities: ["text"],
         capability: "multimodal" as const,
@@ -81,6 +88,7 @@ describe("agent config", () => {
         id: DEEPSEEK_V4_PRO_MODEL_ID,
         name: "DeepSeek V4 Pro",
         contextLength: 1048576,
+        maxOutputTokens: 384000,
         inputModalities: ["text"],
         outputModalities: ["text"],
         capability: "metadoc" as const,
@@ -89,6 +97,7 @@ describe("agent config", () => {
         id: QWEN_3_6_FLASH_MODEL_ID,
         name: "Qwen 3.6 Flash",
         contextLength: 1000000,
+        maxOutputTokens: 65536,
         inputModalities: ["text", "image", "video"],
         outputModalities: ["text"],
         capability: "multimodal" as const,
@@ -112,6 +121,9 @@ describe("agent config", () => {
       contextWindowTokens: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
       contextWindowMaxTokens: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
       contextWindowSource: "model",
+      maxOutputTokens: 262142,
+      maxOutputMaxTokens: 262142,
+      maxOutputSource: "model",
     });
 
     expect(
@@ -132,6 +144,9 @@ describe("agent config", () => {
       contextWindowTokens: 1048576,
       contextWindowMaxTokens: 1048576,
       contextWindowSource: "model",
+      maxOutputTokens: 384000,
+      maxOutputMaxTokens: 384000,
+      maxOutputSource: "model",
     });
 
     expect(
@@ -169,6 +184,8 @@ describe("agent config", () => {
       visionEnabled: true,
       contextWindowTokens: 1000000,
       contextWindowMaxTokens: 1000000,
+      maxOutputTokens: 65536,
+      maxOutputMaxTokens: 65536,
     });
   });
 
@@ -178,6 +195,7 @@ describe("agent config", () => {
         id: "moonshotai/kimi-k2.6",
         name: "MoonshotAI: Kimi K2.6",
         contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+        maxOutputTokens: 262142,
         inputModalities: ["text", "image"],
         outputModalities: ["text"],
         capability: "multimodal" as const,
@@ -229,6 +247,7 @@ describe("agent config", () => {
         id: "moonshotai/kimi-k2.6",
         name: "MoonshotAI: Kimi K2.6",
         contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+        maxOutputTokens: 262142,
         inputModalities: ["text", "image"],
         outputModalities: ["text"],
         capability: "multimodal" as const,
@@ -237,6 +256,7 @@ describe("agent config", () => {
         id: DEEPSEEK_V4_PRO_MODEL_ID,
         name: "DeepSeek V4 Pro",
         contextLength: 1048576,
+        maxOutputTokens: 384000,
         inputModalities: ["text"],
         outputModalities: ["text"],
         capability: "metadoc" as const,
@@ -278,6 +298,7 @@ describe("agent config", () => {
         architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
         supported_parameters: ["response_format"],
         context_length: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+        top_provider: { context_length: 262142, max_completion_tokens: 262142 },
       },
       {
         id: "deepseek/deepseek-vl",
@@ -291,6 +312,7 @@ describe("agent config", () => {
         architecture: { input_modalities: ["text"], output_modalities: ["text"] },
         supported_parameters: ["response_format"],
         context_length: 1048576,
+        top_provider: { context_length: 1048576, max_completion_tokens: 384000 },
       },
       {
         id: "deepseek/deepseek-v4-flash",
@@ -304,6 +326,7 @@ describe("agent config", () => {
         architecture: { input_modalities: ["text", "image", "video"], output_modalities: ["text"] },
         supported_parameters: ["response_format"],
         context_length: 1000000,
+        top_provider: { context_length: 1000000, max_completion_tokens: 65536 },
       },
       {
         id: "openai/gpt-5.5",
@@ -333,6 +356,7 @@ describe("agent config", () => {
     ]);
     expect(models.find((model) => model.id === DEEPSEEK_V4_PRO_MODEL_ID)).toMatchObject({
       capability: "metadoc",
+      maxOutputTokens: 384000,
       inputModalities: ["text"],
     });
     expect(models.find((model) => model.id === "deepseek/deepseek-vl")).toMatchObject({
@@ -340,40 +364,55 @@ describe("agent config", () => {
     });
     expect(models.find((model) => model.id === QWEN_3_6_FLASH_MODEL_ID)).toMatchObject({
       capability: "multimodal",
+      maxOutputTokens: 65536,
       inputModalities: ["text", "image", "video"],
     });
   });
 
-  it("prioritizes Venice for Kimi K2.6 OpenRouter routing", () => {
+  it("uses cost-sorted OpenRouter provider routing by default", () => {
     expect(getOpenRouterProviderRouting("moonshotai/kimi-k2.6")).toEqual({
-      order: [
-        "venice/int4",
-        "moonshotai/int4",
-        "fireworks",
-        "siliconflow/fp8",
-        "deepinfra/fp4",
-        "atlas-cloud/int4",
-      ],
       ignore: ["phala"],
       allow_fallbacks: true,
       require_parameters: true,
+      sort: "price",
     });
 
     expect(getOpenRouterProviderRouting("deepseek/deepseek-vl")).toEqual({
+      allow_fallbacks: true,
       require_parameters: true,
+      sort: "price",
     });
 
     expect(getOpenRouterFallbackProviderRouting("moonshotai/kimi-k2.6")).toEqual({
-      order: [
-        "moonshotai/int4",
-        "fireworks",
-        "siliconflow/fp8",
-        "deepinfra/fp4",
-        "atlas-cloud/int4",
-      ],
-      ignore: ["venice/int4", "phala"],
+      ignore: ["phala"],
       allow_fallbacks: true,
       require_parameters: true,
+      sort: "price",
+    });
+  });
+
+  it("defines explicit Agent run modes for cost, balance, and deep work", () => {
+    expect(DEFAULT_AGENT_RUN_MODE).toBe("economy");
+    expect(parseAgentRunMode("economy")).toBe("economy");
+    expect(parseAgentRunMode("balanced")).toBe("balanced");
+    expect(parseAgentRunMode("deep")).toBe("deep");
+    expect(getAgentRunModeProfile("unknown")).toBe(AGENT_RUN_MODE_PROFILES.economy);
+    expect(AGENT_RUN_MODE_PROFILES.economy).toMatchObject({
+      contextWindowTokens: 65_536,
+      maxOutputTokens: 4_096,
+      batchLimits: { readPages: 8, renderPages: 2 },
+      mutationBudget: { maxMutationRounds: 2 },
+    });
+    expect(AGENT_RUN_MODE_PROFILES.balanced).toMatchObject({
+      contextWindowTokens: 131_072,
+      maxOutputTokens: 8_192,
+      mutationBudget: { maxMutationRounds: 2 },
+    });
+    expect(AGENT_RUN_MODE_PROFILES.deep).toMatchObject({
+      contextWindowTokens: 262_144,
+      maxOutputTokens: 16_384,
+      batchLimits: { readPages: 72, renderPages: 24 },
+      mutationBudget: { maxMutationRounds: 2 },
     });
   });
 });
@@ -838,6 +877,50 @@ describe("agent response validation", () => {
     ]);
   });
 
+  it("preserves native tool call ids through Agent response validation", () => {
+    expect(
+      validateAgentChatResponse({
+        message: "Need native read",
+        requestedToolCalls: [
+          {
+            toolName: "readDocument",
+            input: { documentId: "production-plan" },
+            nativeToolCallId: "call-read-document-1",
+          },
+        ],
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      {
+        toolName: "readDocument",
+        input: { documentId: "production-plan" },
+        reason: undefined,
+        nativeToolCallId: "call-read-document-1",
+      },
+    ]);
+
+    expect(
+      validateAgentChatResponse({
+        message: "Repair native call",
+        requestedToolCalls: [
+          {
+            toolName: "toolInputError",
+            input: { attemptedToolName: "readDocument", error: "input.documentId is required" },
+            nativeToolCallId: "call-bad-1",
+          },
+        ],
+        pendingCommandPlan: null,
+      }).requestedToolCalls,
+    ).toEqual([
+      {
+        toolName: "toolInputError",
+        input: { attemptedToolName: "readDocument", error: "input.documentId is required" },
+        reason: undefined,
+        nativeToolCallId: "call-bad-1",
+      },
+    ]);
+  });
+
   it("reports malformed requestedToolCalls entries as model-visible repair tool results", () => {
     expect(
       validateAgentChatResponse({
@@ -1164,6 +1247,44 @@ describe("agent command plan policy", () => {
         { commandId: "saveProject", payload: {} },
       ]),
     ).toBe(false);
+  });
+
+  it("documents text and bubble insertion constraints in the command manifest", () => {
+    const createText = getCommandManifestEntry("createText");
+    const updateText = getCommandManifestEntry("updateText");
+    const createBubble = getCommandManifestEntry("createBubble");
+    const updateBubble = getCommandManifestEntry("updateBubble");
+
+    expect(createText?.description).toContain("use updateText");
+    expect(updateText?.description).toContain("direction");
+    expect(createBubble?.description).toContain("Do not use bubbleType=narration");
+    expect(updateBubble?.description).toContain("do not use legacy style objects");
+    expect(createBubble?.examples).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ bubbleType: "caption", showTail: false }),
+      ]),
+    );
+  });
+
+  it("documents explicit all-page project export in the command manifest", () => {
+    const exportAllPages = getCommandManifestEntry("exportProjectAllPages");
+
+    expect(exportAllPages).toMatchObject({
+      description: expect.stringContaining("Export every page"),
+      mutatesProject: false,
+      dangerLevel: "safe",
+      examples: expect.arrayContaining([
+        expect.objectContaining({ format: "jpgZip" }),
+        expect.objectContaining({ format: "pdf" }),
+      ]),
+    });
+    expect(exportAllPages?.inputJsonSchema).toMatchObject({
+      properties: {
+        format: {
+          enum: ["jpgZip", "pdf"],
+        },
+      },
+    });
   });
 
   it("groups multiple history-recording Agent commands into one undo step", async () => {

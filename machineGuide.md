@@ -152,6 +152,35 @@ Reset through:
 window.mangaMaker?.project.reset()
 ```
 
+External automation and non-MangaMaker agents must follow `docs/automation-tool-interface.md`. The current bridge surface is:
+
+```ts
+window.mangaMaker?.commands.list()
+window.mangaMaker?.commands.describe()
+window.mangaMaker?.commands.execute(commandId, payload)
+window.mangaMaker?.project.get()
+window.mangaMaker?.project.load(project)
+window.mangaMaker?.project.reset()
+window.mangaMaker?.project.exportAllPages({ format: "jpgZip" })
+window.mangaMaker?.session.get()
+window.mangaMaker?.agent.getDebugSnapshot()
+```
+
+Rules for text and bubble insertion:
+
+- Read `window.mangaMaker.commands.describe()` before generating commands; it is the current machine-readable command manifest.
+- Use `createText` only to create the object (`pageId`, `x`, `y`, optional `content`), then `updateText` for `width`, `height`, `fontSize`, `fontWeight`, `direction`, `textAlign`, `verticalAlign`, `color`, `strokeColor`, and `strokeWidth`.
+- Use `createBubble` and `updateBubble` for bubble objects. Style fields are `backgroundColor`, `strokeColor`, `strokeWidth`, `opacity`, `cornerRadius`, `tailTip`, `tailBase`, and `tailWidth`; do not emit legacy `style` objects.
+- Text and bubbles are separate objects. Dialogue, captions, and narration belong in `texts`, never in `bubble.text` or other legacy bubble text fields.
+- Valid narration/caption boxes use `bubbleType: "caption"` or `bubbleType: "roundedSquare"` with `showTail: false`. Do not emit `bubbleType: "narration"` in new project data; it is a load-time migration alias only.
+- After batch insertion, call `saveProject` or `goHome`, then verify the project still appears on Home.
+
+Rules for export automation:
+
+- Use `window.mangaMaker.project.exportAllPages({ format: "jpgZip" })` or `commands.execute("exportProjectAllPages", { format })` when the task is to export every project page.
+- `format: "jpgZip"` exports every page as individual JPG files in one ZIP; `format: "pdf"` exports every page as one PDF.
+- Use `exportPagePng` only when the task explicitly targets a single page.
+
 ## 6. Current Product Invariants / 当前产品不变量
 Agents must preserve:
 
@@ -307,8 +336,8 @@ Configuration rules:
 - `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode for tests and demos.
 - `OPENROUTER_API_KEY` is required for the OpenRouter web backend.
 - `MANGAMAKER_AGENT_MODEL` must be explicit outside test mode unless the project documents a vision-capable default.
-- `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` controls the Agent prompt/input budget and defaults to `262144`, the Kimi K2.6 upper context limit used by this project. The UI may send a per-project runtime override, but the backend must clamp it to the known model limit when one is available.
-- `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS` defaults to `16384`; `MANGAMAKER_AGENT_REASONING_MAX_TOKENS` defaults to `2048`; `MANGAMAKER_AGENT_REASONING_EXCLUDE` defaults to `true`; `MANGAMAKER_AGENT_TEMPERATURE` defaults to `0.1`; `MANGAMAKER_AGENT_TOP_P` defaults to `0.9`. These settings should favor reliable JSON/tool behavior over exploratory prose. The reasoning cap is important for Kimi-style reasoning models because reasoning tokens share the model output budget; without a cap, the provider can return `finish_reason=length` with no final Agent JSON.
+- `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` controls the Agent prompt/input budget. When unset, the backend uses the selected OpenRouter model's reported context limit. The UI may send a per-project runtime override, but the backend must clamp it to the known model limit when one is available.
+- `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS` intentionally lowers the model response budget when set. When unset, MangaMaker uses the selected OpenRouter model's `top_provider.max_completion_tokens` limit; `MANGAMAKER_AGENT_REASONING_MAX_TOKENS` defaults to `2048`; `MANGAMAKER_AGENT_REASONING_EXCLUDE` defaults to `true`; `MANGAMAKER_AGENT_TEMPERATURE` defaults to `0.1`; `MANGAMAKER_AGENT_TOP_P` defaults to `0.9`. These settings should favor reliable JSON/tool behavior over exploratory prose. The reasoning cap is important for Kimi-style reasoning models because reasoning tokens share the model output budget; without a cap, the provider can return `finish_reason=length` with no final Agent JSON.
 - The OpenRouter model allowlist is provider-restricted to DeepSeek and Kimi/Moonshot model ids. Multimodal entries are capability-restricted to models whose metadata includes image input, text output, and `response_format` support.
 - `deepseek/deepseek-v4-pro` is the only allowed text-only model in the built-in Agent model list. It must be treated as `metadoc` capability, not multimodal capability: vision must be disabled, page/image/render tools must not be exposed, and the backend must reject or block any such tool call without leaking project resource content. Markdown document tools remain available so the model can work in the active role working directory.
 - Google, Anthropic, OpenAI, other text-only, and non-JSON-capable models must not be offered as available built-in Agent models.

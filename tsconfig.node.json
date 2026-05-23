@@ -19,10 +19,15 @@
     "src/agent/documentEditTools.ts",
     "src/agent/openRouterProviderRouting.ts",
     "src/agent/openRouterResponse.ts",
+    "src/agent/nativeTools.ts",
+    "src/agent/runMode.ts",
+    "src/agent/outputBudget.ts",
+    "src/agent/outputTokens.ts",
     "src/agent/documentWriteScope.ts",
     "src/agent/roles.ts",
     "src/agent/systemPrompt.ts",
     "src/agent/toolCallPolicy.ts",
+    "src/agent/toolResultSummary.ts",
     "src/agent/toolLimits.ts"
   ]
 }

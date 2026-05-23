@@ -18,6 +18,12 @@ const AGENT_DOCS_MANIFEST_FILE: &str = "manifest.json";
 const AGENT_PRIME_DIRECTIVE_DOCUMENT_ID: &str = "prime-directive";
 const AGENT_ROLE_METADOC_PROMPT: &str = "Use the active role metadoc as this role's prompt. Read project documents as needed, but write durable role output only in the role working directory.";
 const KIMI_K2_6_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
+const DEEPSEEK_V4_PRO_CONTEXT_WINDOW_TOKENS: u32 = 1_048_576;
+const QWEN_3_6_FLASH_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
+const KIMI_K2_6_MAX_OUTPUT_TOKENS: u32 = 262_142;
+const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS: u32 = 384_000;
+const QWEN_3_6_FLASH_MAX_OUTPUT_TOKENS: u32 = 65_536;
+const DEFAULT_AGENT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 const MIN_AGENT_CONTEXT_WINDOW_TOKENS: u32 = 8_192;
 
 fn default_agent_conversation_role_id() -> String {
@@ -37,6 +43,9 @@ struct AgentConfig {
     context_window_tokens: u32,
     context_window_max_tokens: Option<u32>,
     context_window_source: String,
+    max_output_tokens: u32,
+    max_output_max_tokens: Option<u32>,
+    max_output_source: String,
     repetition_penalty: f64,
     reason: Option<String>,
 }
@@ -203,15 +212,22 @@ fn parse_agent_context_window_tokens(value: Option<String>) -> Option<u32> {
         .map(|tokens| tokens.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS))
 }
 
+fn parse_agent_max_output_tokens(value: Option<String>) -> Option<u32> {
+    value
+        .and_then(|entry| entry.parse::<u32>().ok())
+        .map(|tokens| tokens.max(1))
+}
+
 fn agent_context_window_fields(model: Option<&str>, test_mode: bool) -> (u32, Option<u32>, String) {
     let env_tokens = parse_agent_context_window_tokens(
         read_env_trimmed("MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS")
             .or_else(|| read_env_trimmed("MANGAMAKER_AGENT_CONTEXT_WINDOW")),
     );
-    let model_max = if model == Some("moonshotai/kimi-k2.6") {
-        Some(KIMI_K2_6_CONTEXT_WINDOW_TOKENS)
-    } else {
-        None
+    let model_max = match model {
+        Some("moonshotai/kimi-k2.6") => Some(KIMI_K2_6_CONTEXT_WINDOW_TOKENS),
+        Some("deepseek/deepseek-v4-pro") => Some(DEEPSEEK_V4_PRO_CONTEXT_WINDOW_TOKENS),
+        Some("qwen/qwen3.6-flash") => Some(QWEN_3_6_FLASH_CONTEXT_WINDOW_TOKENS),
+        _ => None,
     };
     let (source, value) = if let Some(tokens) = env_tokens {
         ("env".to_string(), tokens)
@@ -229,6 +245,33 @@ fn agent_context_window_fields(model: Option<&str>, test_mode: bool) -> (u32, Op
     (clamped, model_max, source)
 }
 
+fn agent_max_output_fields(model: Option<&str>, test_mode: bool) -> (u32, Option<u32>, String) {
+    let env_tokens = parse_agent_max_output_tokens(
+        read_env_trimmed("MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS")
+            .or_else(|| read_env_trimmed("MANGAMAKER_AGENT_MAX_TOKENS")),
+    );
+    let model_max = match model {
+        Some("moonshotai/kimi-k2.6") => Some(KIMI_K2_6_MAX_OUTPUT_TOKENS),
+        Some("deepseek/deepseek-v4-pro") => Some(DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS),
+        Some("qwen/qwen3.6-flash") => Some(QWEN_3_6_FLASH_MAX_OUTPUT_TOKENS),
+        _ => None,
+    };
+    let (source, value) = if let Some(tokens) = env_tokens {
+        ("env".to_string(), tokens)
+    } else if let Some(tokens) = model_max {
+        ("model".to_string(), tokens)
+    } else if test_mode {
+        ("test".to_string(), QWEN_3_6_FLASH_MAX_OUTPUT_TOKENS)
+    } else {
+        ("default".to_string(), DEFAULT_AGENT_MAX_OUTPUT_TOKENS)
+    };
+    let clamped = model_max
+        .map(|max_tokens| value.min(max_tokens))
+        .unwrap_or(value)
+        .max(1);
+    (clamped, model_max, source)
+}
+
 fn parse_agent_repetition_penalty() -> f64 {
     let parsed = read_env_trimmed("MANGAMAKER_AGENT_REPETITION_PENALTY")
         .and_then(|value| value.parse::<f64>().ok())
@@ -242,6 +285,8 @@ fn current_agent_config() -> AgentConfig {
     let api_key_configured = read_env_trimmed("OPENROUTER_API_KEY").is_some();
     let (context_window_tokens, context_window_max_tokens, context_window_source) =
         agent_context_window_fields(model.as_deref(), test_mode);
+    let (max_output_tokens, max_output_max_tokens, max_output_source) =
+        agent_max_output_fields(model.as_deref(), test_mode);
     let repetition_penalty = parse_agent_repetition_penalty();
 
     if test_mode {
@@ -256,6 +301,9 @@ fn current_agent_config() -> AgentConfig {
             context_window_tokens,
             context_window_max_tokens,
             context_window_source,
+            max_output_tokens,
+            max_output_max_tokens,
+            max_output_source,
             repetition_penalty,
             reason: None,
         };
@@ -272,6 +320,9 @@ fn current_agent_config() -> AgentConfig {
         context_window_tokens,
         context_window_max_tokens,
         context_window_source,
+        max_output_tokens,
+        max_output_max_tokens,
+        max_output_source,
         repetition_penalty,
         reason: Some(
             "The desktop production Agent backend is not configured in this build. Use the Vite web backend or enable a native Agent proxy before chatting.".to_string(),

@@ -24,12 +24,14 @@ import {
 } from "./documentWriteScope";
 import {
   applyAppendDocumentEdit,
+  applyDocumentPatchPlanEdit,
   applyEditDocumentLinesEdit,
   applyReplaceDocumentSectionEdit,
   applyReplaceDocumentTextEdit,
-  createDocumentLinesResult,
+  createBoundedDocumentLinesResult,
   incrementalDocumentEditFailureReason,
   isIncrementalDocumentEditVerifiedNoop,
+  type ApplyDocumentPatchPlanInput,
   type AppendDocumentInput,
   type EditDocumentLinesInput,
   type IncrementalDocumentEdit,
@@ -40,7 +42,17 @@ import {
   AGENT_MAX_BATCH_READ_PAGES,
   AGENT_MAX_BATCH_RENDER_PAGES,
 } from "./toolLimits";
+import {
+  getAgentRunModeProfile,
+  type AgentRunMode,
+  type AgentRunModeProfile,
+} from "./runMode";
 import { createCompletedAgentToolCallIndex } from "./toolCallPolicy";
+import {
+  AGENT_RECOMMENDED_LONG_EDIT_TOOL_CALLS_PER_TURN,
+  AGENT_RECOMMENDED_MAX_MESSAGE_CHARS,
+  AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS,
+} from "./outputBudget";
 
 const now = () => new Date().toISOString();
 const DEFAULT_SEARCH_LIMIT = 20;
@@ -49,6 +61,9 @@ const DEFAULT_DOCUMENT_SEARCH_LIMIT = 20;
 
 export type AgentHarnessOptions = {
   modelCapability?: AgentModelCapability;
+  runMode?: AgentRunMode;
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
   activeMetadocId?: string;
   activeRoleWorkingDirectory?: string;
   primeDirective?: AgentDocument;
@@ -65,6 +80,7 @@ export const METADOC_ONLY_AGENT_TOOL_NAMES = new Set([
   "replaceDocumentSection",
   "replaceDocumentText",
   "editDocumentLines",
+  "applyDocumentPatchPlan",
   "deleteDocument",
   "validateDocumentAgainstProject",
 ]);
@@ -111,6 +127,53 @@ const renderCropSchema = {
 const tool = (
   definition: AgentHarnessToolDefinition,
 ): AgentHarnessToolDefinition => definition;
+
+const cloneJsonValue = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+const setPageIdsMaxItems = (schema: unknown, maxItems: number) => {
+  const cloned = cloneJsonValue(schema);
+  if (!cloned || typeof cloned !== "object" || Array.isArray(cloned)) {
+    return cloned;
+  }
+  const properties = (cloned as { properties?: unknown }).properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+    return cloned;
+  }
+  const pageIds = (properties as { pageIds?: unknown }).pageIds;
+  if (!pageIds || typeof pageIds !== "object" || Array.isArray(pageIds)) {
+    return cloned;
+  }
+  (pageIds as { maxItems?: number }).maxItems = maxItems;
+  return cloned;
+};
+
+const applyRunModeToolLimits = (
+  tools: AgentHarnessToolDefinition[],
+  profile: AgentRunModeProfile,
+) =>
+  tools.map((entry) => {
+    if (entry.name === "readPages") {
+      return {
+        ...entry,
+        description: `${entry.description} Current run mode ${profile.label}: max ${profile.batchLimits.readPages} pageIds per call.`,
+        inputSchema: setPageIdsMaxItems(entry.inputSchema, profile.batchLimits.readPages),
+      };
+    }
+    if (entry.name === "renderPages") {
+      return {
+        ...entry,
+        description: `${entry.description} Current run mode ${profile.label}: max ${profile.batchLimits.renderPages} pageIds per call. ${profile.visualPolicy}`,
+        inputSchema: setPageIdsMaxItems(entry.inputSchema, profile.batchLimits.renderPages),
+      };
+    }
+    if (entry.name === "renderCurrentPage" || entry.name === "renderPage" || entry.name === "renderPanel") {
+      return {
+        ...entry,
+        description: `${entry.description} Current run mode ${profile.label}: ${profile.visualPolicy}`,
+      };
+    }
+    return entry;
+  });
 
 const clampLimit = (value: unknown, fallback: number, max: number) => {
   const parsed = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
@@ -199,6 +262,8 @@ const incrementalDocumentEditSummary = (
   changed: edit.changed,
   edit,
   document: documentResultSummary(document),
+  guidance:
+    "This document mutation was saved and verified. If this satisfies latestCreatorInstruction and the stopCondition, report completion now with no further tool calls.",
 });
 
 const incrementalDocumentNoWriteSummary = (
@@ -695,7 +760,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "readDocument",
-    description: "Read one project Markdown document by manifest id only when its content is not already present in readActiveRoleMetadoc, readDocument, or cacheHit results. The backend also accepts path, filename, or exact title as a fallback. If the document is not found, the result returns found=false with available documents instead of failing the run.",
+    description: "Read one project Markdown document by manifest id, path, filename, or exact title. This is the whole-document reading tool for tasks that benefit from holistic context, a full summary, or exact text that may be edited with text/section tools. readDocumentLines is also available when line numbers or a narrow line window are specifically useful; choose the read tool based on the task. If the document is not found, the result returns found=false with available documents instead of failing the run.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -707,7 +772,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
         },
       },
     },
-    outputDescription: "Full document metadata and Markdown content.",
+    outputDescription: "Document metadata, line count, heading outline, and Markdown content subject to the current prompt budget. Very large results may be compacted and persisted by resultHandle.",
     mutatesProject: false,
     requiresConfirmation: false,
   }),
@@ -729,7 +794,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "writeDocument",
-    description: "Replace one existing durable Markdown production document with complete revised Markdown content. The Agent is forbidden to create new Markdown documents; if the target document does not already exist, ask the creator to create it manually. Prefer replaceDocumentSection or replaceDocumentText for focused edits; use appendDocument only for plain heading-free additive notes/log lines. Hard rule: reads may inspect any Markdown document, but writes are allowed only for existing ordinary docs under harness.resourcePolicy.activeRoleWorkingDirectory. Do not mutate role metadocs, PrimeDirective.md, or documents outside that working directory.",
+    description: `Replace one existing durable Markdown production document with complete revised Markdown content only when the full content safely fits this response. The Agent is forbidden to create new Markdown documents; if the target document does not already exist, ask the creator to create it manually. Prefer replaceDocumentSection, editDocumentLines, or replaceDocumentText for focused edits and long rewrites; use appendDocument only for plain heading-free additive notes/log lines. For long rewrites, split the change across turns and keep content under about ${AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS} characters per document mutation tool call instead of trying one huge writeDocument. Hard rule: reads may inspect any Markdown document, but writes are allowed only for existing ordinary docs under harness.resourcePolicy.activeRoleWorkingDirectory. Do not mutate role metadocs, PrimeDirective.md, or documents outside that working directory.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -773,7 +838,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "readDocumentLines",
-    description: "Read a Markdown document with stable 1-based line numbers. Use this before editDocumentLines when deleting, inserting, or replacing an arbitrary line range.",
+    description: "Read a Markdown document window with stable 1-based line numbers. Use this when the task needs exact line numbers, a bounded line range, or editDocumentLines line-range operations.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -852,7 +917,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "replaceDocumentSection",
-    description: "Replace the body of one Markdown heading section in an existing working-dir document, or create that section when createIfMissing is not false. Use this for role output documents such as page ranges, plans, character notes, prompt rules, or supervision records. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.",
+    description: `Replace the body of one Markdown heading section in an existing working-dir document, or create that section when createIfMissing is not false. Use this for role output documents such as page ranges, plans, character notes, prompt rules, or supervision records. For long section rewrites, write one bounded section/chunk per turn and keep content under about ${AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS} characters; continue after the verified tool result. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -889,7 +954,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "replaceDocumentText",
-    description: "Replace an exact text span in an existing working-dir Markdown document. Use this for precise small edits when the old text is known from readDocument/readDocumentLines. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.",
+    description: `Replace an exact text span in an existing working-dir Markdown document. Use this for precise small edits when the old text is known from readDocument/readDocumentLines. Keep oldText and newText bounded; for larger edits use editDocumentLines or replaceDocumentSection in chunks of about ${AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS} characters. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -920,7 +985,7 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
   }),
   tool({
     name: "editDocumentLines",
-    description: "Apply arbitrary Markdown line edits to an existing working-dir document using 1-based line numbers from readDocumentLines. Use this for deleting any line range, replacing any line range, or inserting text at any line when section/text tools are too narrow. Multiple operations are interpreted against the original line-numbered snapshot and applied from bottom to top. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.",
+    description: `Apply arbitrary Markdown line edits to an existing working-dir document using 1-based line numbers. Use this for deleting any line range, replacing any line range, or inserting text at any line when line-numbered editing is the right fit. Get reliable line numbers with readDocumentLines when needed. For long rewrites, keep inserted replacement content under about ${AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS} characters per mutation. Multiple operations are interpreted against the original line-numbered snapshot and applied from bottom to top. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -962,6 +1027,73 @@ export const AGENT_HARNESS_TOOLS: AgentHarnessToolDefinition[] = [
     mutatesProject: true,
     requiresConfirmation: false,
   }),
+  tool({
+    name: "applyDocumentPatchPlan",
+    description: `Apply several bounded Markdown patches to one existing working-dir document in a single verified write. Use this when several section, text, or line patches can be applied atomically. Patches run against one document: if any patch has an invalid line range or missing required text/section, no file is written. Keep each patch content under about ${AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS} characters. Use readDocument for whole-document context or exact text patches, and readDocumentLines when line ranges are needed. Writes are blocked unless the target document already lives under harness.resourcePolicy.activeRoleWorkingDirectory.`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "documentId", "patches"],
+      properties: {
+        operationId: {
+          type: "string",
+          description: "Stable idempotency key for this exact multi-patch plan. Reuse only when retrying the same complete patch plan.",
+        },
+        documentId: {
+          type: "string",
+          description: "Stable manifest document id, path, filename, or exact title. The document must already be under the active role working directory.",
+        },
+        patches: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          description: "Bounded patches applied in order to the same original document and committed as one write.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["type"],
+            properties: {
+              type: { type: "string", enum: ["replaceSection", "replaceText", "editLines"] },
+              heading: { type: "string" },
+              content: { type: "string" },
+              headingLevel: { type: "number", minimum: 1, maximum: 6 },
+              occurrence: { type: "number", minimum: 1 },
+              createIfMissing: { type: "boolean" },
+              contentIncludesHeading: { type: "boolean" },
+              oldText: { type: "string" },
+              newText: { type: "string" },
+              replaceAll: { type: "boolean" },
+              operations: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["type"],
+                  properties: {
+                    type: { type: "string", enum: ["replace", "delete", "insertBefore", "insertAfter"] },
+                    startLine: { type: "number", minimum: 1 },
+                    endLine: { type: "number", minimum: 1 },
+                    line: { type: "number", minimum: 0 },
+                    content: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+        title: { type: "string" },
+        role: { type: "string" },
+        status: { type: "string", enum: ["draft", "ready", "applied", "obsolete"] },
+        path: { type: "string" },
+        relatedPageIds: { type: "array", items: { type: "string" } },
+        summary: { type: "string" },
+      },
+    },
+    outputDescription: "Saved document metadata plus atomic patch-plan summary, changed flag, patch count, applied patch count, failed patch index when blocked, and content lengths.",
+    mutatesProject: true,
+    requiresConfirmation: false,
+  }),
 ];
 
 export const createAgentHarnessToolResult = (toolName: string, input: unknown, resultValue: unknown): AgentHarnessToolResult => ({
@@ -991,6 +1123,9 @@ export const buildAgentHarness = (
 ): AgentHarnessSnapshot => {
   const modelCapability = options.modelCapability ?? "multimodal";
   const metadocOnly = modelCapability === "metadoc";
+  const runModeProfile = getAgentRunModeProfile(options.runMode);
+  const contextWindowTokens = options.contextWindowTokens ?? runModeProfile.contextWindowTokens;
+  const maxOutputTokens = options.maxOutputTokens ?? runModeProfile.maxOutputTokens;
   const existingPrimeDirectiveResult = dynamicToolResults.find((entry) => entry.toolName === "readPrimeDirective");
   const existingPrimeDirectiveInput =
     existingPrimeDirectiveResult?.input &&
@@ -1015,6 +1150,11 @@ export const buildAgentHarness = (
     ? [
         ...primeDirectiveResult,
         result("metadocOnlyPolicy", {}, {
+          runMode: runModeProfile.id,
+          runModeLabel: runModeProfile.label,
+          maxOutputTokens,
+          toolBudget: runModeProfile.toolBudget,
+          mutationBudget: runModeProfile.mutationBudget,
           modelCapability,
           activeMetadocId: options.activeMetadocId ?? null,
           activeRoleWorkingDirectory: options.activeRoleWorkingDirectory ?? null,
@@ -1029,6 +1169,18 @@ export const buildAgentHarness = (
       ]
     : [
     ...primeDirectiveResult,
+    result("agentRunMode", {}, {
+      runMode: runModeProfile.id,
+      label: runModeProfile.label,
+      description: runModeProfile.description,
+      contextWindowTokens,
+      maxOutputTokens,
+      reasoningMaxTokens: runModeProfile.reasoningMaxTokens,
+      toolBudget: runModeProfile.toolBudget,
+      mutationBudget: runModeProfile.mutationBudget,
+      batchLimits: runModeProfile.batchLimits,
+      visualPolicy: runModeProfile.visualPolicy,
+    }),
     result("readProjectSummary", {}, {
       projectUpdatedAt: context.project.updatedAt,
       project: context.project,
@@ -1057,12 +1209,14 @@ export const buildAgentHarness = (
   const tools = metadocOnly
     ? AGENT_HARNESS_TOOLS.filter((entry) => isMetadocOnlyAgentToolName(entry.name))
     : AGENT_HARNESS_TOOLS;
+  const limitedTools = applyRunModeToolLimits(tools, runModeProfile);
   return {
     mode: "tool-harness",
+    runMode: runModeProfile.id,
     currentPageId: context.currentPage?.id ?? context.selectedPageId,
     projectId: context.project.id,
     currentPageMarkedBy: "isCurrent",
-    tools,
+    tools: limitedTools,
     initialToolResults,
     dynamicToolResults,
     completedToolCallIndex: createCompletedAgentToolCallIndex(
@@ -1076,18 +1230,36 @@ export const buildAgentHarness = (
       requiredResponseField: "taskProgress",
       planningRequired: true,
       maxSteps: 12,
+      outputBudget: {
+        maxOutputTokens,
+        recommendedMaxMessageChars: AGENT_RECOMMENDED_MAX_MESSAGE_CHARS,
+        recommendedMaxToolContentChars: AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS,
+        longEditToolCallsPerTurn: AGENT_RECOMMENDED_LONG_EDIT_TOOL_CALLS_PER_TURN,
+        rule:
+          "The assistant output budget covers JSON syntax, natural-language message, and all tool-call arguments. For document rewrites, gather context first, then prefer one complete applyDocumentPatchPlan over iterative mutation chunks.",
+      },
+      mutationBudget: {
+        maxMutationRounds: runModeProfile.mutationBudget.maxMutationRounds,
+        rule: runModeProfile.mutationBudget.rule,
+      },
       stopRule:
-        "Before requesting tools, define the smallest task plan and a concrete stopCondition. Stop as soon as that condition is met instead of continuing exploratory tool use.",
+        "Before requesting tools, define the smallest task plan and a concrete stopCondition. Context-gathering reads may use the run tool budget, but document mutations are a separate execution phase capped at two mutation rounds. Stop as soon as the edit condition is met instead of continuing exploratory tool use.",
       progressRule:
         "Every model response must update taskProgress with objective, phase, status, steps, currentStepId, stopCondition, nextAction, and percent when useful.",
       actionRule:
         "If taskProgress.status is planning, running, or needs_tool, you must request the exact next harness tool call or mark the task blocked with a concrete stopReason. requestedToolCalls: [] is valid for completed, blocked, or waiting_for_user responses that ask the creator for missing input.",
       completionRule:
         metadocOnly
-          ? "When the document task is complete, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status: completed, taskProgress.phase: complete, and a stopReason. Do not request page, image, or render tools."
-          : "When the task is complete, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status: completed, taskProgress.phase: complete, and a stopReason. After any allowed working-dir Markdown mutation returns saved=true, verified=true, and changed=true or alreadyApplied=true, report completion and stop.",
+          ? "When the document task is complete, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status: completed, taskProgress.phase: complete, and a stopReason. Do not request page, image, or render tools. After two mutation rounds, no further document mutations are allowed."
+          : "When the task is complete, return requestedToolCalls: [], pendingCommandPlan: null, taskProgress.status: completed, taskProgress.phase: complete, and a stopReason. After any allowed working-dir Markdown mutation returns saved=true, verified=true, and changed=true or alreadyApplied=true, decide whether the whole task is complete. After two mutation rounds, report from verified results and stop.",
     },
     resourcePolicy: {
+      runMode: runModeProfile.id,
+      runModeLabel: runModeProfile.label,
+      visualPolicy: runModeProfile.visualPolicy,
+      maxBatchReadPages: runModeProfile.batchLimits.readPages,
+      maxBatchRenderPages: runModeProfile.batchLimits.renderPages,
+      mutationBudget: runModeProfile.mutationBudget,
       modelCapability,
       metadocOnly,
       ...(options.activeMetadocId ? { activeMetadocId: options.activeMetadocId } : {}),
@@ -1181,6 +1353,7 @@ export const executeAgentHarnessToolCall = async (
   call: AgentToolCallRequest,
   options: AgentHarnessOptions = {},
 ): Promise<AgentHarnessToolResult> => {
+  const runModeProfile = getAgentRunModeProfile(options.runMode);
   if (
     options.modelCapability === "metadoc" &&
     !isMetadocOnlyToolCallAllowed(call)
@@ -1229,7 +1402,7 @@ export const executeAgentHarnessToolCall = async (
     });
   }
   if (call.toolName === "readPages") {
-    const pageIdInput = getPageIdsInput(call.input, AGENT_MAX_BATCH_READ_PAGES);
+    const pageIdInput = getPageIdsInput(call.input, runModeProfile.batchLimits.readPages);
     return projectStateResult(context, call.toolName, call.input, {
       pageIds: pageIdInput.pageIds,
       requestedPageIdCount: pageIdInput.requestedPageIdCount,
@@ -1309,7 +1482,7 @@ export const executeAgentHarnessToolCall = async (
     });
   }
   if (call.toolName === "renderPages") {
-    const pageIdInput = getPageIdsInput(call.input, AGENT_MAX_BATCH_RENDER_PAGES);
+    const pageIdInput = getPageIdsInput(call.input, runModeProfile.batchLimits.renderPages);
     const detail = getRenderDetailInput(call.input);
     const results = [];
     for (const pageId of pageIdInput.pageIds) {
@@ -1344,7 +1517,7 @@ export const executeAgentHarnessToolCall = async (
     return result(call.toolName, call.input, {
       available: false,
       reason:
-        "Canvas/page command plans are disabled for the built-in Agent. Use editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument for existing Markdown documents. The Agent cannot create documents.",
+        "Canvas/page command plans are disabled for the built-in Agent. Use applyDocumentPatchPlan, editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument for existing Markdown documents. The Agent cannot create documents.",
     });
   }
   if (call.toolName === "listDocuments") {
@@ -1389,7 +1562,7 @@ export const executeAgentHarnessToolCall = async (
     if (isDocumentLookupFailure(document)) {
       return result(call.toolName, call.input, document);
     }
-    return result(call.toolName, call.input, createDocumentLinesResult(document, {
+    return result(call.toolName, call.input, createBoundedDocumentLinesResult(document, {
       documentId: document.id,
       startLine: input.startLine,
       endLine: input.endLine,
@@ -1680,6 +1853,49 @@ export const executeAgentHarnessToolCall = async (
       throw error;
     }
   }
+  if (call.toolName === "applyDocumentPatchPlan") {
+    const input = call.input as ApplyDocumentPatchPlanInput;
+    const document = await readProjectDocumentForTool(context.project.id, input.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return result(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: input.path,
+      activeRoleWorkingDirectory: options.activeRoleWorkingDirectory,
+    });
+    if (scopeBlock) {
+      return result(call.toolName, call.input, scopeBlock);
+    }
+    const scopedInput = { ...input, path: document.path };
+    const applied = applyDocumentPatchPlanEdit(document, scopedInput);
+    if (!applied.edit.changed) {
+      return result(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const saved = await writeProjectDocument(context.project.id, applied.writePayload);
+      return result(call.toolName, call.input, incrementalDocumentEditSummary(saved, applied.edit));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return result(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId: input.operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended multi-patch document edit.",
+        });
+      }
+      throw error;
+    }
+  }
   if (call.toolName === "validateDocumentAgainstProject") {
     return result(call.toolName, call.input, await validateDocumentAgainstProject(context, call.input as { documentId?: string }));
   }
@@ -1687,7 +1903,7 @@ export const executeAgentHarnessToolCall = async (
     return result(call.toolName, call.input, {
       accepted: false,
       reason:
-        "Canvas/page command plans are disabled for the built-in Agent. Persist intent in existing Markdown documents with editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument, or describe the manual editor steps for the creator. The Agent cannot create documents.",
+        "Canvas/page command plans are disabled for the built-in Agent. Persist intent in existing Markdown documents with applyDocumentPatchPlan, editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument, or describe the manual editor steps for the creator. The Agent cannot create documents.",
     });
   }
   throw new Error(`Unsupported Agent harness tool: ${call.toolName}`);

@@ -1,5 +1,8 @@
 import { createDefaultText, createId } from "../domain/defaults";
+import { BUBBLE_TYPE_VALUES } from "../domain/schema";
 import { getBubbleTextBounds } from "../domain/helpers";
+import { normalizeProjectPageNames } from "../domain/pageNaming";
+import { DEFAULT_LOCALE } from "../i18n";
 import { DEFAULT_TEXT_FONT_FAMILY } from "../platform/localFonts";
 
 type AnyRecord = Record<string, unknown>;
@@ -9,11 +12,25 @@ const isRecord = (value: unknown): value is AnyRecord =>
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 
+const validBubbleTypes = new Set<string>(BUBBLE_TYPE_VALUES);
+
+const legacyBubbleTypeAliases: Record<string, string> = {
+  narration: "caption",
+  narrative: "caption",
+  narrationBox: "caption",
+};
+
 const toNumber = (value: unknown, fallback: number) =>
   typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
 const toStringValue = (value: unknown, fallback = "") =>
   typeof value === "string" ? value : fallback;
+
+const normalizeBubbleType = (value: unknown) => {
+  const rawType = toStringValue(value, "round");
+  const aliasedType = legacyBubbleTypeAliases[rawType] ?? rawType;
+  return validBubbleTypes.has(aliasedType) ? aliasedType : "round";
+};
 
 const hasLegacyBubbleText = (bubble: AnyRecord) =>
   typeof bubble.text === "string" ||
@@ -107,6 +124,39 @@ const normalizePageTextFonts = (page: AnyRecord) => {
   const texts = asArray(page.texts).filter((item) => isRecord(item)) as AnyRecord[];
   for (const text of texts) {
     text.fontFamily = DEFAULT_TEXT_FONT_FAMILY;
+  }
+};
+
+const normalizePageBubbles = (page: AnyRecord) => {
+  const bubbles = asArray(page.bubbles).filter((item) => isRecord(item)) as AnyRecord[];
+  for (const bubble of bubbles) {
+    const rawBubbleType = toStringValue(bubble.bubbleType, "round");
+    const bubbleType = normalizeBubbleType(bubble.bubbleType);
+    bubble.bubbleType = bubbleType;
+
+    if (rawBubbleType === "narration") {
+      bubble.showTail = false;
+    }
+
+    const legacyStyle = isRecord(bubble.style) ? bubble.style : null;
+    if (!legacyStyle) {
+      continue;
+    }
+
+    if (typeof bubble.backgroundColor !== "string" && typeof legacyStyle.fill === "string") {
+      bubble.backgroundColor = legacyStyle.fill;
+    }
+    if (typeof bubble.strokeColor !== "string" && typeof legacyStyle.stroke === "string") {
+      bubble.strokeColor = legacyStyle.stroke;
+    }
+    if (
+      typeof bubble.strokeWidth !== "number" &&
+      typeof legacyStyle.strokeWidth === "number" &&
+      Number.isFinite(legacyStyle.strokeWidth) &&
+      legacyStyle.strokeWidth >= 0
+    ) {
+      bubble.strokeWidth = legacyStyle.strokeWidth;
+    }
   }
 };
 
@@ -225,6 +275,7 @@ export const normalizeProjectForCurrentVersion = (rawProject: unknown): unknown 
     page.layers = asArray(page.layers).map((layer) => toStringValue(layer)).filter((layer) => layer.length > 0);
     page.groups = asArray(page.groups).filter((item) => isRecord(item));
 
+    normalizePageBubbles(page);
     migrateLegacyBubbleText(page);
     for (const bubble of page.bubbles as AnyRecord[]) {
       ensureBubbleContentCenter(bubble);
@@ -233,5 +284,8 @@ export const normalizeProjectForCurrentVersion = (rawProject: unknown): unknown 
     normalizePageGroups(page);
     return page;
   });
-  return project;
+  return normalizeProjectPageNames(
+    project as { pages: Array<{ name: string }> },
+    DEFAULT_LOCALE,
+  );
 };

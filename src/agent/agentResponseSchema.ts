@@ -93,6 +93,7 @@ const rawResponseSchema = z.object({
 });
 
 const allowedToolNames = new Set([
+  "toolInputError",
   "readProjectSummary",
   "listPages",
   "searchProject",
@@ -118,6 +119,7 @@ const allowedToolNames = new Set([
   "replaceDocumentSection",
   "replaceDocumentText",
   "editDocumentLines",
+  "applyDocumentPatchPlan",
   "validateDocumentAgainstProject",
   "proposeCommandPlan",
 ]);
@@ -142,6 +144,55 @@ const documentMetaPatchSchema = {
   title: z.string().min(1).optional(),
   ...documentMetaWithoutTitlePatchSchema,
 };
+
+const replaceLineOperationSchema = z.object({
+  type: z.literal("replace"),
+  startLine: z.number().min(1),
+  endLine: z.number().min(1),
+  content: z.string(),
+}).strict();
+const deleteLineOperationSchema = z.object({
+  type: z.literal("delete"),
+  startLine: z.number().min(1),
+  endLine: z.number().min(1),
+}).strict();
+const insertBeforeLineOperationSchema = z.object({
+  type: z.literal("insertBefore"),
+  line: z.number().min(1),
+  content: z.string(),
+}).strict();
+const insertAfterLineOperationSchema = z.object({
+  type: z.literal("insertAfter"),
+  line: z.number().min(0),
+  content: z.string(),
+}).strict();
+const documentLineOperationSchema = z.discriminatedUnion("type", [
+  replaceLineOperationSchema,
+  deleteLineOperationSchema,
+  insertBeforeLineOperationSchema,
+  insertAfterLineOperationSchema,
+]);
+const documentPatchPlanPatchSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("replaceSection"),
+    heading: z.string().min(1),
+    content: z.string(),
+    headingLevel: z.number().min(1).max(6).optional(),
+    occurrence: z.number().min(1).optional(),
+    createIfMissing: z.boolean().optional(),
+    contentIncludesHeading: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("replaceText"),
+    oldText: z.string().min(1),
+    newText: z.string(),
+    replaceAll: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("editLines"),
+    operations: z.array(documentLineOperationSchema).min(1),
+  }).strict(),
+]);
 
 const appendLimitReason = (
   reason: string | undefined,
@@ -239,23 +290,31 @@ const createInvalidAgentResponseShapeRepairCall = (
   reason: "Repair malformed Agent response JSON.",
 });
 
-const validateOneRequestedToolCall = (
-  call: { toolName: string; input?: unknown; reason?: string },
+export const validateAgentToolCallRequest = (
+  call: { toolName: string; input?: unknown; reason?: string; nativeToolCallId?: string },
   index: number,
 ): AgentToolCallRequest => {
+      const withNativeToolCallId = (validated: AgentToolCallRequest): AgentToolCallRequest =>
+        call.nativeToolCallId
+          ? { ...validated, nativeToolCallId: call.nativeToolCallId }
+          : validated;
       if (!allowedToolNames.has(call.toolName)) {
         throw new Error(`unknown tool: ${call.toolName}`);
       }
+      if (call.toolName === INTERNAL_TOOL_INPUT_ERROR_TOOL_NAME) {
+        const input = z.object({}).passthrough().parse(call.input ?? {});
+        return withNativeToolCallId({ toolName: call.toolName, input, reason: call.reason });
+      }
       if (call.toolName === "readPage") {
         const parsed = z.object({ pageId: z.string().min(1) }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "renderCurrentPage") {
         const parsed = z.object({
           detail: renderDetailSchema,
           crop: renderCropSchema,
         }).strict().parse(call.input ?? {});
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "renderPage") {
         const parsed = z.object({
@@ -263,7 +322,7 @@ const validateOneRequestedToolCall = (
           detail: renderDetailSchema,
           crop: renderCropSchema,
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "renderPanel") {
         const parsed = z.object({
@@ -271,28 +330,28 @@ const validateOneRequestedToolCall = (
           panelId: z.string().min(1),
           detail: renderDetailSchema,
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "readPages") {
         const parsed = z.object({
           pageIds: pageIdsSchema,
         }).strict().parse(call.input);
-        return {
+        return withNativeToolCallId({
           toolName: call.toolName,
           input: parsed,
           reason: appendLimitReason(call.reason, call.toolName, parsed.pageIds.length, AGENT_MAX_BATCH_READ_PAGES),
-        };
+        });
       }
       if (call.toolName === "renderPages") {
         const parsed = z.object({
           pageIds: pageIdsSchema,
           detail: renderDetailSchema,
         }).strict().parse(call.input);
-        return {
+        return withNativeToolCallId({
           toolName: call.toolName,
           input: parsed,
           reason: appendLimitReason(call.reason, call.toolName, parsed.pageIds.length, AGENT_MAX_BATCH_RENDER_PAGES),
-        };
+        });
       }
       if (call.toolName === "searchProject") {
         const parsed = z.object({
@@ -301,7 +360,7 @@ const validateOneRequestedToolCall = (
           objectTypes: z.array(z.enum(["panel", "text", "bubble", "element"])).optional(),
           limit: z.number().min(1).max(100).optional(),
         }).parse(call.input ?? {});
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "listImageAssets") {
         const parsed = z.object({
@@ -309,13 +368,13 @@ const validateOneRequestedToolCall = (
           query: z.string().optional(),
           limit: z.number().min(1).max(100).optional(),
         }).parse(call.input ?? {});
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "readDocument" || call.toolName === "validateDocumentAgainstProject") {
         const parsed = z.object({
           documentId: z.string().min(1),
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "readDocumentLines") {
         const parsed = z.object({
@@ -323,7 +382,7 @@ const validateOneRequestedToolCall = (
           startLine: z.number().min(1).optional(),
           endLine: z.number().min(1).optional(),
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "searchDocuments") {
         const parsed = z.object({
@@ -331,7 +390,7 @@ const validateOneRequestedToolCall = (
           role: z.string().min(1).optional(),
           limit: z.number().min(1).max(100).optional(),
         }).strict().parse(call.input ?? {});
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "writeDocument") {
         const parsed = z.object({
@@ -341,14 +400,14 @@ const validateOneRequestedToolCall = (
           ...documentMetaWithoutTitlePatchSchema,
           content: z.string(),
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "deleteDocument") {
         const parsed = z.object({
           operationId: z.string().min(1),
           documentId: z.string().min(1),
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "appendDocument") {
         const parsed = z.object({
@@ -359,7 +418,7 @@ const validateOneRequestedToolCall = (
           createHeadingIfMissing: z.boolean().optional(),
           ...documentMetaPatchSchema,
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "replaceDocumentSection") {
         const parsed = z.object({
@@ -373,7 +432,7 @@ const validateOneRequestedToolCall = (
           contentIncludesHeading: z.boolean().optional(),
           ...documentMetaPatchSchema,
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "replaceDocumentText") {
         const parsed = z.object({
@@ -384,48 +443,31 @@ const validateOneRequestedToolCall = (
           replaceAll: z.boolean().optional(),
           ...documentMetaPatchSchema,
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "editDocumentLines") {
-        const replaceOperationSchema = z.object({
-          type: z.literal("replace"),
-          startLine: z.number().min(1),
-          endLine: z.number().min(1),
-          content: z.string(),
-        }).strict();
-        const deleteOperationSchema = z.object({
-          type: z.literal("delete"),
-          startLine: z.number().min(1),
-          endLine: z.number().min(1),
-        }).strict();
-        const insertBeforeOperationSchema = z.object({
-          type: z.literal("insertBefore"),
-          line: z.number().min(1),
-          content: z.string(),
-        }).strict();
-        const insertAfterOperationSchema = z.object({
-          type: z.literal("insertAfter"),
-          line: z.number().min(0),
-          content: z.string(),
-        }).strict();
         const parsed = z.object({
           operationId: z.string().min(1),
           documentId: z.string().min(1),
-          operations: z.array(z.discriminatedUnion("type", [
-            replaceOperationSchema,
-            deleteOperationSchema,
-            insertBeforeOperationSchema,
-            insertAfterOperationSchema,
-          ])).min(1),
+          operations: z.array(documentLineOperationSchema).min(1),
           ...documentMetaPatchSchema,
         }).strict().parse(call.input);
-        return { toolName: call.toolName, input: parsed, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
+      }
+      if (call.toolName === "applyDocumentPatchPlan") {
+        const parsed = z.object({
+          operationId: z.string().min(1),
+          documentId: z.string().min(1),
+          patches: z.array(documentPatchPlanPatchSchema).min(1).max(12),
+          ...documentMetaPatchSchema,
+        }).strict().parse(call.input);
+        return withNativeToolCallId({ toolName: call.toolName, input: parsed, reason: call.reason });
       }
       if (call.toolName === "proposeCommandPlan") {
-        return { toolName: call.toolName, input: call.input, reason: call.reason };
+        return withNativeToolCallId({ toolName: call.toolName, input: call.input, reason: call.reason });
       }
       const input = z.object({}).passthrough().parse(call.input ?? {});
-      return { toolName: call.toolName, input, reason: call.reason };
+      return withNativeToolCallId({ toolName: call.toolName, input, reason: call.reason });
 };
 
 const validateRequestedToolCalls = (
@@ -474,9 +516,10 @@ const validateRequestedToolCalls = (
       toolName: call.toolName,
       input: call.input,
       reason: typeof call.reason === "string" ? call.reason : undefined,
+      nativeToolCallId: typeof call.nativeToolCallId === "string" ? call.nativeToolCallId : undefined,
     };
     try {
-      validCalls.push(validateOneRequestedToolCall(normalizedCall, index));
+      validCalls.push(validateAgentToolCallRequest(normalizedCall, index));
     } catch (error) {
       invalidCalls.push(createInvalidToolInputRepairCall(normalizedCall, index, error));
     }
@@ -784,7 +827,7 @@ const normalizeTaskProgress = (
     ...(percent !== null ? { percent: Math.max(0, Math.min(100, percent)) } : fallback.percent !== undefined ? { percent: fallback.percent } : {}),
   };
   const parsed = taskProgressSchema.safeParse(normalized);
-  return parsed.success ? parsed.data : fallback;
+  return parsed.success ? parsed.data as AgentTaskProgress : fallback;
 };
 
 export const validateAgentChatResponse = (value: unknown): AgentChatResponse => {
@@ -818,7 +861,7 @@ export const validateAgentChatResponse = (value: unknown): AgentChatResponse => 
       ),
       visionUnavailableReason: parsed.visionUnavailableReason,
       taskProgress: createFallbackTaskProgress("Repair malformed Agent response.", [repairCall], null),
-      requestTrace: parsed.requestTrace,
+      requestTrace: parsed.requestTrace as AgentChatResponse["requestTrace"],
       modelDebug: parsed.modelDebug,
     };
   }
@@ -836,7 +879,7 @@ export const validateAgentChatResponse = (value: unknown): AgentChatResponse => 
     warning: appendAgentWarning(parsed.warning, ignoredCommandPlanWarning),
     visionUnavailableReason: parsed.visionUnavailableReason,
     taskProgress: normalizeTaskProgress(parsed.taskProgress, fallbackTaskProgress),
-    requestTrace: parsed.requestTrace,
+    requestTrace: parsed.requestTrace as AgentChatResponse["requestTrace"],
     modelDebug: parsed.modelDebug,
   };
 };

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { getPageDisplayName } from "../../src/domain/pageNaming";
+import { projectSchema } from "../../src/domain/schema";
 import { DEFAULT_TEXT_FONT_FAMILY } from "../../src/platform/localFonts";
 import { normalizeProjectForCurrentVersion } from "../../src/storage/projectMigration";
 
@@ -70,5 +72,99 @@ describe("projectMigration font normalization", () => {
       DEFAULT_TEXT_FONT_FAMILY,
     ]);
   });
-});
 
+  it("renames legacy pages to the canonical stored page order", () => {
+    const rawProject = {
+      id: "project-pages",
+      title: "Pages",
+      type: "manga",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      pages: [
+        {
+          id: "page-b",
+          name: "Old Page 9",
+          width: 1200,
+          height: 1700,
+          background: "#fff",
+          panels: [],
+          texts: [],
+          bubbles: [],
+          groups: [],
+          layers: [],
+        },
+        {
+          id: "page-a",
+          name: "Old Page 1",
+          width: 1200,
+          height: 1700,
+          background: "#fff",
+          panels: [],
+          texts: [],
+          bubbles: [],
+          groups: [],
+          layers: [],
+        },
+      ],
+    };
+
+    const normalized = normalizeProjectForCurrentVersion(rawProject) as {
+      pages: Array<{ id: string; name: string }>;
+    };
+
+    expect(normalized.pages.map((page) => page.id)).toEqual(["page-b", "page-a"]);
+    expect(normalized.pages.map((page) => page.name)).toEqual([
+      getPageDisplayName("en", 0),
+      getPageDisplayName("en", 1),
+    ]);
+  });
+
+  it("migrates legacy narration bubble records into valid caption bubbles", () => {
+    const rawProject = {
+      id: "project-narration",
+      title: "Narration",
+      type: "cg",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      pages: [
+        {
+          id: "page-1",
+          name: "Page 1",
+          width: 1200,
+          height: 1600,
+          background: "#fff",
+          panels: [],
+          texts: [],
+          bubbles: [
+            {
+              id: "bubble-1",
+              x: 100,
+              y: 1300,
+              width: 1000,
+              height: 240,
+              contentCenter: { x: 500, y: 120 },
+              tailTip: { x: 500, y: 120 },
+              bubbleType: "narration",
+              style: {
+                fill: "rgba(255, 255, 255, 0.8)",
+                stroke: "transparent",
+                strokeWidth: 0,
+              },
+            },
+          ],
+          groups: [],
+          layers: ["bubble:bubble-1"],
+        },
+      ],
+    };
+
+    const normalized = projectSchema.parse(normalizeProjectForCurrentVersion(rawProject));
+    const bubble = normalized.pages[0].bubbles[0];
+
+    expect(bubble.bubbleType).toBe("caption");
+    expect(bubble.showTail).toBe(false);
+    expect(bubble.backgroundColor).toBe("rgba(255, 255, 255, 0.8)");
+    expect(bubble.strokeColor).toBe("transparent");
+    expect(bubble.strokeWidth).toBe(0);
+  });
+});

@@ -14,6 +14,8 @@ export type AgentHarnessToolResultLike = {
   input: unknown;
   result: unknown;
   createdAt: string;
+  resultHandle?: string;
+  resultByteLength?: number;
 };
 
 export type AgentToolResultReuseOptions = {
@@ -29,6 +31,8 @@ export type AgentCompletedToolCallIndexEntryLike = {
   projectUpdatedAt?: string | null;
   resultKeys: string[];
   reusableInCurrentProjectState: boolean;
+  resultHandle?: string;
+  resultByteLength?: number;
 };
 
 const readRecord = (value: unknown): Record<string, unknown> =>
@@ -70,6 +74,46 @@ const hashStableValue = (value: unknown) => hashString(stableStringify(value));
 
 const createDocumentMutationKeyPayload = (input: unknown) => {
   const record = readRecord(input);
+  const summarizeLineOperations = (operations: unknown) =>
+    Array.isArray(operations)
+      ? operations.map((operation) => {
+          const operationRecord = readRecord(operation);
+          const content = typeof operationRecord.content === "string" ? operationRecord.content : "";
+          return {
+            type: typeof operationRecord.type === "string" ? operationRecord.type : "",
+            startLine: typeof operationRecord.startLine === "number" ? operationRecord.startLine : null,
+            endLine: typeof operationRecord.endLine === "number" ? operationRecord.endLine : null,
+            line: typeof operationRecord.line === "number" ? operationRecord.line : null,
+            contentHash: hashString(content),
+            contentLength: content.length,
+          };
+        })
+      : [];
+  const summarizePatches = (patches: unknown) =>
+    Array.isArray(patches)
+      ? patches.map((patch) => {
+          const patchRecord = readRecord(patch);
+          const content = typeof patchRecord.content === "string" ? patchRecord.content : "";
+          const oldText = typeof patchRecord.oldText === "string" ? patchRecord.oldText : "";
+          const newText = typeof patchRecord.newText === "string" ? patchRecord.newText : "";
+          return {
+            type: typeof patchRecord.type === "string" ? patchRecord.type : "",
+            heading: typeof patchRecord.heading === "string" ? patchRecord.heading : "",
+            headingLevel: typeof patchRecord.headingLevel === "number" ? patchRecord.headingLevel : null,
+            occurrence: typeof patchRecord.occurrence === "number" ? patchRecord.occurrence : null,
+            createIfMissing: typeof patchRecord.createIfMissing === "boolean" ? patchRecord.createIfMissing : null,
+            contentIncludesHeading: typeof patchRecord.contentIncludesHeading === "boolean" ? patchRecord.contentIncludesHeading : null,
+            replaceAll: typeof patchRecord.replaceAll === "boolean" ? patchRecord.replaceAll : null,
+            contentHash: hashString(content),
+            contentLength: content.length,
+            oldTextHash: hashString(oldText),
+            oldTextLength: oldText.length,
+            newTextHash: hashString(newText),
+            newTextLength: newText.length,
+            operations: summarizeLineOperations(patchRecord.operations),
+          };
+        })
+      : [];
   const redactString = (key: string) => {
     const content = typeof record[key] === "string" ? record[key] : "";
     return {
@@ -94,20 +138,8 @@ const createDocumentMutationKeyPayload = (input: unknown) => {
     createIfMissing: typeof record.createIfMissing === "boolean" ? record.createIfMissing : null,
     contentIncludesHeading: typeof record.contentIncludesHeading === "boolean" ? record.contentIncludesHeading : null,
     replaceAll: typeof record.replaceAll === "boolean" ? record.replaceAll : null,
-    operations: Array.isArray(record.operations)
-      ? record.operations.map((operation) => {
-          const operationRecord = readRecord(operation);
-          const content = typeof operationRecord.content === "string" ? operationRecord.content : "";
-          return {
-            type: typeof operationRecord.type === "string" ? operationRecord.type : "",
-            startLine: typeof operationRecord.startLine === "number" ? operationRecord.startLine : null,
-            endLine: typeof operationRecord.endLine === "number" ? operationRecord.endLine : null,
-            line: typeof operationRecord.line === "number" ? operationRecord.line : null,
-            contentHash: hashString(content),
-            contentLength: content.length,
-          };
-        })
-      : [],
+    operations: summarizeLineOperations(record.operations),
+    patches: summarizePatches(record.patches),
     ...redactString("content"),
     ...redactString("oldText"),
     ...redactString("newText"),
@@ -119,6 +151,43 @@ const summarizeToolInputForIndex = (toolName: string, input: unknown) => {
     return input;
   }
   const record = readRecord(input);
+  const summarizeLineOperations = (operations: unknown) =>
+    Array.isArray(operations)
+      ? operations.map((operation) => {
+          const operationRecord = readRecord(operation);
+          const content = typeof operationRecord.content === "string" ? operationRecord.content : "";
+          return {
+            ...operationRecord,
+            ...(typeof operationRecord.content === "string"
+              ? { content: `[redacted:${content.length}]`, contentHash: hashString(content) }
+              : {}),
+          };
+        })
+      : operations;
+  const summarizePatches = (patches: unknown) =>
+    Array.isArray(patches)
+      ? patches.map((patch) => {
+          const patchRecord = readRecord(patch);
+          const content = typeof patchRecord.content === "string" ? patchRecord.content : "";
+          const oldText = typeof patchRecord.oldText === "string" ? patchRecord.oldText : "";
+          const newText = typeof patchRecord.newText === "string" ? patchRecord.newText : "";
+          return {
+            ...patchRecord,
+            ...(typeof patchRecord.content === "string"
+              ? { content: `[redacted:${content.length}]`, contentHash: hashString(content) }
+              : {}),
+            ...(typeof patchRecord.oldText === "string"
+              ? { oldText: `[redacted:${oldText.length}]`, oldTextHash: hashString(oldText) }
+              : {}),
+            ...(typeof patchRecord.newText === "string"
+              ? { newText: `[redacted:${newText.length}]`, newTextHash: hashString(newText) }
+              : {}),
+            ...(Array.isArray(patchRecord.operations)
+              ? { operations: summarizeLineOperations(patchRecord.operations) }
+              : {}),
+          };
+        })
+      : patches;
   return {
     ...record,
     ...(typeof record.content === "string"
@@ -130,6 +199,8 @@ const summarizeToolInputForIndex = (toolName: string, input: unknown) => {
     ...(typeof record.newText === "string"
       ? { newText: `[redacted:${record.newText.length}]`, newTextHash: hashString(record.newText) }
       : {}),
+    ...(Array.isArray(record.operations) ? { operations: summarizeLineOperations(record.operations) } : {}),
+    ...(Array.isArray(record.patches) ? { patches: summarizePatches(record.patches) } : {}),
   };
 };
 
@@ -324,7 +395,8 @@ export const createDuplicateToolCallSkippedResult = (
             toolName: reusedResult.toolName,
             createdAt: reusedResult.createdAt,
             projectUpdatedAt: readResultProjectUpdatedAt(reusedResult),
-        }
+            ...(typeof reusedResult.resultHandle === "string" ? { resultHandle: reusedResult.resultHandle } : {}),
+          }
         : null,
       ...(operationId ? { operationId, alreadyApplied: writeAlreadyApplied } : {}),
       reason: operationId
@@ -363,6 +435,8 @@ export const createCachedAgentToolResult = (
         }
       : reusedResult.result,
     createdAt,
+    ...(typeof reusedResult.resultHandle === "string" ? { resultHandle: reusedResult.resultHandle } : {}),
+    ...(typeof reusedResult.resultByteLength === "number" ? { resultByteLength: reusedResult.resultByteLength } : {}),
   };
 };
 
@@ -400,6 +474,8 @@ export const createCompletedAgentToolCallIndex = (
         projectUpdatedAt: readResultProjectUpdatedAt(result),
         resultKeys: Object.keys(resultRecord).sort(),
         reusableInCurrentProjectState,
+        ...(typeof result.resultHandle === "string" ? { resultHandle: result.resultHandle } : {}),
+        ...(typeof result.resultByteLength === "number" ? { resultByteLength: result.resultByteLength } : {}),
       });
     }
   }
@@ -436,17 +512,17 @@ export const selectAgentDynamicToolResultsForPrompt = (
 ) => {
   const recentLimit = options.recentLimit ?? 12;
   const preservedResultLimit = options.preservedResultLimit ?? 10;
-  const budgetLimit = options.budgetLimit ?? 3;
-  const skippedLimit = options.skippedLimit ?? 3;
+  const budgetLimit = options.budgetLimit ?? 0;
+  const skippedLimit = options.skippedLimit ?? 2;
 
   const latestMeaningful = new Map<string, { index: number; result: AgentHarnessToolResultLike }>();
   const latestPinnedContext = new Map<string, { index: number; result: AgentHarnessToolResultLike }>();
   const budgetResults: Array<{ index: number; result: AgentHarnessToolResultLike }> = [];
   const skippedResults: Array<{ index: number; result: AgentHarnessToolResultLike }> = [];
-  const recentResults = results.slice(-recentLimit).map((result, offset) => ({
-    index: results.length - Math.min(results.length, recentLimit) + offset,
-    result,
-  }));
+  const recentMeaningfulResults = results
+    .map((result, index) => ({ index, result }))
+    .filter((entry) => !isToolBudgetResult(entry.result))
+    .slice(-recentLimit);
 
   results.forEach((result, index) => {
     if (isToolBudgetResult(result)) {
@@ -474,9 +550,13 @@ export const selectAgentDynamicToolResultsForPrompt = (
 
   Array.from(latestPinnedContext.values()).forEach(add);
   Array.from(latestMeaningful.values()).slice(-preservedResultLimit).forEach(add);
-  budgetResults.slice(-budgetLimit).forEach(add);
-  skippedResults.slice(-skippedLimit).forEach(add);
-  recentResults.forEach(add);
+  if (budgetLimit > 0) {
+    budgetResults.slice(-budgetLimit).forEach(add);
+  }
+  if (skippedLimit > 0) {
+    skippedResults.slice(-skippedLimit).forEach(add);
+  }
+  recentMeaningfulResults.forEach(add);
 
   return Array.from(selected.values())
     .sort((left, right) => left.index - right.index)

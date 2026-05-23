@@ -36,6 +36,8 @@ import {
 } from "./src/agent/roles";
 import {
   AGENT_METADOC_ONLY_PROTOCOL_SYSTEM_PROMPT,
+  AGENT_METADOC_ONLY_NATIVE_TOOL_PROTOCOL_SYSTEM_PROMPT,
+  AGENT_NATIVE_TOOL_PROTOCOL_SYSTEM_PROMPT,
   AGENT_PROTOCOL_SYSTEM_PROMPT,
   DEFAULT_AGENT_SYSTEM_PROMPT,
   normalizeAgentSystemPrompt,
@@ -43,14 +45,16 @@ import {
 } from "./src/agent/systemPrompt";
 import {
   applyAppendDocumentEdit,
+  applyDocumentPatchPlanEdit,
   applyEditDocumentLinesEdit,
   applyReplaceDocumentSectionEdit,
   applyReplaceDocumentTextEdit,
-  createDocumentLinesResult,
+  createBoundedDocumentLinesResult,
   incrementalDocumentEditFailureReason,
   isIncrementalDocumentEditVerifiedNoop,
   isAgentDocumentMutationToolName,
   isVerifiedAgentDocumentMutationResult,
+  type ApplyDocumentPatchPlanInput,
   type AppendDocumentInput,
   type EditDocumentLinesInput,
   type IncrementalDocumentEdit,
@@ -77,6 +81,7 @@ import {
 } from "./src/agent/openRouterProviderRouting";
 import {
   createCachedAgentToolResult,
+  createAgentToolCallKey,
   createCompletedAgentToolCallIndex,
   createDuplicateToolCallSkippedResult,
   findReusableAgentToolResult,
@@ -91,12 +96,25 @@ import {
   resolveAgentContextWindowTokens,
 } from "./src/agent/contextWindow";
 import {
+  DEFAULT_AGENT_RUN_MODE,
+  getAgentRunModeProfile,
+  parseAgentRunMode,
+  type AgentRunMode,
+} from "./src/agent/runMode";
+import { createAgentOutputBudgetGuidance } from "./src/agent/outputBudget";
+import {
+  parseAgentMaxOutputTokens,
+  resolveAgentMaxOutputTokens,
+} from "./src/agent/outputTokens";
+import { createOpenRouterNativeTools, type OpenRouterNativeTool } from "./src/agent/nativeTools";
+import {
   createAgentConversationFingerprint,
   isAgentHarnessDiagnosticContent,
   isAgentMutationCompletionClaim,
   sanitizeAgentConversationMessages,
 } from "./src/agent/conversationSanitizer";
 import { compileAgentCurrentTaskPacket, type AgentCurrentTaskPacket } from "./src/agent/contextCompiler";
+import { summarizeAgentToolResultForPrompt } from "./src/agent/toolResultSummary";
 
 const PROJECTS_DIR_NAME = process.env.MANGAMAKER_PROJECTS_DIR?.trim() || "projects";
 const PROJECT_SYNC_TOKEN = process.env.MANGAMAKER_PROJECT_SYNC_TOKEN?.trim() || "";
@@ -112,6 +130,7 @@ const AGENT_DOCS_MANIFEST_FILE = "manifest.json";
 const AGENT_DOCS_OPERATIONS_FILE = ".agent-document-operations.json";
 const AGENT_RUNS_DIR = "agent-runs";
 const AGENT_RUN_FILE = "run.json";
+const AGENT_RUN_TOOL_RESULTS_DIR = "tool-results";
 const API_BASE = "/__mangamaker__/persistence";
 const AGENT_API_BASE = "/__mangamaker__/agent";
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -147,10 +166,6 @@ const parseBoundedNumberEnv = (
   return Math.min(max, Math.max(min, parsed));
 };
 const OPENROUTER_REQUEST_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.MANGAMAKER_OPENROUTER_TIMEOUT_MS, 300000);
-const OPENROUTER_MAX_TOKENS = parsePositiveIntegerEnv(
-  process.env.MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS ?? process.env.MANGAMAKER_AGENT_MAX_TOKENS,
-  16384,
-);
 const OPENROUTER_REASONING_MAX_TOKENS = parsePositiveIntegerEnv(
   process.env.MANGAMAKER_AGENT_REASONING_MAX_TOKENS,
   2048,
@@ -166,6 +181,9 @@ const OPENROUTER_REPETITION_PENALTY = parseBoundedNumberEnv(
 );
 const AGENT_ENV_CONTEXT_WINDOW_TOKENS = parseAgentContextWindowTokens(
   process.env.MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS ?? process.env.MANGAMAKER_AGENT_CONTEXT_WINDOW,
+);
+const AGENT_ENV_MAX_OUTPUT_TOKENS = parseAgentMaxOutputTokens(
+  process.env.MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS ?? process.env.MANGAMAKER_AGENT_MAX_TOKENS,
 );
 const AUTH_COOKIE_NAME = "mangamaker_auth";
 const AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
@@ -1947,6 +1965,7 @@ type AgentContextPayload = {
 
 type AgentChatPayload = {
   messages?: Array<{ role: "user" | "assistant"; content: string }>;
+  nativeMessages?: OpenRouterNativeMessage[];
   conversationContextId?: string;
   conversationContextFingerprint?: string;
   conversationContextUpdatedAt?: string;
@@ -1962,6 +1981,7 @@ type AgentChatPayload = {
     initialToolResults?: AgentHarnessToolResult[];
     dynamicToolResults?: AgentHarnessToolResult[];
     completedToolCallIndex?: unknown[];
+    taskProtocol?: Record<string, unknown>;
     resourcePolicy?: {
       modelCapability?: AgentModelCapability;
       metadocOnly?: boolean;
@@ -1973,23 +1993,73 @@ type AgentChatPayload = {
   canvasSnapshot?: AgentContextPayload["canvasSnapshot"];
   approvedCommandPlan?: AgentCommandPlan | null;
   modelOverride?: string;
+  runMode?: AgentRunMode;
   contextWindowTokens?: number;
   repetitionPenalty?: number;
   finalAnswerOnly?: boolean;
   requestTrace?: AgentRequestTraceMetadata;
 };
 
+type AgentTaskProgress = {
+  objective: string;
+  phase: "planning" | "gathering_context" | "editing_document" | "validating" | "reporting" | "complete" | "blocked";
+  status: "planning" | "running" | "needs_tool" | "waiting_for_user" | "completed" | "blocked";
+  steps: Array<{
+    id: string;
+    title: string;
+    status: "pending" | "in_progress" | "completed" | "blocked";
+    stopCondition?: string;
+  }>;
+  currentStepId?: string;
+  stopCondition: string;
+  stopReason?: string;
+  nextAction?: string;
+  percent?: number;
+};
+
 type AgentToolCallRequest = {
   toolName: string;
   input: unknown;
   reason?: string;
+  nativeToolCallId?: string;
 };
+
+type OpenRouterNativeToolCall = {
+  id: string;
+  type?: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+};
+
+type OpenRouterNativeAssistantMessage = {
+  role: "assistant";
+  content?: string | null;
+  tool_calls?: OpenRouterNativeToolCall[];
+};
+
+type OpenRouterNativeToolMessage = {
+  role: "tool";
+  tool_call_id: string;
+  name?: string;
+  content: string;
+};
+
+type OpenRouterNativeMessage = OpenRouterNativeAssistantMessage | OpenRouterNativeToolMessage;
 
 type AgentHarnessToolResult = {
   toolName: string;
   input: unknown;
   result: unknown;
   createdAt: string;
+  resultHandle?: string;
+  resultByteLength?: number;
+};
+
+type AgentExecutedToolResultPair = {
+  call: AgentToolCallRequest;
+  result: AgentHarnessToolResult;
 };
 
 type AgentRequestTraceStatus = "pending" | "success" | "error" | "timeout";
@@ -2088,6 +2158,7 @@ type AgentRunPublic = {
   id: string;
   projectId: string;
   roleId: string;
+  runMode?: AgentRunMode;
   conversationContextId?: string;
   conversationContextFingerprint?: string;
   conversationContextUpdatedAt?: string;
@@ -2098,6 +2169,8 @@ type AgentRunPublic = {
   steps: AgentRunStep[];
   trace: AgentRequestTrace[];
   pendingToolCalls: AgentToolCallRequest[];
+  serverMutationRoundCount?: number;
+  serverMutationToolCallCount?: number;
   latestResponse?: unknown;
   error?: string;
 };
@@ -2108,6 +2181,8 @@ type AgentRunState = AgentRunPublic & {
   dynamicToolResults: AgentHarnessToolResult[];
   serverToolCallCount?: number;
   serverToolRoundCount?: number;
+  serverMutationRoundCount?: number;
+  serverMutationToolCallCount?: number;
   duplicateToolCallStreak?: number;
   finalAnswerOnlyRepairCount?: number;
   documentWriteRepairCount?: number;
@@ -2161,6 +2236,10 @@ type OpenRouterModelMetadata = {
   id: string;
   name?: string;
   context_length?: number;
+  top_provider?: {
+    context_length?: number;
+    max_completion_tokens?: number;
+  };
   architecture?: {
     input_modalities?: string[];
     output_modalities?: string[];
@@ -2172,6 +2251,7 @@ type AgentAvailableModel = {
   id: string;
   name: string;
   contextLength: number | null;
+  maxOutputTokens: number | null;
   inputModalities: string[];
   outputModalities: string[];
   capability: "multimodal" | "metadoc";
@@ -2224,7 +2304,16 @@ const filterAllowedAgentModels = (models: OpenRouterModelMetadata[]): AgentAvail
       return {
         id: model.id,
         name: model.name ?? model.id,
-        contextLength: typeof model.context_length === "number" ? model.context_length : null,
+        contextLength:
+          typeof model.top_provider?.context_length === "number"
+            ? model.top_provider.context_length
+            : typeof model.context_length === "number"
+              ? model.context_length
+              : null,
+        maxOutputTokens:
+          typeof model.top_provider?.max_completion_tokens === "number"
+            ? model.top_provider.max_completion_tokens
+            : null,
         inputModalities: model.architecture?.input_modalities ?? [],
         outputModalities: model.architecture?.output_modalities ?? [],
         capability,
@@ -2313,6 +2402,8 @@ const upsertAgentRequestTrace = (trace: AgentRequestTrace) => {
 const getLatestAgentRequestTrace = (requestId: string) =>
   agentRequestTraces.find((entry) => entry.requestId === requestId) ?? null;
 
+let mirrorAgentRequestTraceToRun: ((trace: AgentRequestTrace) => void) | null = null;
+
 const createAgentRequestTrace = (metadata: AgentRequestTraceMetadata): AgentRequestTrace => {
   const now = new Date().toISOString();
   return {
@@ -2363,6 +2454,7 @@ const recordAgentTraceEvent = (
     ...(options.error ? { error: options.error } : {}),
   };
   upsertAgentRequestTrace(nextTrace);
+  mirrorAgentRequestTraceToRun?.(nextTrace);
   return nextTrace;
 };
 
@@ -2397,6 +2489,7 @@ const toPublicAgentRun = (run: AgentRunState): AgentRunPublic => ({
   id: run.id,
   projectId: run.projectId,
   roleId: run.roleId,
+  ...(run.runMode ? { runMode: run.runMode } : {}),
   ...(run.conversationContextId ? { conversationContextId: run.conversationContextId } : {}),
   ...(run.conversationContextFingerprint ? { conversationContextFingerprint: run.conversationContextFingerprint } : {}),
   ...(run.conversationContextUpdatedAt ? { conversationContextUpdatedAt: run.conversationContextUpdatedAt } : {}),
@@ -2407,6 +2500,8 @@ const toPublicAgentRun = (run: AgentRunState): AgentRunPublic => ({
   steps: run.steps,
   trace: run.trace,
   pendingToolCalls: run.pendingToolCalls,
+  ...(typeof run.serverMutationRoundCount === "number" ? { serverMutationRoundCount: run.serverMutationRoundCount } : {}),
+  ...(typeof run.serverMutationToolCallCount === "number" ? { serverMutationToolCallCount: run.serverMutationToolCallCount } : {}),
   latestResponse: run.latestResponse,
   ...(run.error ? { error: run.error } : {}),
 });
@@ -2520,6 +2615,66 @@ const getAgentRunDirPath = async (projectId: string, runId: string) => {
   const runsDir = await getAgentRunProjectDir(projectId);
   return resolvePathInsideProjectDir(runsDir, sanitizePathComponent(runId, "run"));
 };
+
+const createAgentToolResultHandle = (run: AgentRunState, result: AgentHarnessToolResult) => {
+  const hash = createHash("sha1")
+    .update(run.projectId)
+    .update("\0")
+    .update(run.id)
+    .update("\0")
+    .update(result.toolName)
+    .update("\0")
+    .update(createAgentToolCallKey({ toolName: result.toolName, input: result.input }))
+    .update("\0")
+    .update(result.createdAt)
+    .digest("hex")
+    .slice(0, 24);
+  return `tool-result-${hash}`;
+};
+
+const getAgentRunToolResultFilePath = async (projectId: string, runId: string, handle: string) => {
+  const runDir = await getAgentRunDirPath(projectId, runId);
+  const toolResultsDir = resolvePathInsideProjectDir(runDir, AGENT_RUN_TOOL_RESULTS_DIR);
+  await fsp.mkdir(toolResultsDir, { recursive: true });
+  return path.join(toolResultsDir, `${sanitizePathComponent(handle, "tool-result")}.json`);
+};
+
+const persistAgentRunToolResults = async (
+  run: AgentRunState,
+  results: AgentHarnessToolResult[],
+) => Promise.all(
+  results.map(async (result) => {
+    const handle = result.resultHandle ?? createAgentToolResultHandle(run, result);
+    const existingFilePath = await getAgentRunToolResultFilePath(run.projectId, run.id, handle);
+    if (result.resultHandle) {
+      const existingStats = await fsp.stat(existingFilePath).catch(() => null);
+      if (existingStats?.isFile()) {
+        return {
+          ...result,
+          resultHandle: handle,
+          resultByteLength: result.resultByteLength ?? existingStats.size,
+        };
+      }
+    }
+    const filePayload = {
+      handle,
+      projectId: run.projectId,
+      runId: run.id,
+      toolName: result.toolName,
+      input: result.input,
+      result: result.result,
+      createdAt: result.createdAt,
+      persistedAt: new Date().toISOString(),
+    };
+    const serialized = `${JSON.stringify(filePayload, null, 2)}\n`;
+    await writeFileAtomically(existingFilePath, serialized);
+    return {
+      ...result,
+      resultHandle: handle,
+      resultByteLength: Buffer.byteLength(serialized, "utf8"),
+    };
+  }),
+);
 
 const isSupersededAgentRun = (projectId: string, runId: string) =>
   supersededAgentRunKeys.has(createAgentRunStorageKey(projectId, runId));
@@ -2658,6 +2813,7 @@ const recoverStalePersistedAgentRun = async (run: AgentRunState) => {
   const now = new Date().toISOString();
   run.status = "failed";
   run.error = message;
+  run.updatedAt = now;
   run.pendingToolCalls = [];
   run.steps = run.steps.map((step) =>
     step.status === "running"
@@ -2702,6 +2858,51 @@ const saveAndBroadcastAgentRun = async (run: AgentRunState, type: AgentRunEvent[
   await persistAgentRun(run);
   broadcastAgentRun(run, type);
   return true;
+};
+
+const AGENT_LIVE_TRACE_PERSIST_INTERVAL_MS = 1000;
+const agentRunLiveTracePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+const readAgentTraceRunStepIds = (requestId: string) => {
+  const separatorIndex = requestId.lastIndexOf(":");
+  if (separatorIndex <= 0 || separatorIndex >= requestId.length - 1) {
+    return null;
+  }
+  return {
+    runId: requestId.slice(0, separatorIndex),
+    stepId: requestId.slice(separatorIndex + 1),
+  };
+};
+
+const scheduleLiveTracePersist = (run: AgentRunState) => {
+  const queueKey = createAgentRunStorageKey(run.projectId, run.id);
+  if (agentRunLiveTracePersistTimers.has(queueKey)) {
+    return;
+  }
+  const timer = setTimeout(() => {
+    agentRunLiveTracePersistTimers.delete(queueKey);
+    void persistAgentRun(run).catch(() => undefined);
+  }, AGENT_LIVE_TRACE_PERSIST_INTERVAL_MS);
+  agentRunLiveTracePersistTimers.set(queueKey, timer);
+};
+
+mirrorAgentRequestTraceToRun = (trace) => {
+  const ids = readAgentTraceRunStepIds(trace.requestId);
+  if (!ids) {
+    return;
+  }
+  const run = agentRunStates.get(ids.runId);
+  if (!run || !isActiveAgentRunStateObject(run)) {
+    return;
+  }
+  const step = run.steps.find((entry) => entry.id === ids.stepId);
+  if (step) {
+    step.trace = trace;
+  }
+  run.trace = [trace, ...run.trace.filter((entry) => entry.requestId !== trace.requestId)].slice(0, 80);
+  run.updatedAt = trace.updatedAt;
+  broadcastAgentRun(run);
+  scheduleLiveTracePersist(run);
 };
 
 const isCancellableAgentRunStatus = (status: AgentRunStatus) =>
@@ -2759,6 +2960,15 @@ const getAgentRunState = async (runId: string, projectId?: string | null) => {
   }
   const persistedRun = await readPersistedAgentRun(projectId, runId);
   if (persistedRun) {
+    const persistedRunMode =
+      parseAgentRunMode(persistedRun.runMode) ??
+      parseAgentRunMode(persistedRun.payload?.runMode) ??
+      DEFAULT_AGENT_RUN_MODE;
+    persistedRun.runMode = persistedRunMode;
+    persistedRun.payload = {
+      ...persistedRun.payload,
+      runMode: persistedRunMode,
+    };
     const recoveredRun = await recoverStalePersistedAgentRun(persistedRun);
     agentRunStates.set(runId, recoveredRun);
     return recoveredRun;
@@ -2909,6 +3119,7 @@ const summarizeToolResultsForRun = (
     return {
       toolName: result.toolName ?? "unknown",
       createdAt: result.createdAt ?? null,
+      resultHandle: "resultHandle" in result && typeof result.resultHandle === "string" ? result.resultHandle : null,
       resultKeys: Object.keys(resultRecord).slice(0, 20),
       contentLength:
         typeof resultRecord.content === "string"
@@ -2919,10 +3130,9 @@ const summarizeToolResultsForRun = (
     };
   });
 
-const SERVER_AGENT_MAX_TOOL_ROUNDS = 24;
-const SERVER_AGENT_MAX_TOOL_CALLS = 72;
 const SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND = 24;
 const SERVER_AGENT_MAX_DUPLICATE_TOOL_GUIDED_RETRIES = 4;
+const SERVER_AGENT_MAX_MODEL_ATTEMPTS = 3;
 const SERVER_AGENT_MAX_FINAL_ANSWER_ONLY_REPAIRS = 1;
 const SERVER_AGENT_MAX_DOCUMENT_WRITE_REPAIRS = 2;
 const SERVER_AGENT_MAX_INCOMPLETE_NO_ACTION_REPAIRS = 2;
@@ -2930,7 +3140,11 @@ const SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS = parsePositiveIntegerEnv(
   process.env.MANGAMAKER_AGENT_FINAL_ANSWER_TIMEOUT_MS,
   OPENROUTER_REQUEST_TIMEOUT_MS,
 );
-const AGENT_STALE_RUNNING_MS = Math.max(90_000, SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS + 30_000);
+const AGENT_STALE_RUNNING_MS = Math.max(
+  90_000,
+  SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS + 30_000,
+  OPENROUTER_REQUEST_TIMEOUT_MS * SERVER_AGENT_MAX_MODEL_ATTEMPTS + 45_000,
+);
 const SERVER_EXECUTABLE_AGENT_TOOLS = new Set([
   "readProjectSummary",
   "listPages",
@@ -2952,6 +3166,7 @@ const SERVER_EXECUTABLE_AGENT_TOOLS = new Set([
   "replaceDocumentSection",
   "replaceDocumentText",
   "editDocumentLines",
+  "applyDocumentPatchPlan",
   "validateDocumentAgainstProject",
   "proposeCommandPlan",
 ]);
@@ -2968,8 +3183,33 @@ const METADOC_ONLY_SERVER_AGENT_TOOLS = new Set([
   "replaceDocumentSection",
   "replaceDocumentText",
   "editDocumentLines",
+  "applyDocumentPatchPlan",
   "validateDocumentAgainstProject",
 ]);
+
+const getPayloadRunModeProfile = (payload: Pick<AgentChatPayload, "runMode">) =>
+  getAgentRunModeProfile(payload.runMode);
+
+const getRunModeProfileForRun = (run: AgentRunState) =>
+  getPayloadRunModeProfile(run.payload);
+
+const resolvePayloadMaxOutputTokens = (
+  payload: AgentChatPayload,
+  config: {
+    model: string | null;
+    testMode: boolean;
+    maxOutputMaxTokens?: number | null;
+  },
+) =>
+  resolveAgentMaxOutputTokens({
+    envTokens: AGENT_ENV_MAX_OUTPUT_TOKENS,
+    model: config.model,
+    modelMaxOutputTokens: config.maxOutputMaxTokens ?? null,
+    testMode: config.testMode,
+  }).maxOutputTokens;
+
+const resolvePayloadReasoningMaxTokens = (payload: AgentChatPayload) =>
+  Math.max(1, Math.min(OPENROUTER_REASONING_MAX_TOKENS, getPayloadRunModeProfile(payload).reasoningMaxTokens));
 
 const getRunModelCapability = (run: AgentRunState): AgentModelCapability => {
   const policy = asRecord(run.payload.harness?.resourcePolicy);
@@ -3011,6 +3251,31 @@ const createMetadocOnlyServerBlockedResult = (run: AgentRunState, call: AgentToo
       "Use the preloaded readPrimeDirective and readActiveRoleMetadoc results for pinned context. This mode is document-only: it may read/list/search any Markdown document and write only under the active role working directory, but it cannot inspect pages, images, or renders.",
   });
 
+const isAgentMutationToolCall = (call: Pick<AgentToolCallRequest, "toolName">) =>
+  isAgentDocumentMutationToolName(call.toolName);
+
+const countAgentMutationToolCalls = (calls: Array<Pick<AgentToolCallRequest, "toolName">>) =>
+  calls.filter(isAgentMutationToolCall).length;
+
+const createMutationBudgetExceededResult = (
+  run: AgentRunState,
+  call: AgentToolCallRequest | null,
+) => {
+  const profile = getRunModeProfileForRun(run);
+  return createAgentHarnessToolResult("mutationBudget", call?.input ?? {}, {
+    exhausted: true,
+    blocked: true,
+    attemptedToolName: call?.toolName ?? null,
+    consumedMutationRounds: run.serverMutationRoundCount ?? 0,
+    consumedMutationToolCalls: run.serverMutationToolCallCount ?? 0,
+    maxMutationRounds: profile.mutationBudget.maxMutationRounds,
+    reason:
+      "MangaMaker permits at most two document mutation rounds in one Agent run. No further document mutation tools will be executed in this run.",
+    guidance:
+      "Return a final report from verified writes, mark the task blocked with the remaining work, or ask the creator to start a new instruction for additional edits.",
+  });
+};
+
 const createAgentHarnessToolResult = (
   toolName: string,
   input: unknown,
@@ -3020,6 +3285,43 @@ const createAgentHarnessToolResult = (
   input,
   result: resultValue,
   createdAt: new Date().toISOString(),
+});
+
+const filterHarnessForModelCapability = (
+  harness: NonNullable<AgentChatPayload["harness"]>,
+  modelCapability: AgentModelCapability,
+): NonNullable<AgentChatPayload["harness"]> => {
+  if (modelCapability !== "metadoc") {
+    return harness;
+  }
+  return {
+    ...harness,
+    tools: (harness.tools ?? []).filter((entry) => {
+      const record = entry && typeof entry === "object" && !Array.isArray(entry)
+        ? entry as { name?: unknown }
+        : {};
+      return typeof record.name === "string" && METADOC_ONLY_SERVER_AGENT_TOOLS.has(record.name);
+    }),
+    resourcePolicy: {
+      ...(harness.resourcePolicy ?? {}),
+      modelCapability: "metadoc",
+      metadocOnly: true,
+      allPagesReadable: false,
+      assetsReadableOnDemand: false,
+      pagePanelBoundary:
+        "Unavailable in text-only document mode. This model cannot inspect pages or panels.",
+    },
+  };
+};
+
+const normalizePayloadForModelCapability = (
+  payload: AgentChatPayload,
+  modelCapability: AgentModelCapability,
+): AgentChatPayload => ({
+  ...payload,
+  ...(payload.harness
+    ? { harness: filterHarnessForModelCapability(payload.harness, modelCapability) }
+    : {}),
 });
 
 const asRecord = (value: unknown): Record<string, unknown> =>
@@ -3242,6 +3544,8 @@ const incrementalDocumentEditSummary = (
   changed: edit.changed,
   edit,
   document: documentResultSummary(document),
+  guidance:
+    "This document mutation was saved and verified. If this satisfies latestCreatorInstruction and the stopCondition, report completion now with no further tool calls.",
 });
 
 const incrementalDocumentNoWriteSummary = (
@@ -3404,10 +3708,25 @@ const buildRunHarnessWithDynamicResults = (
   run: AgentRunState,
   dynamicToolResults: AgentHarnessToolResult[],
 ): NonNullable<AgentChatPayload["harness"]> => {
-  const baseHarness = run.payload.harness ?? { initialToolResults: [] };
+  const baseHarness = filterHarnessForModelCapability(
+    run.payload.harness ?? { initialToolResults: [] },
+    getRunModelCapability(run),
+  );
   const initialToolResults = baseHarness.initialToolResults ?? [];
+  const runModeProfile = getRunModeProfileForRun(run);
+  const taskProtocol = baseHarness.taskProtocol
+    ? {
+        ...baseHarness.taskProtocol,
+        mutationBudget: {
+          maxMutationRounds: runModeProfile.mutationBudget.maxMutationRounds,
+          consumedMutationRounds: run.serverMutationRoundCount ?? 0,
+          rule: runModeProfile.mutationBudget.rule,
+        },
+      }
+    : baseHarness.taskProtocol;
   return {
     ...baseHarness,
+    ...(taskProtocol ? { taskProtocol } : {}),
     dynamicToolResults,
     completedToolCallIndex: createCompletedAgentToolCallIndex(
       [...initialToolResults, ...dynamicToolResults],
@@ -3468,11 +3787,17 @@ const executeServerAgentToolCall = async (
     });
   }
   if (call.toolName === "readPages") {
-    const pageIds = Array.isArray(input.pageIds)
+    const runModeProfile = getRunModeProfileForRun(run);
+    const requestedPageIds = Array.isArray(input.pageIds)
       ? input.pageIds.filter((pageId): pageId is string => typeof pageId === "string" && pageId.trim().length > 0)
       : [];
+    const pageIds = requestedPageIds.slice(0, runModeProfile.batchLimits.readPages);
     return createProjectStateToolResult(context, call.toolName, call.input, {
       pageIds,
+      requestedPageIdCount: requestedPageIds.length,
+      maxPageIds: runModeProfile.batchLimits.readPages,
+      truncated: requestedPageIds.length > pageIds.length,
+      skippedPageIds: requestedPageIds.slice(runModeProfile.batchLimits.readPages),
       pages: pageIds.map((pageId) => getPayloadPageById(context, pageId)),
     });
   }
@@ -3538,7 +3863,7 @@ const executeServerAgentToolCall = async (
     return createAgentHarnessToolResult(call.toolName, call.input, {
       available: false,
       reason:
-        "Canvas/page command plans are disabled for the built-in Agent. Use editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument for existing Markdown documents. The Agent cannot create documents.",
+        "Canvas/page command plans are disabled for the built-in Agent. Use applyDocumentPatchPlan, editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument for existing Markdown documents. The Agent cannot create documents.",
     });
   }
   if (call.toolName === "listDocuments") {
@@ -3581,7 +3906,7 @@ const executeServerAgentToolCall = async (
     if (isDocumentLookupFailure(document)) {
       return createAgentHarnessToolResult(call.toolName, call.input, document);
     }
-    return createAgentHarnessToolResult(call.toolName, call.input, createDocumentLinesResult(document, {
+    return createAgentHarnessToolResult(call.toolName, call.input, createBoundedDocumentLinesResult(document, {
       documentId: document.id,
       startLine: typeof input.startLine === "number" ? input.startLine : undefined,
       endLine: typeof input.endLine === "number" ? input.endLine : undefined,
@@ -3936,6 +4261,60 @@ const executeServerAgentToolCall = async (
       throw error;
     }
   }
+  if (call.toolName === "applyDocumentPatchPlan") {
+    const operationId = asString(input.operationId) || `${run.id}:${call.toolName}:${Date.now()}`;
+    const editInput = {
+      ...input,
+      operationId,
+      documentId: asString(input.documentId),
+      patches: Array.isArray(input.patches) ? input.patches : [],
+    } as ApplyDocumentPatchPlanInput;
+    const document = await readAgentDocumentFileForTool(projectId, editInput.documentId);
+    if (isDocumentLookupFailure(document)) {
+      return createAgentHarnessToolResult(call.toolName, call.input, {
+        ...document,
+        saved: false,
+        verified: false,
+      });
+    }
+    const scopeBlock = validateExistingAgentDocumentWriteScope({
+      toolName: call.toolName,
+      document,
+      requestedPath: asString(input.path) || null,
+      activeRoleWorkingDirectory: getRunActiveRoleWorkingDirectory(run),
+    });
+    if (scopeBlock) {
+      return createAgentHarnessToolResult(call.toolName, call.input, scopeBlock);
+    }
+    const applied = applyDocumentPatchPlanEdit(document, { ...editInput, path: document.path });
+    if (!applied.edit.changed) {
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentNoWriteSummary(document, applied.edit));
+    }
+    try {
+      const writeResult = await writeAgentDocumentFile(projectId, {
+        ...applied.writePayload,
+        lastAgentRunId: run.id,
+      });
+      return createAgentHarnessToolResult(call.toolName, call.input, incrementalDocumentEditSummary(writeResult.document, applied.edit));
+    } catch (error) {
+      if (isCancelledAgentRun(run)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was already applied with different document content")) {
+        return createAgentHarnessToolResult(call.toolName, call.input, {
+          saved: false,
+          alreadyApplied: false,
+          operationId,
+          conflict: true,
+          reason: message,
+          guidance:
+            "This operationId belongs to a different document payload. Retry only with a fresh operationId and the intended multi-patch document edit.",
+        });
+      }
+      throw error;
+    }
+  }
   if (call.toolName === "validateDocumentAgainstProject") {
     return createAgentHarnessToolResult(
       call.toolName,
@@ -3947,7 +4326,7 @@ const executeServerAgentToolCall = async (
     return createAgentHarnessToolResult(call.toolName, call.input, {
       accepted: false,
       reason:
-        "Canvas/page command plans are disabled for the built-in Agent. Persist intent in existing Markdown documents with editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument, or describe the manual editor steps for the creator. The Agent cannot create documents.",
+        "Canvas/page command plans are disabled for the built-in Agent. Persist intent in existing Markdown documents with applyDocumentPatchPlan, editDocumentLines, replaceDocumentSection, replaceDocumentText, appendDocument, writeDocument, or deleteDocument, or describe the manual editor steps for the creator. The Agent cannot create documents.",
     });
   }
   return null;
@@ -3959,28 +4338,65 @@ const executeServerAgentToolCalls = async (
 ) => {
   const serverToolCallCount = run.serverToolCallCount ?? 0;
   const serverToolRoundCount = run.serverToolRoundCount ?? 0;
-  if (serverToolCallCount >= SERVER_AGENT_MAX_TOOL_CALLS || serverToolRoundCount >= SERVER_AGENT_MAX_TOOL_ROUNDS) {
+  const toolBudget = getRunModeProfileForRun(run).toolBudget;
+  const mutationBudget = getRunModeProfileForRun(run).mutationBudget;
+  const requestedMutationCalls = requestedToolCalls.filter(isAgentMutationToolCall);
+  if (
+    requestedMutationCalls.length > 0 &&
+    (run.serverMutationRoundCount ?? 0) >= mutationBudget.maxMutationRounds
+  ) {
+    const blockedMutationResults = requestedToolCalls.map((call) => createMutationBudgetExceededResult(run, call));
+    return {
+      toolResults: blockedMutationResults,
+      toolResultPairs: requestedToolCalls.map((call, index) => ({
+        call,
+        result: blockedMutationResults[index] ?? createMutationBudgetExceededResult(run, call),
+      })),
+      clientToolCalls: [] as AgentToolCallRequest[],
+      deferredToolCalls: [] as AgentToolCallRequest[],
+      executedToolCallCount: 0,
+      executedMutationToolCallCount: 0,
+      duplicateToolCallCount: 0,
+      duplicateOnly: false,
+      duplicateCompletionOnly: false,
+      budgetExhausted: false,
+      mutationBudgetExhausted: true,
+      forceFinalAnswerOnly: true,
+      reason: "Agent reached the two-round document mutation limit.",
+    };
+  }
+  if (serverToolCallCount >= toolBudget.maxToolCalls || serverToolRoundCount >= toolBudget.maxToolRounds) {
     return {
       toolResults: [] as AgentHarnessToolResult[],
+      toolResultPairs: [] as AgentExecutedToolResultPair[],
       clientToolCalls: requestedToolCalls,
       deferredToolCalls: [] as AgentToolCallRequest[],
       executedToolCallCount: 0,
+      executedMutationToolCallCount: 0,
       duplicateToolCallCount: 0,
       duplicateOnly: false,
       duplicateCompletionOnly: false,
       budgetExhausted: true,
+      mutationBudgetExhausted: false,
+      forceFinalAnswerOnly: false,
       reason: "Agent reached the backend tool budget and paused instead of answering from incomplete evidence.",
     };
   }
   const availableCalls = Math.min(
-    SERVER_AGENT_MAX_TOOL_CALLS - serverToolCallCount,
-    SERVER_AGENT_MAX_TOOL_CALLS_PER_ROUND,
+    toolBudget.maxToolCalls - serverToolCallCount,
+    toolBudget.maxToolCallsPerRound,
   );
   const toolResults: AgentHarnessToolResult[] = [];
+  const toolResultPairs: AgentExecutedToolResultPair[] = [];
+  const pushToolResult = (call: AgentToolCallRequest, result: AgentHarnessToolResult) => {
+    toolResults.push(result);
+    toolResultPairs.push({ call, result });
+  };
   const clientToolCalls: AgentToolCallRequest[] = [];
   const deferredToolCalls: AgentToolCallRequest[] = requestedToolCalls.slice(availableCalls);
   const executableCalls = requestedToolCalls.slice(0, availableCalls);
   let executedToolCallCount = 0;
+  let executedMutationToolCallCount = 0;
   let duplicateToolCallCount = 0;
   let documentWriteBlockedToolCount = 0;
   const reuseOptions = {
@@ -3990,17 +4406,20 @@ const executeServerAgentToolCalls = async (
   for (const call of executableCalls) {
     if (call.toolName === "toolInputError") {
       const input = asRecord(call.input);
-      toolResults.push(createAgentHarnessToolResult(call.toolName, call.input, {
-        ok: false,
-        blocked: true,
-        error: asString(input.error) || "The requested tool input did not match its inputSchema.",
-        attemptedToolName: asString(input.attemptedToolName) || "unknown",
-        requestedToolCallIndex:
-          typeof input.requestedToolCallIndex === "number" ? input.requestedToolCallIndex : null,
-        guidance:
-          asString(input.guidance) ||
-          "Repair the requested tool call and return a corrected requestedToolCalls entry.",
-      }));
+      pushToolResult(
+        call,
+        createAgentHarnessToolResult(call.toolName, call.input, {
+          ok: false,
+          blocked: true,
+          error: asString(input.error) || "The requested tool input did not match its inputSchema.",
+          attemptedToolName: asString(input.attemptedToolName) || "unknown",
+          requestedToolCallIndex:
+            typeof input.requestedToolCallIndex === "number" ? input.requestedToolCallIndex : null,
+          guidance:
+            asString(input.guidance) ||
+            "Repair the requested tool call and return a corrected requestedToolCalls entry.",
+        }),
+      );
       executedToolCallCount += 1;
       continue;
     }
@@ -4009,13 +4428,14 @@ const executeServerAgentToolCalls = async (
       !isAgentDocumentMutationToolName(call.toolName) &&
       !canRequestMissingVisualEvidenceDuringDocumentWriteRepair(run, call)
     ) {
-      toolResults.push(createDocumentWriteRequiredToolResult(call));
+      pushToolResult(call, createDocumentWriteRequiredToolResult(call));
       documentWriteBlockedToolCount += 1;
       continue;
     }
     const reusableResult = findReusableAgentToolResult(run.dynamicToolResults, call, reuseOptions);
     if (reusableResult) {
-      toolResults.push(
+      pushToolResult(
+        call,
         isAgentDocumentMutationToolName(call.toolName)
           ? createDuplicateToolCallSkippedResult(call, undefined, reusableResult)
           : createCachedAgentToolResult(call, reusableResult),
@@ -4025,8 +4445,11 @@ const executeServerAgentToolCalls = async (
     }
     const result = await executeServerAgentToolCall(run, call);
     if (result) {
-      toolResults.push(result);
+      pushToolResult(call, result);
       executedToolCallCount += 1;
+      if (isAgentMutationToolCall(call)) {
+        executedMutationToolCallCount += 1;
+      }
       continue;
     }
     clientToolCalls.push(call);
@@ -4034,10 +4457,24 @@ const executeServerAgentToolCalls = async (
   if (deferredToolCalls.length > 0) {
     toolResults.push(createAgentHarnessToolResult("toolBudget", {}, {
       exhausted: false,
-      remainingToolCalls: Math.max(0, SERVER_AGENT_MAX_TOOL_CALLS - serverToolCallCount - toolResults.length),
+      remainingToolCalls: Math.max(0, toolBudget.maxToolCalls - serverToolCallCount - toolResults.length),
       deferredToolCalls: deferredToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
       reason: "Backend per-round tool call limit reached; MangaMaker will resume after this batch.",
+      runMode: getRunModeProfileForRun(run).id,
+      maxToolCallsPerRound: toolBudget.maxToolCallsPerRound,
     }));
+    for (const call of deferredToolCalls) {
+      if (!call.nativeToolCallId) {
+        continue;
+      }
+      pushToolResult(call, createAgentHarnessToolResult("toolBudget", call.input, {
+        exhausted: false,
+        deferred: true,
+        deferredToolName: call.toolName,
+        reason:
+          "This native tool call was deferred because the backend per-round tool call limit was reached. Use completed tool results first, then request this tool again only if it is still necessary.",
+      }));
+    }
   }
   const duplicateOnly =
     duplicateToolCallCount > 0 &&
@@ -4053,14 +4490,18 @@ const executeServerAgentToolCalls = async (
     });
   return {
     toolResults,
+    toolResultPairs,
     clientToolCalls,
     deferredToolCalls,
     executedToolCallCount,
+    executedMutationToolCallCount,
     duplicateToolCallCount,
     documentWriteBlockedToolCount,
     duplicateOnly,
     duplicateCompletionOnly,
     budgetExhausted: false,
+    mutationBudgetExhausted: false,
+    forceFinalAnswerOnly: false,
     reason: null as string | null,
   };
 };
@@ -4107,6 +4548,13 @@ const getCurrentAgentConfig = async (modelOverride?: string | null) => {
       modelContextLength,
       testMode,
     });
+  const createMaxOutputFields = (modelMaxOutputTokens?: number | null) =>
+    resolveAgentMaxOutputTokens({
+      envTokens: AGENT_ENV_MAX_OUTPUT_TOKENS,
+      model,
+      modelMaxOutputTokens,
+      testMode,
+    });
   if (testMode) {
     return {
       enabled: true,
@@ -4118,6 +4566,7 @@ const getCurrentAgentConfig = async (modelOverride?: string | null) => {
       visionEnabled: true,
       repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
       ...createContextWindowFields(null),
+      ...createMaxOutputFields(null),
       reason: undefined,
     };
   }
@@ -4132,6 +4581,7 @@ const getCurrentAgentConfig = async (modelOverride?: string | null) => {
       visionEnabled: false,
       repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
       ...createContextWindowFields(null),
+      ...createMaxOutputFields(null),
       reason: "OPENROUTER_API_KEY is not configured.",
     };
   }
@@ -4146,6 +4596,7 @@ const getCurrentAgentConfig = async (modelOverride?: string | null) => {
       visionEnabled: false,
       repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
       ...createContextWindowFields(null),
+      ...createMaxOutputFields(null),
       reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the Agent.",
     };
   }
@@ -4163,6 +4614,7 @@ const getCurrentAgentConfig = async (modelOverride?: string | null) => {
       visionEnabled: false,
       repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
       ...createContextWindowFields(null),
+      ...createMaxOutputFields(null),
       reason: error instanceof Error ? error.message : "Failed to verify OpenRouter model capabilities.",
     };
   }
@@ -4177,6 +4629,7 @@ const getCurrentAgentConfig = async (modelOverride?: string | null) => {
       visionEnabled: false,
       repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
       ...createContextWindowFields(null),
+      ...createMaxOutputFields(null),
       reason:
         `Configured model is not available for MangaMaker Agent. Choose a Kimi/Qwen/DeepSeek multimodal JSON model, or ${DEEPSEEK_V4_PRO_MODEL_ID} for text-only document work.`,
     };
@@ -4192,6 +4645,7 @@ const getCurrentAgentConfig = async (modelOverride?: string | null) => {
     visionEnabled: modelCapability === "multimodal",
     repetitionPenalty: OPENROUTER_REPETITION_PENALTY,
     ...createContextWindowFields(configuredModel.contextLength),
+    ...createMaxOutputFields(configuredModel.maxOutputTokens),
     reason: undefined,
   };
 };
@@ -4205,6 +4659,7 @@ const TEST_AGENT_MODELS: AgentAvailableModel[] = [
     id: DEEPSEEK_V4_PRO_MODEL_ID,
     name: "DeepSeek: DeepSeek V4 Pro",
     contextLength: 1_048_576,
+    maxOutputTokens: 384_000,
     inputModalities: ["text"],
     outputModalities: ["text"],
     capability: "metadoc",
@@ -4213,6 +4668,7 @@ const TEST_AGENT_MODELS: AgentAvailableModel[] = [
     id: "moonshotai/kimi-k2.6",
     name: "MoonshotAI: Kimi K2.6",
     contextLength: KIMI_K2_6_CONTEXT_WINDOW_TOKENS,
+    maxOutputTokens: 262_142,
     inputModalities: ["text", "image"],
     outputModalities: ["text"],
     capability: "multimodal",
@@ -4221,6 +4677,7 @@ const TEST_AGENT_MODELS: AgentAvailableModel[] = [
     id: QWEN_3_6_FLASH_MODEL_ID,
     name: "Qwen: Qwen3.6 Flash",
     contextLength: 1_000_000,
+    maxOutputTokens: 65_536,
     inputModalities: ["text", "image", "video"],
     outputModalities: ["text"],
     capability: "multimodal",
@@ -4271,21 +4728,28 @@ const createOpenRouterReasoningConfig = (reasoningMaxTokens: number) => ({
   exclude: OPENROUTER_REASONING_EXCLUDE,
 });
 
-const createPromptBudget = (contextWindowTokens: number): AgentPromptBudget => {
+const createPromptOutputReserveTokens = (contextWindowTokens: number, maxOutputTokens: number) =>
+  clampInteger(
+    Math.min(maxOutputTokens, Math.max(4096, Math.floor(contextWindowTokens * 0.08))),
+    1024,
+    Math.max(1024, Math.floor(contextWindowTokens * 0.25)),
+  );
+
+const createPromptBudget = (contextWindowTokens: number, maxOutputTokens: number): AgentPromptBudget => {
   const safeWindow = Math.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS, Math.floor(contextWindowTokens));
-  const reservedTokens = OPENROUTER_MAX_TOKENS + 4096;
+  const reservedTokens = createPromptOutputReserveTokens(safeWindow, maxOutputTokens) + 1024;
   const inputBudgetTokens = Math.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS, safeWindow - reservedTokens);
   return {
     contextWindowTokens: safeWindow,
     inputBudgetTokens,
-    promptCharBudget: clampInteger(inputBudgetTokens * 2, 24_000, 600_000),
-    topStringCharLimit: clampInteger(inputBudgetTokens * 0.35, 8_000, 90_000),
-    deepStringCharLimit: clampInteger(inputBudgetTokens * 0.16, 3_000, 45_000),
-    contentStringCharLimit: clampInteger(inputBudgetTokens * 0.5, 6_000, 140_000),
-    recentDynamicToolResults: clampInteger(inputBudgetTokens / 10_000, 12, 36),
-    preservedDynamicToolResults: clampInteger(inputBudgetTokens / 12_000, 10, 32),
-    budgetResultLimit: clampInteger(inputBudgetTokens / 80_000, 3, 6),
-    skippedResultLimit: clampInteger(inputBudgetTokens / 80_000, 3, 6),
+    promptCharBudget: clampInteger(inputBudgetTokens * 0.95, 18_000, 1_000_000),
+    topStringCharLimit: clampInteger(inputBudgetTokens * 0.16, 3_000, 80_000),
+    deepStringCharLimit: clampInteger(inputBudgetTokens * 0.08, 1_000, 40_000),
+    contentStringCharLimit: clampInteger(inputBudgetTokens * 0.25, 3_000, 160_000),
+    recentDynamicToolResults: clampInteger(inputBudgetTokens / 14_000, 4, 18),
+    preservedDynamicToolResults: clampInteger(inputBudgetTokens / 16_000, 4, 16),
+    budgetResultLimit: 0,
+    skippedResultLimit: 1,
   };
 };
 
@@ -4293,6 +4757,38 @@ const truncatePromptString = (value: string, maxLength: number) =>
   value.length > maxLength
     ? `${value.slice(0, maxLength)}\n[truncated ${value.length - maxLength} characters]`
     : value;
+
+const estimatePromptTokenCountFromText = (value: string) => {
+  const cjkMatches = value.match(/[\u3400-\u9fff\uf900-\ufaff]/gu);
+  const cjkChars = cjkMatches?.length ?? 0;
+  const nonCjkChars = Math.max(0, value.length - cjkChars);
+  return Math.ceil(cjkChars * 1.15 + nonCjkChars / 3);
+};
+
+const estimatePromptTokenCount = (messages: unknown) =>
+  estimatePromptTokenCountFromText(JSON.stringify(messages));
+
+const resolveRequestMaxOutputTokens = ({
+  configuredMaxOutputTokens,
+  contextWindowTokens,
+  messages,
+}: {
+  configuredMaxOutputTokens: number;
+  contextWindowTokens: number;
+  messages: unknown;
+}) => {
+  const estimatedPromptTokens = estimatePromptTokenCount(messages);
+  const availableOutputTokens = contextWindowTokens - estimatedPromptTokens - 512;
+  return {
+    requestMaxOutputTokens: clampInteger(
+      Math.min(configuredMaxOutputTokens, Math.max(1, availableOutputTokens)),
+      1,
+      configuredMaxOutputTokens,
+    ),
+    estimatedPromptTokens,
+    estimatedAvailableOutputTokens: availableOutputTokens,
+  };
+};
 
 const compactPromptValue = (value: unknown, budget: AgentPromptBudget, depth = 0): unknown => {
   if (typeof value === "string") {
@@ -4338,7 +4834,12 @@ const compactHarnessForPrompt = (
   return compactPromptValue({
     ...harness,
     initialToolResults: initialToolResults.map((entry) => compactPromptValue(entry, budget)),
-    dynamicToolResults: selectedDynamicToolResults.map((entry) => compactPromptValue(entry, budget)),
+    dynamicToolResults: selectedDynamicToolResults.map((entry) => {
+      if (entry.toolName === "readPrimeDirective" || entry.toolName === "readActiveRoleMetadoc") {
+        return compactPromptValue(entry, budget);
+      }
+      return compactPromptValue(summarizeAgentToolResultForPrompt(entry), budget);
+    }),
     compactedForPrompt: {
       contextWindowTokens: budget.contextWindowTokens,
       estimatedInputBudgetTokens: budget.inputBudgetTokens,
@@ -4349,9 +4850,79 @@ const compactHarnessForPrompt = (
         ? harness.completedToolCallIndex.length
         : 0,
       policy:
-        "Full data stays in the persisted run and browser harness. Prompt text includes compacted recent tool results, a completedToolCallIndex for duplicate avoidance, and the latest unique non-budget tool results so document reads do not disappear behind budget/skip messages; render images are attached with explicit page/panel labels when vision is enabled.",
+        "Full tool results are persisted under this agent run and are not embedded repeatedly. Prompt text includes pinned PrimeDirective/metadoc content, compact tool-result summaries with resultHandle, and completedToolCallIndex for duplicate avoidance. For Markdown documents, choose readDocument for whole-document context or readDocumentLines for exact line-numbered ranges according to the task; render images are attached separately with explicit page/panel labels when vision is enabled.",
     },
   }, budget);
+};
+
+const createNativeToolMessageContent = (toolResult: AgentHarnessToolResult) => {
+  const defaultProfile = getAgentRunModeProfile(DEFAULT_AGENT_RUN_MODE);
+  const budget = createPromptBudget(DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS, defaultProfile.maxOutputTokens);
+  const compacted = compactPromptValue({
+    ...summarizeAgentToolResultForPrompt(toolResult),
+    note:
+      "This is the verified summary for the matching native tool_call. Full data is stored by resultHandle. Choose readDocument or readDocumentLines according to the task, and do not repeat the same tool call unless the creator changed the project or the needed input is different.",
+  }, budget);
+  return truncatePromptString(JSON.stringify(compacted), budget.contentStringCharLimit);
+};
+
+const selectNativeMessagesForPrompt = (
+  nativeMessages: OpenRouterNativeMessage[] | undefined,
+): OpenRouterNativeMessage[] => {
+  const messages = nativeMessages ?? [];
+  const lastAssistantToolCallIndex = messages
+    .map((message, index) => ({ message, index }))
+    .reverse()
+    .find(({ message }) => message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+    ?.index;
+  if (lastAssistantToolCallIndex === undefined) {
+    return [];
+  }
+  return messages.slice(lastAssistantToolCallIndex);
+};
+
+const appendNativeAssistantToolCallMessage = (
+  run: AgentRunState,
+  nativeAssistantMessage: OpenRouterNativeAssistantMessage | undefined,
+) => {
+  if (!nativeAssistantMessage?.tool_calls || nativeAssistantMessage.tool_calls.length === 0) {
+    return;
+  }
+  run.payload = {
+    ...run.payload,
+    nativeMessages: selectNativeMessagesForPrompt([
+      ...(run.payload.nativeMessages ?? []),
+      nativeAssistantMessage,
+    ]),
+  };
+};
+
+const appendNativeToolResultMessages = (
+  run: AgentRunState,
+  pairs: Array<{ call?: AgentToolCallRequest; result: AgentHarnessToolResult }>,
+) => {
+  const toolMessages: OpenRouterNativeToolMessage[] = pairs.flatMap(({ call, result }) => {
+    const toolCallId = call?.nativeToolCallId;
+    if (!toolCallId) {
+      return [];
+    }
+    return [{
+      role: "tool" as const,
+      tool_call_id: toolCallId,
+      name: call.toolName,
+      content: createNativeToolMessageContent(result),
+    }];
+  });
+  if (toolMessages.length === 0) {
+    return;
+  }
+  run.payload = {
+    ...run.payload,
+    nativeMessages: selectNativeMessagesForPrompt([
+      ...(run.payload.nativeMessages ?? []),
+      ...toolMessages,
+    ]),
+  };
 };
 
 const compactPageForPrompt = (page: NonNullable<AgentContextPayload["pages"]>[number]) => ({
@@ -4395,7 +4966,7 @@ const compactAgentContextForPrompt = (
         otherDocumentsAvailable: true,
         documentsReadableVia: "listDocuments/readDocument/readDocumentLines/searchDocuments",
         documentsWritableVia:
-          "existingWorkingDirectoryDocsOnly: replaceDocumentSection/editDocumentLines/replaceDocumentText/writeDocument/deleteDocument/appendDocument-heading-free-additive-only; document creation is disabled for Agent",
+          "existingWorkingDirectoryDocsOnly: applyDocumentPatchPlan/replaceDocumentSection/editDocumentLines/replaceDocumentText/writeDocument/deleteDocument/appendDocument-heading-free-additive-only; document creation is disabled for Agent",
       },
     });
   }
@@ -4428,7 +4999,7 @@ const compactAgentContextForPrompt = (
       multiplePageRendersAvailableVia: "renderPages",
       rolesAvailableVia: "listRoles",
       documentsAvailableVia: "listDocuments/readDocument/searchDocuments",
-      documentsWritableVia: "existingWorkingDirectoryDocsOnly: replaceDocumentSection/editDocumentLines/replaceDocumentText/writeDocument/deleteDocument/appendDocument-heading-free-additive-only; document creation is disabled for Agent",
+      documentsWritableVia: "existingWorkingDirectoryDocsOnly: applyDocumentPatchPlan/replaceDocumentSection/editDocumentLines/replaceDocumentText/writeDocument/deleteDocument/appendDocument-heading-free-additive-only; document creation is disabled for Agent",
       pageCommandPlans: "disabled",
       currentCanvasSnapshotAttachedInitially: false,
       visionTokenPolicy: {
@@ -4482,9 +5053,11 @@ const normalizeAgentChatPayloadForRun = (payload: AgentChatPayload): AgentChatPa
     typeof payload.currentTaskPin === "string" && payload.currentTaskPin.trim().length > 0
       ? payload.currentTaskPin.trim()
       : undefined;
+  const runMode = parseAgentRunMode(payload.runMode) ?? DEFAULT_AGENT_RUN_MODE;
   return {
     ...payload,
     messages,
+    runMode,
     ...(conversationContextId ? { conversationContextId } : {}),
     conversationContextFingerprint: createAgentConversationFingerprint(messages),
     ...(conversationContextUpdatedAt ? { conversationContextUpdatedAt } : {}),
@@ -4618,7 +5191,7 @@ const createDocumentWriteIntentRepairNotice = (attempt: number) => [
   "No document was changed.",
   `Repair attempt ${attempt}/${SERVER_AGENT_MAX_DOCUMENT_WRITE_REPAIRS}.`,
     "If you intend to persist a Markdown document edit, your next response must request exactly one document mutation tool call with a stable operationId.",
-  "Use replaceDocumentSection for heading-based section changes, editDocumentLines for arbitrary line-range deletion/replacement/insertion, replaceDocumentText for exact small replacements/deletions, writeDocument only when you need to replace an existing full document, deleteDocument only when the creator explicitly asked to remove an existing document, or appendDocument only for plain heading-free additive notes/log lines. The Agent cannot create documents.",
+  "Use applyDocumentPatchPlan for several bounded patches in one document, replaceDocumentSection for one heading-based section change, editDocumentLines for arbitrary line-range deletion/replacement/insertion, replaceDocumentText for exact small replacements/deletions, writeDocument only when you need to replace an existing full document, deleteDocument only when the creator explicitly asked to remove an existing document, or appendDocument only for plain heading-free additive notes/log lines. The Agent cannot create documents.",
     "Use the pinned PrimeDirective.md, active role metadoc, and existing harness tool results already supplied. For role output, write an ordinary document under the active role working directory. Do not request more read/list/search/render tools unless a specific required document or visual render is genuinely missing.",
   "If you do not intend to persist a document edit, return requestedToolCalls: [] and clearly say that no document was changed.",
 ].join("\n");
@@ -4645,7 +5218,7 @@ const createMissingDocumentWriteNotice = () => [
   "Your previous response did not execute a document mutation tool call that returned saved=true, verified=true, and changed=true or alreadyApplied=true, so MangaMaker cannot treat the document edit as complete.",
   "You already have pinned PrimeDirective.md, active role metadoc, active role working directory, and prior tool results in Agent harness JSON. Do not request more read/list/search tools unless a genuinely named missing document is absent from all supplied results.",
   "If the edit depends on page composition that has not been visually rendered in this run, request exactly one targeted renderPage/renderPages call, then use a document mutation tool from that evidence.",
-  "If the requested edit should be made, your next tool call should be replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId. Do not create documents.",
+  "If the requested edit should be made, your next tool call should be applyDocumentPatchPlan, replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId. Do not create documents.",
   "If you cannot safely edit with the available evidence, return no tool calls and say exactly what is missing. Do not claim that the document was updated unless a document mutation tool succeeds.",
 ].join("\n");
 
@@ -4658,13 +5231,13 @@ const createDocumentWriteRequiredToolResult = (call: AgentToolCallRequest) =>
     reason:
       "This run is in document-write-required mode. The creator asked for a durable Markdown edit, but no document mutation tool call has returned saved=true, verified=true, and changed=true or alreadyApplied=true.",
     guidance:
-      "Use the existing harness results and call replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId. Do not create documents. Do not request more read/list/search tools unless a named required document is absent from all supplied results. Request renderPage/renderPages only once when visual page composition is genuinely missing. Do not report completion unless the mutation result says changed=true or alreadyApplied=true.",
+      "Use the existing harness results and call applyDocumentPatchPlan, replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId. Do not create documents. Do not request more read/list/search tools unless a named required document is absent from all supplied results. Request renderPage/renderPages only once when visual page composition is genuinely missing. Do not report completion unless the mutation result says changed=true or alreadyApplied=true.",
   });
 
 const createBlockedDocumentWriteToolNotice = (blockedToolCount: number) => [
   "MangaMaker document-write-only repair:",
   `${blockedToolCount} non-write tool request(s) were blocked because this run already has the needed document/page evidence and still lacks a verified document mutation result.`,
-  "Your next response must either request replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId, or clearly state that you cannot safely perform the edit. Do not create documents.",
+  "Your next response must either request applyDocumentPatchPlan, replaceDocumentSection, editDocumentLines, replaceDocumentText, writeDocument, deleteDocument, or appendDocument only for plain heading-free additive notes/log lines, with a fresh operationId, or clearly state that you cannot safely perform the edit. Do not create documents.",
   "Do not request readDocument, readPages, listDocuments, searchDocuments, renderPage, renderPages, or other evidence-gathering tools again in this repair step.",
 ].join("\n");
 
@@ -5596,7 +6169,9 @@ const buildOpenRouterMessages = (
   includeImage: boolean,
   budget: AgentPromptBudget,
   modelCapability: AgentModelCapability,
+  maxOutputTokens: number,
 ) => {
+  const runModeProfile = getPayloadRunModeProfile(payload);
   const systemPrompt = [
     modelCapability === "metadoc"
       ? normalizeMetadocOnlyAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT)
@@ -5635,6 +6210,10 @@ const buildOpenRouterMessages = (
     `Active role prompt source: use the preloaded readActiveRoleMetadoc document content as the role prompt.`,
     "Active role metadoc purpose: role prompt and role definition only; do not store production output there or mutate it through Agent document tools.",
     `Active role working directory: ${getAgentRoleWorkingDirectory(activeRole)}`,
+    `Agent run mode: ${runModeProfile.label} (${runModeProfile.id}). ${runModeProfile.description}`,
+    `Run mode visual policy: ${runModeProfile.visualPolicy}`,
+    `Run mode tool budget: ${JSON.stringify(runModeProfile.toolBudget)}; mutation budget: ${JSON.stringify(runModeProfile.mutationBudget)}; batch limits: ${JSON.stringify(runModeProfile.batchLimits)}.`,
+    `Output budget contract: ${createAgentOutputBudgetGuidance(maxOutputTokens)}`,
     "Pinned context priority: system prompt, Current Task Packet, PrimeDirective.md, and active role metadoc. Conversation messages, ordinary documents, page reads, renders, and tool results are evictable working context.",
     "Current Task Packet is authoritative for the latest creator request. Older conversation messages are reference only and must not override latestCreatorInstruction.",
     `Current Task Packet JSON:\n${JSON.stringify(currentTask, null, 2)}`,
@@ -5663,6 +6242,134 @@ const buildOpenRouterMessages = (
     { role: "system", content: systemPrompt },
     { role: "user", content: contextContent },
     ...compactMessagesForOpenRouter(payload.messages, budget),
+  ];
+};
+
+const isAgentHarnessToolDefinitionValue = (value: unknown): value is {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  outputDescription: string;
+  mutatesProject: boolean;
+  requiresConfirmation: boolean;
+} => {
+  const record = asRecord(value);
+  return (
+    typeof record.name === "string" &&
+    typeof record.description === "string" &&
+    "inputSchema" in record &&
+    typeof record.outputDescription === "string" &&
+    typeof record.mutatesProject === "boolean" &&
+    typeof record.requiresConfirmation === "boolean"
+  );
+};
+
+const getOpenRouterNativeTools = (payload: AgentChatPayload): OpenRouterNativeTool[] =>
+  createOpenRouterNativeTools(
+    (payload.harness?.tools ?? []).filter(isAgentHarnessToolDefinitionValue),
+  );
+
+const removeNativeIncompatibleJsonPromptLines = (prompt: string) =>
+  prompt
+    .split("\n")
+    .filter((line) => {
+      const normalized = line.toLowerCase();
+      return !(
+        normalized.includes("return json only") ||
+        normalized.includes("requestedtoolcalls") ||
+        normalized.includes("pendingcommandplan") ||
+        normalized.includes("taskprogress") ||
+        normalized.includes("response object")
+      );
+    })
+    .join("\n")
+    .trim();
+
+const buildOpenRouterNativeMessages = (
+  payload: AgentChatPayload,
+  includeImage: boolean,
+  budget: AgentPromptBudget,
+  modelCapability: AgentModelCapability,
+  maxOutputTokens: number,
+) => {
+  const runModeProfile = getPayloadRunModeProfile(payload);
+  const nativeBaseSystemPrompt = removeNativeIncompatibleJsonPromptLines(
+    modelCapability === "metadoc"
+      ? normalizeMetadocOnlyAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT)
+      : normalizeAgentSystemPrompt(payload.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT),
+  );
+  const systemPrompt = [
+    nativeBaseSystemPrompt,
+    modelCapability === "metadoc"
+      ? AGENT_METADOC_ONLY_NATIVE_TOOL_PROTOCOL_SYSTEM_PROMPT
+      : AGENT_NATIVE_TOOL_PROTOCOL_SYSTEM_PROMPT,
+    payload.finalAnswerOnly
+      ? [
+          "FINAL ANSWER ONLY MODE.",
+          "Do not call tools. Return a plain-text final answer from the cached tool results already present in the MangaMaker context.",
+          "If the evidence is insufficient, state the limitation directly and give the smallest manual next step.",
+        ].join("\n")
+      : "",
+  ].join("\n\n");
+  const harnessText = payload.harness
+    ? `\n\nAgent harness JSON:\n${JSON.stringify(compactHarnessForPrompt(payload.harness, budget), null, 2)}`
+    : "";
+  const activeRole = payload.activeRole
+    ? agentRoleDefinitionSchema.parse(payload.activeRole)
+    : getAgentRole(payload.activeRoleId);
+  const currentTask = compileAgentCurrentTaskPacket({
+    messages: payload.messages ?? [],
+    currentTask: payload.currentTask,
+    currentTaskPin: payload.currentTaskPin,
+    activeRole: {
+      id: activeRole.id,
+      name: activeRole.name,
+      metadocId: activeRole.metadocId,
+      ...(activeRole.workingDirectory ? { workingDirectory: activeRole.workingDirectory } : {}),
+    },
+    activeDocumentId: payload.activeDocumentId ?? null,
+    harness: payload.harness,
+  });
+  const contextText = [
+    "Native tool-calling protocol: call tools through API tool_calls. Final answer content is plain text.",
+    `Active Agent role: ${activeRole.name}`,
+    `Active role metadoc id: ${activeRole.metadocId}`,
+    `Active role prompt source: use the preloaded readActiveRoleMetadoc document content as the role prompt.`,
+    "Active role metadoc purpose: role prompt and role definition only; do not store production output there or mutate it through Agent document tools.",
+    `Active role working directory: ${getAgentRoleWorkingDirectory(activeRole)}`,
+    `Agent run mode: ${runModeProfile.label} (${runModeProfile.id}). ${runModeProfile.description}`,
+    `Run mode visual policy: ${runModeProfile.visualPolicy}`,
+    `Run mode tool budget: ${JSON.stringify(runModeProfile.toolBudget)}; mutation budget: ${JSON.stringify(runModeProfile.mutationBudget)}; batch limits: ${JSON.stringify(runModeProfile.batchLimits)}.`,
+    `Output budget contract: ${createAgentOutputBudgetGuidance(maxOutputTokens)}`,
+    "Pinned context priority: system prompt, Current Task Packet, PrimeDirective.md, and active role metadoc. Conversation messages, ordinary documents, page reads, renders, and tool results are evictable working context.",
+    "Current Task Packet is authoritative for the latest creator request. Older conversation messages are reference only and must not override latestCreatorInstruction.",
+    `Current Task Packet JSON:\n${JSON.stringify(currentTask, null, 2)}`,
+    `Role default autonomy: ${activeRole.defaultAutonomy}`,
+    `Active document id: ${payload.activeDocumentId ?? "none"}`,
+    `Agent lightweight context JSON:\n${JSON.stringify(compactAgentContextForPrompt(payload.agentContext, budget, modelCapability), null, 2)}${harnessText}`,
+  ].join("\n\n");
+  const imageAttachments = getHarnessImageAttachments(payload.harness);
+  const contextContent =
+    includeImage && imageAttachments.length > 0
+      ? [
+          { type: "text", text: contextText },
+          ...imageAttachments.flatMap((attachment, index) => [
+            {
+              type: "text",
+              text: [
+                `Vision attachment ${index + 1}/${imageAttachments.length}: ${attachment.label}`,
+                "Identity rule: complete page render attachments are separate pages, not panels of one page. renderPanel attachments are crops of exactly one panel owned by the stated pageId.",
+              ].join("\n"),
+            },
+            { type: "image_url", image_url: { url: attachment.dataUrl } },
+          ]),
+        ]
+      : contextText;
+  return [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: contextContent },
+    ...compactMessagesForOpenRouter(payload.messages, budget),
+    ...selectNativeMessagesForPrompt(payload.nativeMessages),
   ];
 };
 
@@ -5885,34 +6592,271 @@ const readOpenRouterStreamBody = async (
   };
 };
 
-const callOpenRouter = async (
+const parseNativeToolArguments = (value: string) => {
+  if (!value.trim()) {
+    return {};
+  }
+  return JSON.parse(value) as unknown;
+};
+
+const schemaRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+
+const validateNativeJsonSchemaValue = (
+  value: unknown,
+  schema: unknown,
+  pathLabel: string,
+): string[] => {
+  const record = schemaRecord(schema);
+  const expectedType = typeof record.type === "string" ? record.type : null;
+  const enumValues = Array.isArray(record.enum) ? record.enum : null;
+  const issues: string[] = [];
+
+  if (enumValues && !enumValues.includes(value)) {
+    issues.push(`${pathLabel} must be one of ${enumValues.map((entry) => JSON.stringify(entry)).join(", ")}.`);
+  }
+  if (expectedType === "object") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return [`${pathLabel} must be an object.`];
+    }
+    const objectValue = value as Record<string, unknown>;
+    const properties = schemaRecord(record.properties);
+    const required = Array.isArray(record.required)
+      ? record.required.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    for (const key of required) {
+      if (!(key in objectValue)) {
+        issues.push(`${pathLabel}.${key} is required.`);
+      }
+    }
+    if (record.additionalProperties === false) {
+      for (const key of Object.keys(objectValue)) {
+        if (!Object.prototype.hasOwnProperty.call(properties, key)) {
+          issues.push(`${pathLabel}.${key} is not allowed.`);
+        }
+      }
+    }
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (objectValue[key] !== undefined) {
+        issues.push(...validateNativeJsonSchemaValue(objectValue[key], propertySchema, `${pathLabel}.${key}`));
+      }
+    }
+    return issues;
+  }
+  if (expectedType === "array") {
+    if (!Array.isArray(value)) {
+      return [`${pathLabel} must be an array.`];
+    }
+    const minItems = typeof record.minItems === "number" ? record.minItems : null;
+    const maxItems = typeof record.maxItems === "number" ? record.maxItems : null;
+    if (minItems !== null && value.length < minItems) {
+      issues.push(`${pathLabel} must contain at least ${minItems} item(s).`);
+    }
+    if (maxItems !== null && value.length > maxItems) {
+      issues.push(`${pathLabel} must contain at most ${maxItems} item(s).`);
+    }
+    const itemSchema = record.items;
+    if (itemSchema) {
+      value.forEach((entry, index) => {
+        issues.push(...validateNativeJsonSchemaValue(entry, itemSchema, `${pathLabel}[${index}]`));
+      });
+    }
+    return issues;
+  }
+  if (expectedType === "string" && typeof value !== "string") {
+    issues.push(`${pathLabel} must be a string.`);
+  }
+  if (expectedType === "number") {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      issues.push(`${pathLabel} must be a finite number.`);
+    } else {
+      const minimum = typeof record.minimum === "number" ? record.minimum : null;
+      const maximum = typeof record.maximum === "number" ? record.maximum : null;
+      const exclusiveMinimum = typeof record.exclusiveMinimum === "number" ? record.exclusiveMinimum : null;
+      if (minimum !== null && value < minimum) {
+        issues.push(`${pathLabel} must be >= ${minimum}.`);
+      }
+      if (maximum !== null && value > maximum) {
+        issues.push(`${pathLabel} must be <= ${maximum}.`);
+      }
+      if (exclusiveMinimum !== null && value <= exclusiveMinimum) {
+        issues.push(`${pathLabel} must be > ${exclusiveMinimum}.`);
+      }
+    }
+  }
+  if (expectedType === "boolean" && typeof value !== "boolean") {
+    issues.push(`${pathLabel} must be a boolean.`);
+  }
+  return issues;
+};
+
+const validateNativeToolInputFromHarness = (
+  payload: AgentChatPayload,
+  toolName: string,
+  input: unknown,
+) => {
+  const toolDefinition = (payload.harness?.tools ?? [])
+    .filter(isAgentHarnessToolDefinitionValue)
+    .find((tool) => tool.name === toolName);
+  if (!toolDefinition) {
+    throw new Error(`unknown tool: ${toolName}`);
+  }
+  const issues = validateNativeJsonSchemaValue(input, toolDefinition.inputSchema, "input");
+  if (issues.length > 0) {
+    throw new Error(issues.join(" "));
+  }
+  return input;
+};
+
+const createNativeToolInputErrorCall = (
+  toolCall: OpenRouterNativeToolCall,
+  index: number,
+  error: unknown,
+): AgentToolCallRequest => ({
+  toolName: "toolInputError",
+  nativeToolCallId: toolCall.id,
+  input: {
+    requestedToolCallIndex: index,
+    attemptedToolName: toolCall.function.name || "unknown",
+    attemptedInput: toolCall.function.arguments || null,
+    attemptedReason: null,
+    error: error instanceof Error ? error.message : String(error),
+    guidance:
+      "The native tool call name or arguments were invalid. Repair the next tool call using exactly one of the provided MangaMaker tools and a valid JSON argument object matching that tool schema.",
+  },
+  reason: `Repair invalid native ${toolCall.function.name || "unknown"} tool call.`,
+});
+
+const createAgentToolCallsFromNativeToolCalls = (
+  payload: AgentChatPayload,
+  toolCalls: OpenRouterNativeToolCall[],
+): AgentToolCallRequest[] =>
+  toolCalls.map((toolCall, index) => {
+    try {
+      const input = parseNativeToolArguments(toolCall.function.arguments);
+      const validatedInput = validateNativeToolInputFromHarness(payload, toolCall.function.name, input);
+      return {
+        toolName: toolCall.function.name,
+        input: validatedInput,
+        nativeToolCallId: toolCall.id,
+      };
+    } catch (error) {
+      return createNativeToolInputErrorCall(toolCall, index, error);
+    }
+  });
+
+const createNativeToolCallTaskProgress = (
+  toolCalls: AgentToolCallRequest[],
+): AgentTaskProgress => ({
+  objective: "Continue the creator's MangaMaker Agent task.",
+  phase: "gathering_context",
+  status: "needs_tool",
+  steps: [
+    {
+      id: "native-tool-call",
+      title: `Run ${toolCalls.length} native tool call(s)`,
+      status: "in_progress",
+    },
+  ],
+  currentStepId: "native-tool-call",
+  stopCondition: "Stop when the creator's requested document task is complete or blocked.",
+  nextAction: toolCalls.map((call) => call.toolName).join(", "),
+  percent: 25,
+});
+
+const createNativeFinalTaskProgress = (message: string): AgentTaskProgress => ({
+  objective: "Complete the creator's MangaMaker Agent task.",
+  phase: "complete",
+  status: "completed",
+  steps: [
+    {
+      id: "final-answer",
+      title: "Return final answer",
+      status: "completed",
+    },
+  ],
+  currentStepId: "final-answer",
+  stopCondition: "Stop after returning the final answer.",
+  stopReason: message.slice(0, 500) || "The Agent returned a final answer without requesting tools.",
+  percent: 100,
+});
+
+const asNativeToolCalls = (value: unknown): OpenRouterNativeToolCall[] =>
+  Array.isArray(value)
+    ? value.flatMap((entry): OpenRouterNativeToolCall[] => {
+        const record = asRecord(entry);
+        const fn = asRecord(record.function);
+        const id = asString(record.id);
+        const name = asString(fn.name);
+        const args = typeof fn.arguments === "string" ? fn.arguments : "";
+        return id && name ? [{ id, type: "function", function: { name, arguments: args } }] : [];
+      })
+    : [];
+
+const callOpenRouterNativeTools = async (
   payload: AgentChatPayload,
   includeImage: boolean,
   requestTrace: AgentRequestTrace,
-): Promise<{ response: unknown; requestTrace: AgentRequestTrace }> => {
+): Promise<{
+  response: unknown;
+  requestTrace: AgentRequestTrace;
+  nativeAssistantMessage?: OpenRouterNativeAssistantMessage;
+}> => {
   let trace = requestTrace;
   const config = await getCurrentAgentConfig(payload.modelOverride);
   if (!config.enabled || config.provider !== "openrouter" || !config.model) {
     throw new Error(config.reason ?? "Agent is not configured.");
   }
-  const contextWindow = resolvePayloadContextWindow(payload, {
+  const modelCapability = config.modelCapability ?? "multimodal";
+  const effectivePayload = normalizePayloadForModelCapability(payload, modelCapability);
+  const contextWindow = resolvePayloadContextWindow(effectivePayload, {
     model: config.model,
     testMode: config.testMode,
     contextWindowMaxTokens: config.contextWindowMaxTokens,
   });
-  const repetitionPenalty = resolvePayloadRepetitionPenalty(payload);
-  const promptBudget = createPromptBudget(contextWindow.contextWindowTokens);
+  const runModeProfile = getPayloadRunModeProfile(effectivePayload);
+  const maxOutputTokens = resolvePayloadMaxOutputTokens(effectivePayload, {
+    model: config.model,
+    testMode: config.testMode,
+    maxOutputMaxTokens: config.maxOutputMaxTokens,
+  });
+  const maxReasoningTokens = resolvePayloadReasoningMaxTokens(effectivePayload);
+  const repetitionPenalty = resolvePayloadRepetitionPenalty(effectivePayload);
+  const promptBudget = createPromptBudget(contextWindow.contextWindowTokens, maxOutputTokens);
+  const nativeTools = getOpenRouterNativeTools(effectivePayload);
+  const openRouterMessages = buildOpenRouterNativeMessages(
+    effectivePayload,
+    includeImage,
+    promptBudget,
+    modelCapability,
+    maxOutputTokens,
+  );
+  const requestOutputBudget = resolveRequestMaxOutputTokens({
+    configuredMaxOutputTokens: maxOutputTokens,
+    contextWindowTokens: contextWindow.contextWindowTokens,
+    messages: openRouterMessages,
+  });
   trace = recordAgentTraceEvent(trace, "agent_config_checked", {
     provider: "openrouter",
     model: config.model,
     usedVision: includeImage,
     detail: {
+      nativeToolCalling: true,
+      runMode: runModeProfile.id,
+      runModeLabel: runModeProfile.label,
       visionEnabled: config.visionEnabled,
-      modelCapability: config.modelCapability,
+      modelCapability,
       includeImage,
       timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
-      maxTokens: OPENROUTER_MAX_TOKENS,
-      reasoningMaxTokens: OPENROUTER_REASONING_MAX_TOKENS,
+      maxTokens: maxOutputTokens,
+      maxOutputTokens,
+      requestMaxOutputTokens: requestOutputBudget.requestMaxOutputTokens,
+      reasoningMaxTokens: maxReasoningTokens,
+      toolBudget: runModeProfile.toolBudget,
+      batchLimits: runModeProfile.batchLimits,
+      visualPolicy: runModeProfile.visualPolicy,
       reasoningExclude: OPENROUTER_REASONING_EXCLUDE,
       temperature: OPENROUTER_TEMPERATURE,
       topP: OPENROUTER_TOP_P,
@@ -5921,15 +6865,19 @@ const callOpenRouter = async (
       contextWindowMaxTokens: contextWindow.contextWindowMaxTokens,
       contextWindowSource: contextWindow.contextWindowSource,
       estimatedInputBudgetTokens: promptBudget.inputBudgetTokens,
+      estimatedPromptTokens: requestOutputBudget.estimatedPromptTokens,
+      estimatedAvailableOutputTokens: requestOutputBudget.estimatedAvailableOutputTokens,
       promptCharBudget: promptBudget.promptCharBudget,
+      nativeToolCount: nativeTools.length,
     },
   });
+
   const sendRequest = async (
     provider: OpenRouterProviderRouting,
     reasoningMaxTokens: number,
     retryWarning?: string,
   ) => {
-    const requestTimeoutMs = payload.finalAnswerOnly === true
+    const requestTimeoutMs = effectivePayload.finalAnswerOnly === true
       ? SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS
       : OPENROUTER_REQUEST_TIMEOUT_MS;
     const controller = new AbortController();
@@ -5939,22 +6887,22 @@ const callOpenRouter = async (
     let response: Awaited<ReturnType<typeof fetch>>;
     let raw = "";
     try {
-      trace = recordAgentTraceEvent(trace, "openrouter_request_started", {
+      trace = recordAgentTraceEvent(trace, "openrouter_native_request_started", {
         detail: {
           model: config.model,
           providerRouting: provider,
           includeImage,
-          modelCapability: config.modelCapability,
-          imageAttachmentCount: getHarnessImageDataUrls(payload.harness).length,
-          messageCount: payload.messages?.length ?? 0,
-          initialToolResults: payload.harness?.initialToolResults?.length ?? 0,
-          dynamicToolResults: payload.harness?.dynamicToolResults?.length ?? 0,
-          contextWindowTokens: contextWindow.contextWindowTokens,
-          promptCharBudget: promptBudget.promptCharBudget,
+          modelCapability,
+          nativeToolCount: nativeTools.length,
+          messageCount: effectivePayload.messages?.length ?? 0,
+          nativeMessageCount: effectivePayload.nativeMessages?.length ?? 0,
+          initialToolResults: effectivePayload.harness?.initialToolResults?.length ?? 0,
+          dynamicToolResults: effectivePayload.harness?.dynamicToolResults?.length ?? 0,
           timeoutMs: requestTimeoutMs,
-          finalAnswerOnly: payload.finalAnswerOnly === true,
+          finalAnswerOnly: effectivePayload.finalAnswerOnly === true,
           reasoningMaxTokens,
-          reasoningExclude: OPENROUTER_REASONING_EXCLUDE,
+          maxOutputTokens,
+          requestMaxOutputTokens: requestOutputBudget.requestMaxOutputTokens,
           repetitionPenalty,
         },
       });
@@ -5972,12 +6920,365 @@ const callOpenRouter = async (
           temperature: OPENROUTER_TEMPERATURE,
           top_p: OPENROUTER_TOP_P,
           repetition_penalty: repetitionPenalty,
-          max_tokens: OPENROUTER_MAX_TOKENS,
-          reasoning: createOpenRouterReasoningConfig(reasoningMaxTokens),
+          max_tokens: requestOutputBudget.requestMaxOutputTokens,
+          reasoning: createOpenRouterReasoningConfig(
+            Math.min(reasoningMaxTokens, requestOutputBudget.requestMaxOutputTokens),
+          ),
+          stream: false,
+          messages: openRouterMessages,
+          tools: nativeTools,
+          tool_choice: effectivePayload.finalAnswerOnly === true ? "none" : "auto",
+        }),
+        signal: controller.signal,
+      });
+      trace = recordAgentTraceEvent(trace, "openrouter_headers_received", {
+        detail: {
+          status: response.status,
+          ok: response.ok,
+          contentType: response.headers.get("content-type"),
+          requestId:
+            response.headers.get("x-request-id") ??
+            response.headers.get("x-openrouter-request-id") ??
+            response.headers.get("cf-ray"),
+        },
+      });
+      raw = await response.text();
+      trace = recordAgentTraceEvent(trace, "openrouter_body_received", {
+        detail: {
+          status: response.status,
+          ok: response.ok,
+          bodyLength: raw.length,
+          streamed: false,
+        },
+      });
+    } catch (error) {
+      if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+        const message = `OpenRouter request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`;
+        trace = recordAgentTraceEvent(trace, "openrouter_timeout", {
+          status: "timeout",
+          message,
+          error: message,
+        });
+        throw new OpenRouterRetryableError(message);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      trace = recordAgentTraceEvent(trace, "openrouter_request_failed", {
+        status: "error",
+        message,
+        error: message,
+      });
+      if (isRetryableOpenRouterError(error)) {
+        throw new OpenRouterRetryableError(message);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!response.ok) {
+      const errorMessage = `OpenRouter request failed (${response.status}): ${raw.slice(0, 500)}`;
+      trace = recordAgentTraceEvent(trace, "openrouter_http_error", {
+        status: "error",
+        message: `OpenRouter request failed (${response.status}).`,
+        error: errorMessage,
+      });
+      if (response.status === 408 || response.status === 429 || response.status >= 500) {
+        throw new OpenRouterRetryableError(errorMessage, response.status);
+      }
+      throw new Error(errorMessage);
+    }
+    let parsed: unknown;
+    try {
+      parsed = parseOpenRouterResponseJson(raw, {
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+      });
+      trace = recordAgentTraceEvent(trace, "openrouter_json_parsed");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      trace = recordAgentTraceEvent(trace, "openrouter_json_parse_failed", {
+        status: "error",
+        message,
+        error: message,
+      });
+      throw error;
+    }
+    const responseRecord = asRecord(parsed);
+    const choices = Array.isArray(responseRecord.choices) ? responseRecord.choices : [];
+    const firstChoice = asRecord(choices[0]);
+    const messageRecord = asRecord(firstChoice.message);
+    const usage = asRecord(responseRecord.usage);
+    const finishReason = asString(firstChoice.finish_reason) || asString(firstChoice.native_finish_reason) || "unknown";
+    const toolCalls = asNativeToolCalls(messageRecord.tool_calls);
+    const content = readOpenRouterStreamTextPart(messageRecord.content).trim();
+    const nativeAssistantMessage: OpenRouterNativeAssistantMessage = {
+      role: "assistant",
+      content: content || null,
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    };
+    if (toolCalls.length > 0) {
+      const requestedToolCalls = createAgentToolCallsFromNativeToolCalls(payload, toolCalls);
+      trace = recordAgentTraceEvent(trace, "openrouter_native_tool_calls_extracted", {
+        detail: {
+          finishReason,
+          toolCallCount: toolCalls.length,
+          toolNames: toolCalls.map((call) => call.function.name).join(", "),
+          promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null,
+          completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : null,
+          totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : null,
+        },
+      });
+      return {
+        response: {
+          message: content || `Requested ${requestedToolCalls.length} MangaMaker tool call(s).`,
+          requestedToolCalls,
+          pendingCommandPlan: null,
+          usedVision: includeImage,
+          taskProgress: createNativeToolCallTaskProgress(requestedToolCalls),
+          ...(retryWarning ? { warning: retryWarning } : {}),
+          modelDebug: {
+            finishReason,
+            promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null,
+            completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : null,
+            totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : null,
+            providerRouting: provider,
+          },
+        },
+        nativeAssistantMessage,
+      };
+    }
+    if (!content) {
+      const error = new OpenRouterEmptyAssistantContentError(parsed);
+      trace = recordAgentTraceEvent(trace, "openrouter_empty_native_final_answer", {
+        status: "error",
+        message: error.message,
+        error: error.message,
+        detail: {
+          finishReason,
+          reasoningLength: error.reasoningLength,
+        },
+      });
+      throw error;
+    }
+    trace = recordAgentTraceEvent(trace, "openrouter_native_final_answer_extracted", {
+      detail: {
+        finishReason,
+        contentLength: content.length,
+        promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null,
+        completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : null,
+        totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : null,
+      },
+    });
+    return {
+      response: {
+        message: content || "The model returned an empty final answer.",
+        requestedToolCalls: [],
+        pendingCommandPlan: null,
+        usedVision: includeImage,
+        taskProgress: createNativeFinalTaskProgress(content),
+        ...(retryWarning ? { warning: retryWarning } : {}),
+        modelDebug: {
+          rawAssistantContent: content,
+          finishReason,
+          promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null,
+          completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : null,
+          totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : null,
+          providerRouting: provider,
+        },
+      },
+      nativeAssistantMessage,
+    };
+  };
+
+  const preferredProvider = getOpenRouterProviderRouting(config.model);
+  const fallbackProvider = getOpenRouterFallbackProviderRouting(config.model);
+  const strictReasoningMaxTokens = Math.max(1, Math.min(maxReasoningTokens, 1024));
+  const attempts: Array<{ provider: OpenRouterProviderRouting; reasoningMaxTokens: number; warning?: string }> =
+    effectivePayload.finalAnswerOnly === true
+      ? [{ provider: preferredProvider, reasoningMaxTokens: Math.min(strictReasoningMaxTokens, 512) }]
+      : [
+          { provider: preferredProvider, reasoningMaxTokens: maxReasoningTokens },
+          {
+            provider: fallbackProvider,
+            reasoningMaxTokens: strictReasoningMaxTokens,
+            warning:
+              "MangaMaker retried the request with fallback OpenRouter provider routing and a stricter reasoning budget after a transient provider failure.",
+          },
+          {
+            provider: fallbackProvider,
+            reasoningMaxTokens: strictReasoningMaxTokens,
+            warning:
+              "MangaMaker retried the request with fallback OpenRouter provider routing and a stricter reasoning budget after repeated transient provider failures.",
+          },
+        ];
+  let lastError: unknown = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
+    if (index > 0) {
+      trace = recordAgentTraceEvent(trace, "openrouter_retry_started", {
+        status: "pending",
+        message: attempt.warning,
+        detail: {
+          attempt: index + 1,
+          maxAttempts: attempts.length,
+          providerRouting: attempt.provider,
+          reasoningMaxTokens: attempt.reasoningMaxTokens,
+        },
+      });
+    }
+    try {
+      const result = await sendRequest(attempt.provider, attempt.reasoningMaxTokens, attempt.warning);
+      return {
+        response: result.response,
+        requestTrace: trace,
+        nativeAssistantMessage: result.nativeAssistantMessage,
+      };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableOpenRouterError(error) || index === attempts.length - 1) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      trace = recordAgentTraceEvent(trace, "openrouter_retry_scheduled", {
+        status: "pending",
+        message,
+        detail: {
+          attempt: index + 1,
+          nextAttempt: index + 2,
+        },
+      });
+      await sleep(1000 * (index + 1));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "OpenRouter request failed."));
+};
+
+const callOpenRouter = async (
+  payload: AgentChatPayload,
+  includeImage: boolean,
+  requestTrace: AgentRequestTrace,
+): Promise<{ response: unknown; requestTrace: AgentRequestTrace }> => {
+  let trace = requestTrace;
+  const config = await getCurrentAgentConfig(payload.modelOverride);
+  if (!config.enabled || config.provider !== "openrouter" || !config.model) {
+    throw new Error(config.reason ?? "Agent is not configured.");
+  }
+  const modelCapability = config.modelCapability ?? "multimodal";
+  const effectivePayload = normalizePayloadForModelCapability(payload, modelCapability);
+  const contextWindow = resolvePayloadContextWindow(effectivePayload, {
+    model: config.model,
+    testMode: config.testMode,
+    contextWindowMaxTokens: config.contextWindowMaxTokens,
+  });
+  const runModeProfile = getPayloadRunModeProfile(effectivePayload);
+  const maxOutputTokens = resolvePayloadMaxOutputTokens(effectivePayload, {
+    model: config.model,
+    testMode: config.testMode,
+    maxOutputMaxTokens: config.maxOutputMaxTokens,
+  });
+  const maxReasoningTokens = resolvePayloadReasoningMaxTokens(effectivePayload);
+  const repetitionPenalty = resolvePayloadRepetitionPenalty(effectivePayload);
+  const promptBudget = createPromptBudget(contextWindow.contextWindowTokens, maxOutputTokens);
+  const openRouterMessages = buildOpenRouterMessages(
+    effectivePayload,
+    includeImage,
+    promptBudget,
+    modelCapability,
+    maxOutputTokens,
+  );
+  const requestOutputBudget = resolveRequestMaxOutputTokens({
+    configuredMaxOutputTokens: maxOutputTokens,
+    contextWindowTokens: contextWindow.contextWindowTokens,
+    messages: openRouterMessages,
+  });
+  trace = recordAgentTraceEvent(trace, "agent_config_checked", {
+    provider: "openrouter",
+    model: config.model,
+    usedVision: includeImage,
+    detail: {
+      visionEnabled: config.visionEnabled,
+      runMode: runModeProfile.id,
+      runModeLabel: runModeProfile.label,
+      modelCapability,
+      includeImage,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      maxTokens: maxOutputTokens,
+      maxOutputTokens,
+      requestMaxOutputTokens: requestOutputBudget.requestMaxOutputTokens,
+      reasoningMaxTokens: maxReasoningTokens,
+      toolBudget: runModeProfile.toolBudget,
+      batchLimits: runModeProfile.batchLimits,
+      visualPolicy: runModeProfile.visualPolicy,
+      reasoningExclude: OPENROUTER_REASONING_EXCLUDE,
+      temperature: OPENROUTER_TEMPERATURE,
+      topP: OPENROUTER_TOP_P,
+      repetitionPenalty,
+      contextWindowTokens: contextWindow.contextWindowTokens,
+      contextWindowMaxTokens: contextWindow.contextWindowMaxTokens,
+      contextWindowSource: contextWindow.contextWindowSource,
+      estimatedInputBudgetTokens: promptBudget.inputBudgetTokens,
+      estimatedPromptTokens: requestOutputBudget.estimatedPromptTokens,
+      estimatedAvailableOutputTokens: requestOutputBudget.estimatedAvailableOutputTokens,
+      promptCharBudget: promptBudget.promptCharBudget,
+    },
+  });
+  const sendRequest = async (
+    provider: OpenRouterProviderRouting,
+    reasoningMaxTokens: number,
+    retryWarning?: string,
+  ) => {
+    const requestTimeoutMs = effectivePayload.finalAnswerOnly === true
+      ? SERVER_AGENT_FINAL_ANSWER_TIMEOUT_MS
+      : OPENROUTER_REQUEST_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, requestTimeoutMs);
+    let response: Awaited<ReturnType<typeof fetch>>;
+    let raw = "";
+    try {
+      trace = recordAgentTraceEvent(trace, "openrouter_request_started", {
+        detail: {
+          model: config.model,
+          providerRouting: provider,
+          includeImage,
+          modelCapability,
+          imageAttachmentCount: getHarnessImageDataUrls(effectivePayload.harness).length,
+          messageCount: effectivePayload.messages?.length ?? 0,
+          initialToolResults: effectivePayload.harness?.initialToolResults?.length ?? 0,
+          dynamicToolResults: effectivePayload.harness?.dynamicToolResults?.length ?? 0,
+          contextWindowTokens: contextWindow.contextWindowTokens,
+          promptCharBudget: promptBudget.promptCharBudget,
+          timeoutMs: requestTimeoutMs,
+          finalAnswerOnly: effectivePayload.finalAnswerOnly === true,
+          reasoningMaxTokens,
+          reasoningExclude: OPENROUTER_REASONING_EXCLUDE,
+          repetitionPenalty,
+          maxOutputTokens,
+          requestMaxOutputTokens: requestOutputBudget.requestMaxOutputTokens,
+        },
+      });
+      response = await fetch(OPENROUTER_CHAT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY?.trim() ?? ""}`,
+          "HTTP-Referer": "http://localhost",
+          "X-Title": "MangaMaker Agent",
+        },
+        body: JSON.stringify({
+          model: config.model,
+          provider,
+          temperature: OPENROUTER_TEMPERATURE,
+          top_p: OPENROUTER_TOP_P,
+          repetition_penalty: repetitionPenalty,
+          max_tokens: requestOutputBudget.requestMaxOutputTokens,
+          reasoning: createOpenRouterReasoningConfig(
+            Math.min(reasoningMaxTokens, requestOutputBudget.requestMaxOutputTokens),
+          ),
           response_format: { type: "json_object" },
           stream: true,
           stream_options: { include_usage: true },
-          messages: buildOpenRouterMessages(payload, includeImage, promptBudget, config.modelCapability ?? "multimodal"),
+          messages: openRouterMessages,
         }),
         signal: controller.signal,
       });
@@ -6156,12 +7457,12 @@ const callOpenRouter = async (
 
   const preferredProvider = getOpenRouterProviderRouting(config.model);
   const fallbackProvider = getOpenRouterFallbackProviderRouting(config.model);
-  const strictReasoningMaxTokens = Math.max(1, Math.min(OPENROUTER_REASONING_MAX_TOKENS, 1024));
+  const strictReasoningMaxTokens = Math.max(1, Math.min(maxReasoningTokens, 1024));
   const attempts: Array<{ provider: OpenRouterProviderRouting; reasoningMaxTokens: number; warning?: string }> =
-    payload.finalAnswerOnly === true
+    effectivePayload.finalAnswerOnly === true
       ? [{ provider: preferredProvider, reasoningMaxTokens: Math.min(strictReasoningMaxTokens, 512) }]
       : [
-          { provider: preferredProvider, reasoningMaxTokens: OPENROUTER_REASONING_MAX_TOKENS },
+          { provider: preferredProvider, reasoningMaxTokens: maxReasoningTokens },
           {
             provider: fallbackProvider,
             reasoningMaxTokens: strictReasoningMaxTokens,
@@ -6240,7 +7541,11 @@ const executeAgentModelRequest = async (
   payload: AgentChatPayload,
   requestTrace: AgentRequestTrace,
   loadAgentSchema: AgentSchemaLoader,
-): Promise<{ response: unknown; requestTrace: AgentRequestTrace }> => {
+): Promise<{
+  response: unknown;
+  requestTrace: AgentRequestTrace;
+  nativeAssistantMessage?: OpenRouterNativeAssistantMessage;
+}> => {
   let trace = requestTrace;
   if (AGENT_TEST_MODE) {
     trace = recordAgentTraceEvent(trace, "test_agent_response_started", {
@@ -6292,7 +7597,7 @@ const executeAgentModelRequest = async (
   }
 
   const hasHarnessImage = getHarnessImageDataUrls(payload.harness).length > 0;
-  const openRouterResult = await callOpenRouter(
+  const openRouterResult = await callOpenRouterNativeTools(
     payload,
     hasHarnessImage && config.visionEnabled,
     trace,
@@ -6306,6 +7611,7 @@ const executeAgentModelRequest = async (
   return {
     response: attachTraceToResponse(normalized, trace),
     requestTrace: trace,
+    nativeAssistantMessage: openRouterResult.nativeAssistantMessage,
   };
 };
 
@@ -6433,6 +7739,7 @@ const startAgentRunModelStep = (
           });
         }
       }
+      appendNativeAssistantToolCallMessage(run, result.nativeAssistantMessage);
       step.status = "success";
       step.finishedAt = new Date().toISOString();
       step.output = summarizeModelResponseForRun(response);
@@ -6570,21 +7877,30 @@ const startAgentRunModelStep = (
           toolExecution.duplicateOnly ? (run.duplicateToolCallStreak ?? 0) + 1 : 0;
         run.duplicateToolCallStreak = duplicateToolCallStreak;
         if (toolExecution.toolResults.length > 0) {
+          const storedToolResults = await persistAgentRunToolResults(run, toolExecution.toolResults);
+          const storedByOriginalResult = new Map<AgentHarnessToolResult, AgentHarnessToolResult>();
+          toolExecution.toolResults.forEach((result, index) => {
+            storedByOriginalResult.set(result, storedToolResults[index] ?? result);
+          });
+          const storedToolResultPairs = toolExecution.toolResultPairs.map(({ call, result }) => ({
+            call,
+            result: storedByOriginalResult.get(result) ?? result,
+          }));
           const now = new Date().toISOString();
-          const verifiedWriteNotice = hasVerifiedDocumentWriteResult(toolExecution.toolResults)
-            ? createVerifiedDocumentWriteProgressNotice(getVerifiedDocumentWriteResults(toolExecution.toolResults))
+          const verifiedWriteNotice = hasVerifiedDocumentWriteResult(storedToolResults)
+            ? createVerifiedDocumentWriteProgressNotice(getVerifiedDocumentWriteResults(storedToolResults))
             : null;
           run.steps.push({
             ...createAgentRunStep(
               run.id,
               "tool_result",
-              `${toolExecution.toolResults.length} backend tool result(s) produced`,
+              `${storedToolResults.length} backend tool result(s) produced`,
               "success",
-              summarizeToolResultsForRun(toolExecution.toolResults),
+              summarizeToolResultsForRun(storedToolResults),
             ),
             finishedAt: now,
           });
-          run.dynamicToolResults = mergeAgentToolResults(run.dynamicToolResults, toolExecution.toolResults);
+          run.dynamicToolResults = mergeAgentToolResults(run.dynamicToolResults, storedToolResults);
           run.payload = {
             ...run.payload,
             ...(verifiedWriteNotice
@@ -6599,8 +7915,35 @@ const startAgentRunModelStep = (
               : {}),
             harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults),
           };
+          appendNativeToolResultMessages(run, storedToolResultPairs);
           run.serverToolCallCount = (run.serverToolCallCount ?? 0) + toolExecution.executedToolCallCount;
           run.serverToolRoundCount = (run.serverToolRoundCount ?? 0) + 1;
+          if (toolExecution.executedMutationToolCallCount > 0) {
+            run.serverMutationToolCallCount =
+              (run.serverMutationToolCallCount ?? 0) + toolExecution.executedMutationToolCallCount;
+            run.serverMutationRoundCount = (run.serverMutationRoundCount ?? 0) + 1;
+            const maxMutationRounds = getRunModeProfileForRun(run).mutationBudget.maxMutationRounds;
+            if (run.serverMutationRoundCount >= maxMutationRounds) {
+              run.payload = {
+                ...run.payload,
+                messages: [
+                  ...(run.payload.messages ?? []).filter(
+                    (message) => !isAgentHarnessDiagnosticMessage(String(message.content ?? "")),
+                  ),
+                  {
+                    role: "user" as const,
+                    content: [
+                      "MangaMaker mutation budget notice: the two allowed document mutation rounds for this run have now been used.",
+                      "Do not request more document mutation tools, read tools, page tools, or render tools in this run.",
+                      "Return a final report from the verified tool results. If work remains, mark it as blocked or ask the creator to start a new instruction.",
+                    ].join("\n"),
+                  },
+                ],
+                harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults),
+                finalAnswerOnly: true,
+              };
+            }
+          }
         }
         if (toolExecution.duplicateOnly && !toolExecution.duplicateCompletionOnly) {
           run.pendingToolCalls = [];
@@ -6623,7 +7966,7 @@ const startAgentRunModelStep = (
               },
             ],
             harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults),
-            finalAnswerOnly: forceFinalAnswerOnly ? true : run.payload.finalAnswerOnly,
+            finalAnswerOnly: forceFinalAnswerOnly || toolExecution.forceFinalAnswerOnly ? true : run.payload.finalAnswerOnly,
           };
           if (!forceFinalAnswerOnly) {
             await saveAndBroadcastAgentRun(run);
@@ -6644,6 +7987,12 @@ const startAgentRunModelStep = (
             ...response,
             requestedToolCalls: [],
           };
+          if (toolExecution.forceFinalAnswerOnly) {
+            run.payload = {
+              ...run.payload,
+              finalAnswerOnly: true,
+            };
+          }
           await saveAndBroadcastAgentRun(run);
           startAgentRunModelStep(run.id, "model_resume", loadAgentSchema);
           return;
@@ -6657,6 +8006,8 @@ const startAgentRunModelStep = (
           ...(toolExecution.duplicateOnly
             ? { warning: duplicateLoopPauseReason }
             : toolExecution.budgetExhausted && toolExecution.reason
+            ? { warning: toolExecution.reason }
+            : toolExecution.mutationBudgetExhausted && toolExecution.reason
             ? { warning: toolExecution.reason }
             : {}),
         };
@@ -7051,11 +8402,20 @@ const attachWebAgentMiddleware = (
         const runId = createAgentRunId(roleId);
         supersededAgentRunKeys.delete(createAgentRunStorageKey(projectId, runId));
         await cleanupSupersededAgentRunsForRole(projectId, roleId, runId);
+        const initialDynamicToolResults = (payload.harness?.dynamicToolResults ?? []).map((entry) => ({
+          toolName: String(entry.toolName ?? "unknown"),
+          input: entry.input,
+          result: entry.result,
+          createdAt: entry.createdAt ?? now,
+          ...(typeof entry.resultHandle === "string" ? { resultHandle: entry.resultHandle } : {}),
+          ...(typeof entry.resultByteLength === "number" ? { resultByteLength: entry.resultByteLength } : {}),
+        }));
         const run: AgentRunState = {
           id: runId,
           runInstanceId: createAgentRunInstanceId(),
           projectId,
           roleId,
+          runMode: payload.runMode ?? DEFAULT_AGENT_RUN_MODE,
           ...(payload.conversationContextId ? { conversationContextId: payload.conversationContextId } : {}),
           ...(payload.conversationContextFingerprint ? { conversationContextFingerprint: payload.conversationContextFingerprint } : {}),
           ...(payload.conversationContextUpdatedAt ? { conversationContextUpdatedAt: payload.conversationContextUpdatedAt } : {}),
@@ -7067,12 +8427,14 @@ const attachWebAgentMiddleware = (
           trace: [],
           pendingToolCalls: [],
           payload,
-          dynamicToolResults: (payload.harness?.dynamicToolResults ?? []).map((entry) => ({
-            toolName: String(entry.toolName ?? "unknown"),
-            input: entry.input,
-            result: entry.result,
-            createdAt: entry.createdAt ?? now,
-          })),
+          dynamicToolResults: [],
+        };
+        run.dynamicToolResults = await persistAgentRunToolResults(run, initialDynamicToolResults);
+        run.payload = {
+          ...run.payload,
+          ...(run.payload.harness
+            ? { harness: buildRunHarnessWithDynamicResults(run, run.dynamicToolResults) }
+            : {}),
         };
         agentRunStates.set(run.id, run);
         await saveAndBroadcastAgentRun(run, "run_snapshot");
@@ -7134,8 +8496,22 @@ const attachWebAgentMiddleware = (
             conversationContextId?: unknown;
             conversationContextFingerprint?: unknown;
             harness?: AgentChatPayload["harness"];
-            toolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
-            dynamicToolResults?: Array<{ toolName?: string; input?: unknown; result?: unknown; createdAt?: string }>;
+            toolResults?: Array<{
+              toolName?: string;
+              input?: unknown;
+              result?: unknown;
+              createdAt?: string;
+              resultHandle?: unknown;
+              resultByteLength?: unknown;
+            }>;
+            dynamicToolResults?: Array<{
+              toolName?: string;
+              input?: unknown;
+              result?: unknown;
+              createdAt?: string;
+              resultHandle?: unknown;
+              resultByteLength?: unknown;
+            }>;
             continueBudgetSegment?: boolean;
             finalAnswerOnly?: boolean;
           }>(req);
@@ -7160,18 +8536,25 @@ const attachWebAgentMiddleware = (
             return;
           }
           const now = new Date().toISOString();
-          const toolResults = (body.toolResults ?? []).map((entry) => ({
+          const pendingToolCallsBeforeResume = run.pendingToolCalls;
+          const rawToolResults = (body.toolResults ?? []).map((entry) => ({
             toolName: String(entry.toolName ?? "unknown"),
             input: entry.input,
             result: entry.result,
             createdAt: entry.createdAt ?? now,
+            ...(typeof entry.resultHandle === "string" ? { resultHandle: entry.resultHandle } : {}),
+            ...(typeof entry.resultByteLength === "number" ? { resultByteLength: entry.resultByteLength } : {}),
           }));
-          const incomingDynamicToolResults = (body.dynamicToolResults ?? []).map((entry) => ({
+          const rawIncomingDynamicToolResults = (body.dynamicToolResults ?? []).map((entry) => ({
             toolName: String(entry.toolName ?? "unknown"),
             input: entry.input,
             result: entry.result,
             createdAt: entry.createdAt ?? now,
+            ...(typeof entry.resultHandle === "string" ? { resultHandle: entry.resultHandle } : {}),
+            ...(typeof entry.resultByteLength === "number" ? { resultByteLength: entry.resultByteLength } : {}),
           }));
+          const toolResults = await persistAgentRunToolResults(run, rawToolResults);
+          const incomingDynamicToolResults = await persistAgentRunToolResults(run, rawIncomingDynamicToolResults);
           const nextDynamicToolResults = mergeAgentToolResults(
             run.dynamicToolResults,
             mergeAgentToolResults(incomingDynamicToolResults, toolResults),
@@ -7201,6 +8584,13 @@ const attachWebAgentMiddleware = (
             finalAnswerOnly: body.finalAnswerOnly === true ? true : run.payload.finalAnswerOnly,
           };
           run.dynamicToolResults = nextDynamicToolResults;
+          appendNativeToolResultMessages(
+            run,
+            toolResults.map((result, index) => ({
+              call: pendingToolCallsBeforeResume[index],
+              result,
+            })),
+          );
           if (body.continueBudgetSegment === true) {
             run.serverToolCallCount = 0;
             run.serverToolRoundCount = 0;

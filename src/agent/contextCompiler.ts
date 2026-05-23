@@ -17,6 +17,7 @@ export type AgentCurrentTaskToolResultIndexEntry = {
   inputSummary: string;
   resultKeys: string[];
   createdAt: string;
+  resultHandle?: string;
   status?: "verified_write" | "blocked" | "cache" | "skipped";
 };
 
@@ -51,6 +52,7 @@ type AgentHarnessToolResult = {
   input: unknown;
   result: unknown;
   createdAt: string;
+  resultHandle?: string;
 };
 
 type CompileAgentCurrentTaskPacketInput = {
@@ -142,6 +144,7 @@ const buildToolResultIndex = (results: AgentHarnessToolResult[]): AgentCurrentTa
     inputSummary: inputSummary(entry.input),
     resultKeys: resultKeys(entry.result),
     createdAt: entry.createdAt,
+    ...(entry.resultHandle ? { resultHandle: entry.resultHandle } : {}),
     ...(toolResultStatus(entry) ? { status: toolResultStatus(entry) } : {}),
   }));
 };
@@ -206,7 +209,8 @@ export const compileAgentCurrentTaskPacket = ({
     "Use pinnedTaskInstructions as durable creator constraints for this task when present.",
     "Treat recentConversationReference as background only; it is not durable production state.",
     "Use PrimeDirective.md and the active role metadoc as pinned high-priority project/role context.",
-    "Use tool results by index when available; do not repeat identical toolName/input calls just because old text appears in conversation history.",
+    "Use tool results by index and resultHandle when available; do not repeat identical toolName/input calls just because old text appears in conversation history.",
+    "Full tool results may be stored outside the prompt. For Markdown content, choose readDocument or readDocumentLines according to the task; do not repeat either tool when the needed result is already indexed.",
   ];
   const acceptanceCriteria = [
     "The response or tool plan directly addresses latestCreatorInstruction.",

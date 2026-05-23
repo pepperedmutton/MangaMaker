@@ -7,6 +7,7 @@ import {
   MIN_ZOOM,
 } from "../../src/domain/defaults";
 import { getPageWorkspace } from "../../src/domain/helpers";
+import { getPageDisplayName } from "../../src/domain/pageNaming";
 import type { Panel } from "../../src/domain/schema";
 import { createHarness, runCommand } from "./harness";
 
@@ -114,6 +115,7 @@ describe("commandRegistry coverage", () => {
         "updateBubble",
         "deleteObject",
         "exportPagePng",
+        "exportProjectAllPages",
         "exportProjectPdf",
         "exportProjectJpgZip",
         "selectObjects",
@@ -222,9 +224,9 @@ describe("commandRegistry coverage", () => {
     await runCommand(harness, "duplicatePage", { pageId: firstPage.id });
     await runCommand(harness, "reorderPage", { fromIndex: 2, toIndex: 0 });
     expect(harness.readSession().project.pages.map((page) => page.name)).toEqual([
-      "Closer",
-      "Opener",
-      "Opener Copy",
+      getPageDisplayName("en", 0),
+      getPageDisplayName("en", 1),
+      getPageDisplayName("en", 2),
     ]);
 
     await runCommand(harness, "selectPage", { pageId: secondPage.id });
@@ -535,7 +537,7 @@ describe("commandRegistry coverage", () => {
     expect(harness.readSession().selection).toBeNull();
   });
 
-  it("exports PNG, PDF, and JPG ZIP artifacts with safe names and session metadata", async () => {
+  it("exports PNG, PDF, JPG ZIP, and explicit all-page artifacts with safe names and session metadata", async () => {
     const harness = createHarness();
 
     await runCommand(harness, "createProject", { title: "My Great Project!" });
@@ -547,7 +549,7 @@ describe("commandRegistry coverage", () => {
     expect(mockRenderPageToPngDataUrl).toHaveBeenCalledTimes(1);
     expect(pngArtifact).toMatchObject({
       kind: "png",
-      fileName: "page-1-finale.png",
+      fileName: "page-1.png",
       pageId: page.id,
     });
 
@@ -566,6 +568,28 @@ describe("commandRegistry coverage", () => {
     expect(jpgZipArtifact).toMatchObject({
       kind: "jpgZip",
       fileName: "my-great-project-jpg-pages.zip",
+      pageCount: 1,
+    });
+
+    const allPagesDefaultArtifact = await runCommand(harness, "exportProjectAllPages", {});
+    expect(mockRenderProjectToJpgZipDataUrl).toHaveBeenLastCalledWith(
+      harness.readSession().project.pages,
+    );
+    expect(allPagesDefaultArtifact).toMatchObject({
+      kind: "jpgZip",
+      fileName: "my-great-project-jpg-pages.zip",
+      pageCount: 1,
+    });
+
+    const allPagesPdfArtifact = await runCommand(harness, "exportProjectAllPages", {
+      format: "pdf",
+    });
+    expect(mockRenderProjectToPdfDataUrl).toHaveBeenLastCalledWith(
+      harness.readSession().project.pages,
+    );
+    expect(allPagesPdfArtifact).toMatchObject({
+      kind: "pdf",
+      fileName: "my-great-project.pdf",
       pageCount: 1,
     });
   });

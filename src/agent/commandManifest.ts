@@ -228,6 +228,7 @@ const sessionOnlyCommandIds = new Set([
   "enterPanelImageEdit",
   "exitPanelImageEdit",
   "exportPagePng",
+  "exportProjectAllPages",
   "exportProjectPdf",
   "exportProjectJpgZip",
 ]);
@@ -252,16 +253,19 @@ const projectReplacementCommandIds = new Set([
 
 const descriptionByCommandId: Record<string, string> = {
   createPanel: "Create one panel on a page.",
-  createText: "Create one text box on a page.",
-  updateText: "Update the selected text box geometry, content, font, color, or stroke.",
-  createBubble: "Create one speech bubble on a page.",
-  updateBubble: "Update one speech bubble geometry and style.",
+  createText: "Create one text box on a page. This command accepts pageId, x, y, and optional content only; use updateText for size, font, direction, alignment, color, and stroke.",
+  updateText: "Update one text box geometry, content, font, direction, alignment, color, or stroke.",
+  createBubble: "Create one speech/caption bubble on a page. Use a schema-valid bubbleType; for narration/caption boxes use caption or roundedSquare with showTail=false. Do not use bubbleType=narration.",
+  updateBubble: "Update one speech/caption bubble geometry and style. Use backgroundColor, strokeColor, strokeWidth, opacity, tailTip, tailBase, and tailWidth; do not use legacy style objects.",
   saveProject: "Save the current project through the normal project persistence command.",
   removePage: "Remove one page from the current project.",
   deleteObject: "Delete one panel, text box, or bubble from a page.",
   setTool: "Switch the active editor tool.",
   selectObject: "Select one object in the editor.",
   selectObjects: "Select multiple objects on a page.",
+  exportProjectAllPages: "Export every page in the current project as one artifact. Use format=jpgZip for individual JPG page files in a ZIP, or format=pdf for one project PDF.",
+  exportProjectPdf: "Export every page in the current project as one PDF artifact.",
+  exportProjectJpgZip: "Export every page in the current project as individual JPG files in one ZIP artifact.",
 };
 
 const guiEquivalentByCommandId: Record<string, string> = {
@@ -280,6 +284,9 @@ const guiEquivalentByCommandId: Record<string, string> = {
   setPageBackground: "Ribbon page background color picker",
   placeImageInPanel: "Inspector Import Image button",
   moveLayer: "Canvas context menu layer actions",
+  exportProjectAllPages: "Automation API for all-page export; equivalent to Inspector project PDF/JPG ZIP export actions",
+  exportProjectPdf: "Inspector Export project PDF button",
+  exportProjectJpgZip: "Inspector Export project JPG ZIP button",
 };
 
 const exampleByCommandId: Record<string, unknown[]> = {
@@ -290,12 +297,40 @@ const exampleByCommandId: Record<string, unknown[]> = {
     { pageId: "page-id", x: 200, y: 200, content: "Hello" },
   ],
   updateText: [
-    { pageId: "page-id", textId: "text-id", strokeColor: "#ff0000", strokeWidth: 4 },
+    {
+      pageId: "page-id",
+      textId: "text-id",
+      width: 1040,
+      height: 220,
+      fontSize: 40,
+      direction: "horizontal",
+      textAlign: "center",
+      verticalAlign: "middle",
+      strokeColor: "#ffffff",
+      strokeWidth: 2,
+    },
   ],
   createBubble: [
     { pageId: "page-id", x: 280, y: 240, width: 260, height: 150, bubbleType: "round" },
+    { pageId: "page-id", x: 40, y: 40, width: 1120, height: 260, bubbleType: "caption", showTail: false },
+  ],
+  updateBubble: [
+    {
+      pageId: "page-id",
+      bubbleId: "bubble-id",
+      backgroundColor: "rgba(255, 255, 255, 0.82)",
+      strokeColor: "transparent",
+      strokeWidth: 0,
+      opacity: 1,
+    },
   ],
   saveProject: [{}],
+  exportProjectAllPages: [
+    { format: "jpgZip" },
+    { format: "pdf" },
+  ],
+  exportProjectPdf: [{}],
+  exportProjectJpgZip: [{}],
   setTool: [{ tool: "panel" }],
   selectObject: [{ pageId: "page-id", objectType: "text", objectId: "text-id" }],
 };

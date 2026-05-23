@@ -5,6 +5,13 @@ import type { AgentCommandManifestEntry, AgentDebugSnapshot } from "../agent/typ
 import { projectSchema, type Project } from "../domain/schema";
 import { normalizeProjectForCurrentVersion } from "../storage/projectMigration";
 import { useEditorStore } from "../state/editorStore";
+import type { ExportArtifact } from "../state/types";
+
+type ExportProjectAllPagesOptions = {
+  format?: "jpgZip" | "pdf";
+};
+
+type ProjectAllPagesExportArtifact = NonNullable<ExportArtifact>;
 
 declare global {
   interface Window {
@@ -18,6 +25,9 @@ declare global {
         get: () => Project;
         load: (project: Project) => Promise<unknown>;
         reset: () => void;
+        exportAllPages: (
+          options?: ExportProjectAllPagesOptions,
+        ) => Promise<ProjectAllPagesExportArtifact>;
       };
       session: {
         get: () => ReturnType<typeof useEditorStore.getState>;
@@ -49,6 +59,10 @@ export const installAutomationApi = () => {
             project: projectSchema.parse(normalizeProjectForCurrentVersion(project)),
           }),
       reset: () => useEditorStore.getState().resetProject(),
+      exportAllPages: (options = {}) =>
+        useEditorStore
+          .getState()
+          .executeCommand("exportProjectAllPages", options) as Promise<ProjectAllPagesExportArtifact>,
     },
     session: {
       get: () => useEditorStore.getState(),

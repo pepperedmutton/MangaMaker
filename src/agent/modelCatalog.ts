@@ -2,6 +2,10 @@ export type OpenRouterModelMetadata = {
   id: string;
   name?: string;
   context_length?: number;
+  top_provider?: {
+    context_length?: number;
+    max_completion_tokens?: number;
+  };
   architecture?: {
     input_modalities?: string[];
     output_modalities?: string[];
@@ -15,6 +19,7 @@ export type AgentAvailableModel = {
   id: string;
   name: string;
   contextLength: number | null;
+  maxOutputTokens: number | null;
   inputModalities: string[];
   outputModalities: string[];
   capability: AgentModelCapability;
@@ -86,10 +91,20 @@ export const normalizeAgentModel = (model: OpenRouterModelMetadata): AgentAvaila
   if (!capability) {
     return null;
   }
+  const contextLength =
+    typeof model.top_provider?.context_length === "number"
+      ? model.top_provider.context_length
+      : typeof model.context_length === "number"
+        ? model.context_length
+        : null;
   return {
     id: model.id,
     name: model.name ?? model.id,
-    contextLength: typeof model.context_length === "number" ? model.context_length : null,
+    contextLength,
+    maxOutputTokens:
+      typeof model.top_provider?.max_completion_tokens === "number"
+        ? model.top_provider.max_completion_tokens
+        : null,
     inputModalities: model.architecture?.input_modalities ?? [],
     outputModalities: model.architecture?.output_modalities ?? [],
     capability,

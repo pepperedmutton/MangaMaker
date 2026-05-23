@@ -57,6 +57,12 @@ Minimum required API checks when the related behavior changes:
 10. Verify panel/page paste payloads retain image data and can be persisted into the target project assets.
 11. Verify `updateBubble` can persist bubble type changes, style changes, `tailTip`, `tailBase`, `tailWidth`, and `spikePositions` when relevant.
 12. Verify `saveProject`, `goHome`, project switching, and the page close/hide save path write dirty project state at the defined persistence points.
+13. Verify external agents read `window.mangaMaker.commands.describe()` before generating tool payloads; it is the current machine-readable command contract.
+14. Verify text insertion uses `createText` for object creation and `updateText` for geometry, typography, direction, alignment, color, and stroke. Dialogue, captions, and narration text must stay in `texts`, not in bubble fields.
+15. Verify bubble insertion uses schema-valid `bubbleType` values and current style fields such as `backgroundColor`, `strokeColor`, `strokeWidth`, and `opacity`; new automation output must not emit legacy `style` objects.
+16. Verify narration/caption boxes use `caption` or `roundedSquare` with `showTail: false`. `bubbleType: "narration"` is accepted only as a load-time migration alias, not as new automation output.
+17. Verify batch text/bubble insertion saves through `saveProject` or `goHome`, then confirm the project still appears on Home.
+18. Verify all-page project export uses `window.mangaMaker.project.exportAllPages({ format })` or `commands.execute("exportProjectAllPages", { format })`; `exportPagePng` remains single-page only.
 
 1. 在 `src/commands` 中定位对应命令。
 2. 通过 `window.mangaMaker.commands.execute()` 验证命令执行。
@@ -128,7 +134,7 @@ Minimum manual checklist:
 13. **Context Menus**: Right-click on canvas objects opens the custom menu and suppresses the browser menu; layer up/down changes stacking order.
 14. **Persistence**: After important actions such as page creation, image import, image paste, and bubble editing, dirty state is set; Save, Home/project switch, and close/hide write the latest project files without losing work.
 15. **Home and Save**: Users can return to the welcome screen and save manually without losing work.
-16. **Export**: Export page PNG and project PDF both work and report status.
+16. **Export**: Export page PNG, all-page project PDF, all-page project JPG ZIP, and `exportProjectAllPages` all work and report status.
 17. **Language**: Chinese and English UI remain readable after switching.
 
 1. **欢迎流程**：欢迎页能看到现有项目和缩略图；创建项目必须输入标题并选择类型；右键项目可删除。
@@ -146,7 +152,7 @@ Minimum manual checklist:
 13. **右键菜单**：在画布对象上右键会打开自定义菜单并屏蔽浏览器菜单；图层上移/下移会改变堆叠顺序。
 14. **持久化**：页面创建、图片导入、图片粘贴、气泡编辑等重要操作后会标记未保存；Save、Home/项目切换以及关闭/隐藏页面会写入最新项目文件且不丢失工作。
 15. **Home 与 Save**：用户可以返回欢迎页，并能手动保存且不丢失进度。
-16. **导出**：页面 PNG 和项目 PDF 导出都能工作，并有状态反馈。
+16. **导出**：页面 PNG、全项目 PDF、全项目 JPG ZIP 和 `exportProjectAllPages` 都能工作，并有状态反馈。
 17. **语言**：切换中英文后，界面仍然可读。
 
 ### 2.5 Startup and Share Verification / 启动与分享验证
@@ -190,7 +196,7 @@ A valid completion report must say:
 
 Agent changes must verify both backend contract and user-visible behavior:
 
-1. `GET /__mangamaker__/agent/config` reports test mode, missing API key, configured model, context-window token budget, and vision status without exposing secrets. The default context window is `262144` for Kimi K2.6, and `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` or the Agent Config UI can lower it. OpenRouter Agent tests should also account for the default `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS=16384` and `MANGAMAKER_AGENT_REASONING_MAX_TOKENS=2048`, because reasoning tokens share the model output budget.
+1. `GET /__mangamaker__/agent/config` reports test mode, missing API key, configured model, context-window token budget, model output token budget, and vision status without exposing secrets. By default the context window and output cap come from the selected OpenRouter model metadata; `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS`, `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS`, or the Agent Config UI can lower the effective request budget. OpenRouter Agent tests should also account for `MANGAMAKER_AGENT_REASONING_MAX_TOKENS=2048`, because reasoning tokens share the model output budget.
 2. Invalid model responses are rejected for invalid JSON and invalid tool inputs. Any model-supplied `pendingCommandPlan`, including unknown `commandId` values or malformed page-edit plans, is ignored with a visible warning because the built-in Agent is document-only for mutations.
 3. Legacy command-plan unit tests may still verify local command metadata, danger levels, confirmation, undo, and diff behavior for internal infrastructure, but product Agent runs must not expose or execute page/canvas plans.
 4. Page-edit requests should be handled as Markdown planning or manual editor instructions, not executable command plans.

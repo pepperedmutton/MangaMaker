@@ -42,6 +42,14 @@ import {
 } from "../agent/contextWindow";
 import { AGENT_MODEL_PRESETS } from "../agent/modelCatalog";
 import {
+  AGENT_RUN_MODE_IDS,
+  AGENT_RUN_MODE_PROFILES,
+  DEFAULT_AGENT_RUN_MODE,
+  getAgentRunModeProfile,
+  parseAgentRunMode,
+  type AgentRunMode,
+} from "../agent/runMode";
+import {
   createAgentRoleMetadocPath,
   type AgentDocument,
   type AgentDocumentManifest,
@@ -261,6 +269,23 @@ const getActiveRunStepSummary = (run: AgentRun | null) => {
   return step ? `${step.kind.replace(/_/g, " ")}: ${step.summary}` : null;
 };
 
+const getActiveRunTraceSummary = (run: AgentRun | null) => {
+  if (!run || run.status !== "running") {
+    return null;
+  }
+  const traces = [...run.trace].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const trace = traces[0];
+  if (!trace) {
+    return null;
+  }
+  const latestEvent = trace.events[trace.events.length - 1];
+  const phase = latestEvent?.phase ?? trace.status;
+  const elapsedSeconds = Math.max(0, Math.round(trace.durationMs / 1000));
+  const target = trace.model ?? trace.provider ?? "model";
+  const detail = latestEvent?.message ?? trace.error ?? "";
+  return `${target}: ${phase.replace(/_/g, " ")} (${elapsedSeconds}s)${detail ? ` - ${detail}` : ""}`;
+};
+
 const AgentTaskProgressView = ({
   progress,
   run,
@@ -269,7 +294,8 @@ const AgentTaskProgressView = ({
   run: AgentRun | null;
 }) => {
   const activeStepSummary = getActiveRunStepSummary(run);
-  if (!progress && !activeStepSummary) {
+  const activeTraceSummary = getActiveRunTraceSummary(run);
+  if (!progress && !activeStepSummary && !activeTraceSummary) {
     return null;
   }
   const percent = typeof progress?.percent === "number"
@@ -293,6 +319,7 @@ const AgentTaskProgressView = ({
         {progress?.phase ? <span>Phase: {progress.phase.replace(/_/g, " ")}</span> : null}
         {progress?.nextAction ? <span>Next: {progress.nextAction}</span> : null}
         {activeStepSummary ? <span>Backend: {activeStepSummary}</span> : null}
+        {activeTraceSummary ? <span>Trace: {activeTraceSummary}</span> : null}
       </div>
       {progress?.steps?.length ? (
         <ol>
@@ -310,9 +337,6 @@ const AgentTaskProgressView = ({
   );
 };
 
-const MAX_AGENT_TOOL_ROUNDS = 24;
-const MAX_AGENT_TOOL_CALLS = 72;
-const MAX_AGENT_TOOL_CALLS_PER_ROUND = 24;
 const MAX_DUPLICATE_TOOL_GUIDED_RETRIES = 4;
 const MAX_FINAL_ANSWER_ONLY_REPAIRS = 1;
 const DEFAULT_AGENT_GREETING = "Ready. I can inspect the current project, offer suggestions, and update project documents.";
@@ -381,10 +405,16 @@ const toolReuseOptionsForContext = (context: AgentContextSnapshot) => ({
 const harnessOptionsForConfig = (
   config: AgentConfig | null,
   activeRole: AgentRoleDefinition,
+  runMode: AgentRunMode,
   primeDirective?: AgentDocument | null,
   modelCapabilityOverride?: AgentConfig["modelCapability"],
+  contextWindowTokens?: number,
+  maxOutputTokens?: number | null,
 ) => ({
   modelCapability: modelCapabilityOverride ?? config?.modelCapability ?? "multimodal" as const,
+  runMode,
+  ...(contextWindowTokens ? { contextWindowTokens } : {}),
+  ...(maxOutputTokens ? { maxOutputTokens } : {}),
   activeMetadocId: activeRole.metadocId,
   activeRoleWorkingDirectory: getAgentRoleWorkingDirectory(activeRole),
   ...(primeDirective ? { primeDirective } : {}),
@@ -498,6 +528,7 @@ const runtimeConfigKeyForProject = (projectId: string) => `${RUNTIME_CONFIG_KEY_
 type AgentRuntimeConfig = {
   systemPrompt: string;
   currentTaskPin: string;
+  runMode: AgentRunMode;
   contextWindowTokens: number | null;
   repetitionPenalty: number | null;
   modelId: string | null;
@@ -518,6 +549,7 @@ const loadRuntimeConfig = (projectId: string): AgentRuntimeConfig => {
       return {
         systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT,
         currentTaskPin: "",
+        runMode: DEFAULT_AGENT_RUN_MODE,
         contextWindowTokens: null,
         repetitionPenalty: null,
         modelId: null,
@@ -526,17 +558,22 @@ const loadRuntimeConfig = (projectId: string): AgentRuntimeConfig => {
     const parsed = JSON.parse(raw) as {
       systemPrompt?: unknown;
       currentTaskPin?: unknown;
+      runMode?: unknown;
       contextWindowTokens?: unknown;
       repetitionPenalty?: unknown;
       modelId?: unknown;
     };
+    const runMode = parseAgentRunMode(parsed.runMode) ?? DEFAULT_AGENT_RUN_MODE;
     return {
       systemPrompt:
         typeof parsed.systemPrompt === "string" && parsed.systemPrompt.trim().length > 0
           ? migrateAgentSystemPrompt(parsed.systemPrompt)
           : DEFAULT_AGENT_SYSTEM_PROMPT,
       currentTaskPin: typeof parsed.currentTaskPin === "string" ? parsed.currentTaskPin : "",
-      contextWindowTokens: parseAgentContextWindowTokens(parsed.contextWindowTokens),
+      runMode,
+      contextWindowTokens: parseAgentRunMode(parsed.runMode)
+        ? parseAgentContextWindowTokens(parsed.contextWindowTokens)
+        : null,
       repetitionPenalty: parseRepetitionPenaltyInput(parsed.repetitionPenalty),
       modelId:
         typeof parsed.modelId === "string" && parsed.modelId.trim().length > 0
@@ -547,6 +584,7 @@ const loadRuntimeConfig = (projectId: string): AgentRuntimeConfig => {
     return {
       systemPrompt: DEFAULT_AGENT_SYSTEM_PROMPT,
       currentTaskPin: "",
+      runMode: DEFAULT_AGENT_RUN_MODE,
       contextWindowTokens: null,
       repetitionPenalty: null,
       modelId: null,
@@ -559,6 +597,7 @@ const saveRuntimeConfig = (
   config: {
     systemPrompt: string;
     currentTaskPin: string;
+    runMode: AgentRunMode;
     contextWindowTokens: number | null;
     repetitionPenalty: number | null;
     modelId: string | null;
@@ -570,6 +609,7 @@ const saveRuntimeConfig = (
       JSON.stringify({
         systemPrompt: config.systemPrompt,
         currentTaskPin: config.currentTaskPin,
+        runMode: config.runMode,
         contextWindowTokens: config.contextWindowTokens,
         repetitionPenalty: config.repetitionPenalty,
         modelId: config.modelId,
@@ -588,7 +628,7 @@ const formatTokenCount = (tokens: number | null | undefined) =>
 
 const formatAgentModelOption = (model: AgentAvailableModel) => {
   const mode = model.capability === "metadoc" ? "text-only" : "multimodal";
-  return `${model.name} (${model.id}, ${mode}, ${formatTokenCount(model.contextLength)} ctx)`;
+  return `${model.name} (${model.id}, ${mode}, ${formatTokenCount(model.contextLength)} ctx, ${formatTokenCount(model.maxOutputTokens)} out)`;
 };
 
 export const AgentSidebar = ({
@@ -623,7 +663,10 @@ export const AgentSidebar = ({
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_AGENT_SYSTEM_PROMPT);
   const [currentTaskPin, setCurrentTaskPin] = useState("");
   const [selectedModelId, setSelectedModelId] = useState("");
-  const [contextWindowInput, setContextWindowInput] = useState(String(DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS));
+  const [runMode, setRunMode] = useState<AgentRunMode>(DEFAULT_AGENT_RUN_MODE);
+  const [contextWindowInput, setContextWindowInput] = useState(
+    String(AGENT_RUN_MODE_PROFILES[DEFAULT_AGENT_RUN_MODE].contextWindowTokens),
+  );
   const [repetitionPenaltyInput, setRepetitionPenaltyInput] = useState("1.05");
   const [configPanelOpen, setConfigPanelOpen] = useState(false);
   const [roleDialogOpen, setRoleDialogOpen] = useState(false);
@@ -828,6 +871,7 @@ export const AgentSidebar = ({
           : {}),
       contextWindowTokens: effectiveContextWindowTokens,
       repetitionPenalty: effectiveRepetitionPenalty,
+      runMode,
       ...(effectiveModelId ? { modelOverride: effectiveModelId } : {}),
       ...(currentTaskPin.trim() ? { currentTaskPin: currentTaskPin.trim() } : {}),
       requestTrace: createAgentRequestTraceMetadata(stage),
@@ -905,6 +949,9 @@ export const AgentSidebar = ({
           contextWindowTokens: DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS,
           contextWindowMaxTokens: null,
           contextWindowSource: "default",
+          maxOutputTokens: 16_384,
+          maxOutputMaxTokens: null,
+          maxOutputSource: "default",
           repetitionPenalty: 1.05,
           reason: message,
         });
@@ -930,12 +977,21 @@ export const AgentSidebar = ({
           configResult.status === "fulfilled" ? configResult.value.repetitionPenalty : 1.05;
         setSystemPrompt(runtimeConfig.systemPrompt);
         setCurrentTaskPin(runtimeConfig.currentTaskPin);
+        setRunMode(runtimeConfig.runMode);
         const defaultModelId =
           configResult.status === "fulfilled" && configResult.value.testMode
             ? ""
             : backendModelId ?? "";
         setSelectedModelId(runtimeConfig.modelId ?? defaultModelId);
-        setContextWindowInput(String(runtimeConfig.contextWindowTokens ?? backendContextWindow));
+        const runtimeModelId = runtimeConfig.modelId ?? defaultModelId;
+        const runtimeModel =
+          modelsResult.status === "fulfilled"
+            ? modelsResult.value.find((entry) => entry.id === runtimeModelId) ?? null
+            : null;
+        const modelContextWindow = runtimeModel?.contextLength ?? backendContextWindow;
+        setContextWindowInput(
+          String(modelContextWindow),
+        );
         setRepetitionPenaltyInput(String(runtimeConfig.repetitionPenalty ?? backendRepetitionPenalty));
       }
     });
@@ -968,6 +1024,7 @@ export const AgentSidebar = ({
     saveRuntimeConfig(conversationContextScope.projectId, {
       systemPrompt,
       currentTaskPin,
+      runMode,
       contextWindowTokens: parseAgentContextWindowTokens(contextWindowInput),
       repetitionPenalty: parseRepetitionPenaltyInput(repetitionPenaltyInput),
       modelId: selectedModelId.trim() || null,
@@ -978,6 +1035,7 @@ export const AgentSidebar = ({
     conversationContextScope,
     currentTaskPin,
     repetitionPenaltyInput,
+    runMode,
     selectedModelId,
     systemPrompt,
   ]);
@@ -1021,10 +1079,7 @@ export const AgentSidebar = ({
     [effectiveDocumentManifest, metadocRoleIds],
   );
 
-  const effectiveContextWindowTokens =
-    parseAgentContextWindowTokens(contextWindowInput) ??
-    config?.contextWindowTokens ??
-    DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS;
+  const effectiveRunModeProfile = getAgentRunModeProfile(runMode);
   const effectiveRepetitionPenalty =
     parseRepetitionPenaltyInput(repetitionPenaltyInput) ??
     config?.repetitionPenalty ??
@@ -1040,6 +1095,19 @@ export const AgentSidebar = ({
       ? config.modelCapability
       : selectedAvailableModel?.capability ?? config?.modelCapability ?? null;
   const effectiveModelContextMax = selectedAvailableModel?.contextLength ?? config?.contextWindowMaxTokens ?? null;
+  const effectiveModelOutputMax =
+    selectedAvailableModel?.maxOutputTokens ?? config?.maxOutputMaxTokens ?? config?.maxOutputTokens ?? null;
+  const parsedContextWindowTokens = parseAgentContextWindowTokens(contextWindowInput);
+  const unclampedContextWindowTokens =
+    parsedContextWindowTokens ??
+    config?.contextWindowTokens ??
+    effectiveModelContextMax ??
+    getAgentRunModeProfile(runMode).contextWindowTokens ??
+    DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS;
+  const effectiveContextWindowTokens =
+    typeof effectiveModelContextMax === "number" && Number.isFinite(effectiveModelContextMax)
+      ? Math.min(unclampedContextWindowTokens, effectiveModelContextMax)
+      : unclampedContextWindowTokens;
   const agentBackendUsable =
     config?.testMode === true
       ? config.enabled
@@ -1050,6 +1118,8 @@ export const AgentSidebar = ({
       return "Checking Agent configuration...";
     }
     const contextLabel = `context ${formatTokenCount(effectiveContextWindowTokens)} tokens`;
+    const outputLabel = `output ${formatTokenCount(effectiveModelOutputMax)} tokens`;
+    const runModeLabel = `${effectiveRunModeProfile.label} mode`;
     const repetitionLabel = `repetition penalty ${effectiveRepetitionPenalty.toFixed(2)}`;
     const capabilityLabel = effectiveModelCapability === "metadoc"
       ? "text-only document model"
@@ -1060,7 +1130,7 @@ export const AgentSidebar = ({
       ? "Test mode"
       : `OpenRouter - ${effectiveModelId || "model not set"}`;
     if (config.testMode) {
-      return `${modeLabel} - ${capabilityLabel} - ${config.visionEnabled ? "vision enabled" : "vision unavailable"} - ${contextLabel} - ${repetitionLabel}`;
+      return `${modeLabel} - ${runModeLabel} - ${capabilityLabel} - ${config.visionEnabled ? "vision enabled" : "vision unavailable"} - ${contextLabel} - ${outputLabel} - ${repetitionLabel}`;
     }
     if (!agentBackendUsable) {
       if (effectiveModelId && availableModels.length > 0 && !selectedAvailableModel) {
@@ -1068,14 +1138,16 @@ export const AgentSidebar = ({
       }
       return config.reason ?? "Agent backend is not configured.";
     }
-    return `${modeLabel} - ${capabilityLabel} - ${
+    return `${modeLabel} - ${runModeLabel} - ${capabilityLabel} - ${
       effectiveModelCapability === "multimodal" ? "vision enabled" : "vision unavailable"
-    } - ${contextLabel} - ${repetitionLabel}`;
+    } - ${contextLabel} - ${outputLabel} - ${repetitionLabel}`;
   }, [
     agentBackendUsable,
     config,
     availableModels.length,
     effectiveContextWindowTokens,
+    effectiveModelOutputMax,
+    effectiveRunModeProfile,
     effectiveModelCapability,
     effectiveModelId,
     effectiveRepetitionPenalty,
@@ -1548,8 +1620,9 @@ export const AgentSidebar = ({
         remainingToolCalls: 0,
         totalExecutedToolCallCount: nextTotalExecutedToolCallCount,
         segmentExecutedToolCallCount,
-        maxToolCallsPerSegment: MAX_AGENT_TOOL_CALLS,
-        maxRoundsPerSegment: MAX_AGENT_TOOL_ROUNDS,
+        runMode: effectiveRunModeProfile.id,
+        maxToolCallsPerSegment: effectiveRunModeProfile.toolBudget.maxToolCalls,
+        maxRoundsPerSegment: effectiveRunModeProfile.toolBudget.maxToolRounds,
         deniedToolCalls: requestedToolCalls.map(({ toolName, input, reason }) => ({ toolName, input, reason })),
         reason: pauseReason,
       }),
@@ -1643,12 +1716,28 @@ export const AgentSidebar = ({
       return;
     }
 
-    for (let round = 0; round < MAX_AGENT_TOOL_ROUNDS && payload.requestedToolCalls?.length; round += 1) {
+    for (
+      let round = 0;
+      round < effectiveRunModeProfile.toolBudget.maxToolRounds && payload.requestedToolCalls?.length;
+      round += 1
+    ) {
       if (finalAnswerOnlyMode) {
         if (finalAnswerOnlyRepairCount < MAX_FINAL_ANSWER_ONLY_REPAIRS) {
           finalAnswerOnlyRepairCount += 1;
           appendLog(createLog("agentChat", "pending", "Repairing final-answer-only response without executing tools"));
-          const harness = buildAgentHarness(context, dynamicToolResults, harnessOptionsForConfig(config, activeRoleSnapshot));
+          const harness = buildAgentHarness(
+            context,
+            dynamicToolResults,
+            harnessOptionsForConfig(
+              config,
+              activeRoleSnapshot,
+              runMode,
+              undefined,
+              undefined,
+              effectiveContextWindowTokens,
+              effectiveModelOutputMax,
+            ),
+          );
           const repairRequest = {
             messages: toAgentWireMessages(messages, createFinalAnswerOnlyRepairNotice(payload)),
             ...(runConversationContextId ? { conversationContextId: runConversationContextId } : {}),
@@ -1712,11 +1801,14 @@ export const AgentSidebar = ({
         return;
       }
       const requestedCalls = payload.requestedToolCalls;
-      const remainingToolCalls = Math.max(0, MAX_AGENT_TOOL_CALLS - segmentExecutedToolCallCount);
+      const remainingToolCalls = Math.max(0, effectiveRunModeProfile.toolBudget.maxToolCalls - segmentExecutedToolCallCount);
       if (remainingToolCalls === 0) {
         break;
       }
-      const executableCalls = requestedCalls.slice(0, Math.min(remainingToolCalls, MAX_AGENT_TOOL_CALLS_PER_ROUND));
+      const executableCalls = requestedCalls.slice(
+        0,
+        Math.min(remainingToolCalls, effectiveRunModeProfile.toolBudget.maxToolCallsPerRound),
+      );
       const deferredCalls = requestedCalls.slice(executableCalls.length);
       if (deferredCalls.length > 0) {
         dynamicToolResults = [
@@ -1750,7 +1842,19 @@ export const AgentSidebar = ({
           continue;
         }
         appendLog(createLog(call.toolName, "pending", call.reason));
-        const toolResult = await executeAgentHarnessToolCall(context, call, harnessOptionsForConfig(config, activeRoleSnapshot));
+        const toolResult = await executeAgentHarnessToolCall(
+          context,
+          call,
+          harnessOptionsForConfig(
+            config,
+            activeRoleSnapshot,
+            runMode,
+            undefined,
+            undefined,
+            effectiveContextWindowTokens,
+            effectiveModelOutputMax,
+          ),
+        );
         toolResults.push(toolResult);
         if (isAgentDocumentMutationToolName(call.toolName)) {
           onDocumentsChanged?.();
@@ -1767,12 +1871,13 @@ export const AgentSidebar = ({
         ...dynamicToolResults,
         ...toolResults,
         createAgentHarnessToolResult("toolBudget", {}, {
-          exhausted: segmentExecutedToolCallCount >= MAX_AGENT_TOOL_CALLS,
-          remainingToolCalls: Math.max(0, MAX_AGENT_TOOL_CALLS - segmentExecutedToolCallCount),
+          exhausted: segmentExecutedToolCallCount >= effectiveRunModeProfile.toolBudget.maxToolCalls,
+          remainingToolCalls: Math.max(0, effectiveRunModeProfile.toolBudget.maxToolCalls - segmentExecutedToolCallCount),
           segmentExecutedToolCallCount,
           totalExecutedToolCallCount: (totalExecutedToolCallCount ?? 0) + segmentExecutedToolCallCount,
-          maxToolCallsPerSegment: MAX_AGENT_TOOL_CALLS,
-          maxRoundsPerSegment: MAX_AGENT_TOOL_ROUNDS,
+          runMode: effectiveRunModeProfile.id,
+          maxToolCallsPerSegment: effectiveRunModeProfile.toolBudget.maxToolCalls,
+          maxRoundsPerSegment: effectiveRunModeProfile.toolBudget.maxToolRounds,
         }),
       ];
       appendLog(createLog("agentToolCalls", "success", `${toolResults.length} tool result(s)`));
@@ -1784,7 +1889,19 @@ export const AgentSidebar = ({
       }
       const forceFinalAnswerOnly = duplicateOnlyRoundCount >= MAX_DUPLICATE_TOOL_GUIDED_RETRIES;
       appendLog(createLog("agentChat", "pending", `Waiting for model response after ${toolResults.length} tool result(s)`));
-      const harness = buildAgentHarness(context, dynamicToolResults, harnessOptionsForConfig(config, activeRoleSnapshot));
+      const harness = buildAgentHarness(
+        context,
+        dynamicToolResults,
+        harnessOptionsForConfig(
+          config,
+          activeRoleSnapshot,
+          runMode,
+          undefined,
+          undefined,
+          effectiveContextWindowTokens,
+          effectiveModelOutputMax,
+        ),
+      );
       const duplicateGuidanceNotice = forceFinalAnswerOnly
         ? createFinalAnswerOnlyNotice(toolResults)
         : duplicateOnly
@@ -1835,7 +1952,7 @@ export const AgentSidebar = ({
     }
     if (payload.requestedToolCalls?.length) {
       const pauseReason =
-        segmentExecutedToolCallCount >= MAX_AGENT_TOOL_CALLS
+        segmentExecutedToolCallCount >= effectiveRunModeProfile.toolBudget.maxToolCalls
           ? "Agent reached the current tool-call budget. It paused instead of answering from incomplete evidence."
           : "Agent reached the current tool-round budget. It paused instead of answering from incomplete evidence.";
       pauseForToolBudget({
@@ -2354,7 +2471,15 @@ export const AgentSidebar = ({
       const harness = buildAgentHarness(
         context,
         dynamicToolResults,
-        harnessOptionsForConfig(config, activeRole, primeDirective, effectiveModelCapability),
+        harnessOptionsForConfig(
+          config,
+          activeRole,
+          runMode,
+          primeDirective,
+          effectiveModelCapability,
+          effectiveContextWindowTokens,
+          effectiveModelOutputMax,
+        ),
       );
       appendLog(
         createLog(
@@ -2566,6 +2691,39 @@ export const AgentSidebar = ({
           </p>
           {modelsError ? <p className="agent-warning">{modelsError}</p> : null}
           <label>
+            <span>Run mode</span>
+            <select
+              aria-label="Agent run mode"
+              value={runMode}
+              disabled={busy}
+              onChange={(event) => {
+                const nextMode = parseAgentRunMode(event.currentTarget.value) ?? DEFAULT_AGENT_RUN_MODE;
+                setRunMode(nextMode);
+                setContextWindowInput(
+                  String(effectiveModelContextMax ?? config?.contextWindowTokens ?? getAgentRunModeProfile(nextMode).contextWindowTokens),
+                );
+              }}
+            >
+              {AGENT_RUN_MODE_IDS.map((mode) => {
+                const profile = AGENT_RUN_MODE_PROFILES[mode];
+                return (
+                  <option key={mode} value={mode}>
+                    {profile.label}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+          <p className="agent-muted">
+            {effectiveRunModeProfile.description} Effective context {formatTokenCount(effectiveContextWindowTokens)};
+            model output cap {formatTokenCount(effectiveModelOutputMax)};
+            tools {effectiveRunModeProfile.toolBudget.maxToolCalls} total /
+            {effectiveRunModeProfile.toolBudget.maxToolCallsPerRound} per round; readPages max{" "}
+            {effectiveRunModeProfile.batchLimits.readPages}, renderPages max{" "}
+            {effectiveRunModeProfile.batchLimits.renderPages}; mutation rounds max{" "}
+            {effectiveRunModeProfile.mutationBudget.maxMutationRounds}.
+          </p>
+          <label>
             <span>System prompt</span>
             <textarea
               aria-label="Agent system prompt"
@@ -2616,7 +2774,7 @@ export const AgentSidebar = ({
           <p className="agent-muted">
             Effective {formatTokenCount(effectiveContextWindowTokens)} tokens; backend default{" "}
             {formatTokenCount(config?.contextWindowTokens)} tokens, model max{" "}
-            {formatTokenCount(effectiveModelContextMax)}.
+            {formatTokenCount(effectiveModelContextMax)}. Changing Run mode resets this value to the model maximum.
           </p>
           <label>
             <span>Repetition penalty</span>

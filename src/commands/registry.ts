@@ -42,6 +42,7 @@ import {
   snapValue,
   toLayerRef,
 } from "../domain/helpers";
+import { normalizeProjectPageNames } from "../domain/pageNaming";
 import {
   MANGAMAKER_CLIPBOARD_SIGNATURE,
   clipboardItemSchema,
@@ -65,7 +66,6 @@ import {
 import {
   DEFAULT_LOCALE,
   getDefaultPageName,
-  getDuplicatedPageName,
   localeSchema,
   persistLocale,
   translate,
@@ -101,6 +101,9 @@ const touch = (project: Project): Project => ({
 const sanitizeFileName = (value: string) =>
   value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "export";
 
+const projectAllPagesExportFormatSchema = z.enum(["jpgZip", "pdf"]);
+type ProjectAllPagesExportFormat = z.infer<typeof projectAllPagesExportFormatSchema>;
+
 const createStatus = (
   tone: "info" | "success" | "error",
   text: string,
@@ -125,6 +128,41 @@ const createContextStatus = (
   key: Parameters<typeof translate>[1],
   params?: Parameters<typeof translate>[2],
 ) => createLocalizedStatus(getLocale(context), tone, key, params);
+
+const renderProjectAllPagesExportArtifact = async (
+  project: Project,
+  format: ProjectAllPagesExportFormat,
+) => {
+  if (format === "pdf") {
+    const dataUrl = await renderProjectToPdfDataUrl(project.pages);
+    return {
+      kind: "pdf" as const,
+      fileName: `${sanitizeFileName(project.title || "mangamaker-project")}.pdf`,
+      dataUrl,
+      pageCount: project.pages.length,
+    };
+  }
+
+  const dataUrl = await renderProjectToJpgZipDataUrl(project.pages);
+  return {
+    kind: "jpgZip" as const,
+    fileName: `${sanitizeFileName(project.title || "mangamaker-project")}-jpg-pages.zip`,
+    dataUrl,
+    pageCount: project.pages.length,
+  };
+};
+
+const setLastExportArtifact = (
+  context: Parameters<CommandDefinition["execute"]>[0],
+  artifact: Awaited<ReturnType<typeof renderProjectAllPagesExportArtifact>>,
+) => {
+  context.setSession({
+    lastExport: artifact,
+    statusMessage: createContextStatus(context, "success", "command.exportReady", {
+      fileName: artifact.fileName,
+    }),
+  });
+};
 
 const getToolLabel = (locale: Locale, tool: "select" | "panel" | "text" | "bubble" | "element") =>
   translate(locale, `toolbar.${tool}`);
@@ -1753,6 +1791,7 @@ const commands = {
     }),
     execute: (context, input) => {
       const current = context.getProject();
+      const locale = getLocale(context);
       const insertAfterIndex =
         input.insertAfterPageId !== undefined
           ? current.pages.findIndex((page) => page.id === input.insertAfterPageId)
@@ -1762,27 +1801,29 @@ const commands = {
       }
       const insertIndex = insertAfterIndex >= 0 ? insertAfterIndex + 1 : current.pages.length;
       const draft = createDefaultPage(current.pages.length, current.type);
-      const locale = getLocale(context);
       const page = {
         ...draft,
         name: getDefaultPageName(locale, insertIndex + 1),
-        ...(input.name ? { name: input.name } : {}),
         ...(input.width ? { width: input.width } : {}),
         ...(input.height ? { height: input.height } : {}),
       };
       const pages = [...current.pages];
       pages.splice(insertIndex, 0, page);
-      context.setProject(ensureProject(touch({ ...current, pages })));
+      const nextProject = ensureProject(
+        touch(normalizeProjectPageNames({ ...current, pages }, locale)),
+      );
+      const normalizedPage = nextProject.pages[insertIndex] ?? page;
+      context.setProject(nextProject);
       context.setSession({
-        selectedPageId: page.id,
+        selectedPageId: normalizedPage.id,
         selection: null,
         multiSelection: [],
         activeTool: "select",
         statusMessage: createContextStatus(context, "success", "command.pageAdded", {
-          name: page.name,
+          name: normalizedPage.name,
         }),
       });
-      return page;
+      return normalizedPage;
     },
   },
   setPageBackground: {
@@ -1827,20 +1868,23 @@ const commands = {
       }
       const duplicate = {
         ...clonePage(current.pages[index]),
-        name: getDuplicatedPageName(getLocale(context), current.pages[index].name),
       };
       const pages = [...current.pages];
       pages.splice(index + 1, 0, duplicate);
-      context.setProject(ensureProject(touch({ ...current, pages })));
+      const nextProject = ensureProject(
+        touch(normalizeProjectPageNames({ ...current, pages }, getLocale(context))),
+      );
+      const normalizedDuplicate = nextProject.pages[index + 1] ?? duplicate;
+      context.setProject(nextProject);
       context.setSession({
-        selectedPageId: duplicate.id,
+        selectedPageId: normalizedDuplicate.id,
         selection: null,
         multiSelection: [],
         statusMessage: createContextStatus(context, "success", "command.pageDuplicated", {
-          name: duplicate.name,
+          name: normalizedDuplicate.name,
         }),
       });
-      return duplicate;
+      return normalizedDuplicate;
     },
   },
   removePage: {
@@ -1857,9 +1901,11 @@ const commands = {
         throw new Error(`Page not found: ${input.pageId}`);
       }
       const nextPages = current.pages.filter((page) => page.id !== input.pageId);
-      const nextProject = ensureProject(touch({ ...current, pages: nextPages }));
+      const nextProject = ensureProject(
+        touch(normalizeProjectPageNames({ ...current, pages: nextPages }, getLocale(context))),
+      );
       const nextSelectedPageId =
-        nextPages[index]?.id ?? nextPages[index - 1]?.id ?? nextPages[0]?.id ?? null;
+        nextProject.pages[index]?.id ?? nextProject.pages[index - 1]?.id ?? nextProject.pages[0]?.id ?? null;
       context.setProject(nextProject);
       context.setSession({
         selectedPageId: nextSelectedPageId,
@@ -1889,11 +1935,14 @@ const commands = {
       }
       const [page] = pages.splice(input.fromIndex, 1);
       pages.splice(input.toIndex, 0, page);
-      context.setProject(ensureProject(touch({ ...current, pages })));
+      const nextProject = ensureProject(
+        touch(normalizeProjectPageNames({ ...current, pages }, getLocale(context))),
+      );
+      context.setProject(nextProject);
       context.setSession({
         statusMessage: createContextStatus(context, "info", "command.pageReordered"),
       });
-      return pages.map((entry) => entry.id);
+      return nextProject.pages.map((entry) => entry.id);
     },
   },
   moveLayer: {
@@ -1954,14 +2003,16 @@ const commands = {
           anchorIndex >= 0 ? Math.min(anchorIndex + 1, current.pages.length) : current.pages.length;
         const pastedPage = {
           ...clonePage(input.item.page),
-          name: getDuplicatedPageName(getLocale(context), input.item.page.name),
         };
         const pages = [...current.pages];
         pages.splice(insertIndex, 0, pastedPage);
-        const nextProject = ensureProject(touch({ ...current, pages }));
+        const nextProject = ensureProject(
+          touch(normalizeProjectPageNames({ ...current, pages }, getLocale(context))),
+        );
+        const normalizedPastedPage = nextProject.pages[insertIndex] ?? pastedPage;
         context.setProject(nextProject);
         context.setSession({
-          selectedPageId: pastedPage.id,
+          selectedPageId: normalizedPastedPage.id,
           selection: null,
           multiSelection: [],
           panelImageEditing: null,
@@ -1972,7 +2023,7 @@ const commands = {
         });
         return {
           kind: "page" as const,
-          pageId: pastedPage.id,
+          pageId: normalizedPastedPage.id,
         };
       }
 
@@ -3875,19 +3926,8 @@ const commands = {
     inputSchema: z.object({}),
     execute: async (context) => {
       const project = context.getProject();
-      const dataUrl = await renderProjectToPdfDataUrl(project.pages);
-      const artifact = {
-        kind: "pdf" as const,
-        fileName: `${sanitizeFileName(project.title || "mangamaker-project")}.pdf`,
-        dataUrl,
-        pageCount: project.pages.length,
-      };
-      context.setSession({
-        lastExport: artifact,
-        statusMessage: createContextStatus(context, "success", "command.exportReady", {
-          fileName: artifact.fileName,
-        }),
-      });
+      const artifact = await renderProjectAllPagesExportArtifact(project, "pdf");
+      setLastExportArtifact(context, artifact);
       return artifact;
     },
   },
@@ -3897,19 +3937,21 @@ const commands = {
     inputSchema: z.object({}),
     execute: async (context) => {
       const project = context.getProject();
-      const dataUrl = await renderProjectToJpgZipDataUrl(project.pages);
-      const artifact = {
-        kind: "jpgZip" as const,
-        fileName: `${sanitizeFileName(project.title || "mangamaker-project")}-jpg-pages.zip`,
-        dataUrl,
-        pageCount: project.pages.length,
-      };
-      context.setSession({
-        lastExport: artifact,
-        statusMessage: createContextStatus(context, "success", "command.exportReady", {
-          fileName: artifact.fileName,
-        }),
-      });
+      const artifact = await renderProjectAllPagesExportArtifact(project, "jpgZip");
+      setLastExportArtifact(context, artifact);
+      return artifact;
+    },
+  },
+  exportProjectAllPages: {
+    id: "exportProjectAllPages",
+    label: "Export All Project Pages",
+    inputSchema: z.object({
+      format: projectAllPagesExportFormatSchema.default("jpgZip"),
+    }),
+    execute: async (context, input) => {
+      const project = context.getProject();
+      const artifact = await renderProjectAllPagesExportArtifact(project, input.format);
+      setLastExportArtifact(context, artifact);
       return artifact;
     },
   },

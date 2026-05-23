@@ -6,6 +6,7 @@ export const AGENT_DOCUMENT_MUTATION_TOOL_NAMES = [
   "replaceDocumentSection",
   "replaceDocumentText",
   "editDocumentLines",
+  "applyDocumentPatchPlan",
   "deleteDocument",
 ] as const;
 
@@ -71,6 +72,9 @@ export type ReadDocumentLinesInput = {
   endLine?: number;
 };
 
+export const AGENT_DOCUMENT_LINES_DEFAULT_WINDOW = 80;
+export const AGENT_DOCUMENT_LINES_MAX_WINDOW = 120;
+
 export type EditDocumentLineOperation =
   | {
       type: "replace";
@@ -100,11 +104,29 @@ export type EditDocumentLinesInput = AgentDocumentMetaPatch & {
   operations: EditDocumentLineOperation[];
 };
 
+export type ApplyDocumentPatchPlanPatch =
+  | ({
+      type: "replaceSection";
+    } & Omit<ReplaceDocumentSectionInput, "operationId" | "documentId">)
+  | ({
+      type: "replaceText";
+    } & Omit<ReplaceDocumentTextInput, "operationId" | "documentId">)
+  | {
+      type: "editLines";
+      operations: EditDocumentLineOperation[];
+    };
+
+export type ApplyDocumentPatchPlanInput = AgentDocumentMetaPatch & {
+  operationId: string;
+  documentId: string;
+  patches: ApplyDocumentPatchPlanPatch[];
+};
+
 export type IncrementalDocumentEditResult = {
   ok: true;
   writePayload: AgentDocumentWritePayload;
   edit: {
-    type: "append" | "replaceSection" | "replaceText" | "editLines";
+    type: "append" | "replaceSection" | "replaceText" | "editLines" | "patchPlan";
     changed: boolean;
     documentId: string;
     contentLengthBefore: number;
@@ -122,6 +144,21 @@ export type IncrementalDocumentEditResult = {
     lineCountBefore?: number;
     lineCountAfter?: number;
     invalidRange?: boolean;
+    patchCount?: number;
+    patchesApplied?: number;
+    failedPatchIndex?: number;
+    failedPatchReason?: string;
+    patchResults?: Array<{
+      index: number;
+      type: "replaceSection" | "replaceText" | "editLines";
+      changed: boolean;
+      alreadyApplied?: boolean;
+      notFound?: boolean;
+      invalidRange?: boolean;
+      heading?: string;
+      replacements?: number;
+      operationsApplied?: number;
+    }>;
   };
 };
 
@@ -554,6 +591,34 @@ export const createDocumentLinesResult = (
   };
 };
 
+export const createBoundedDocumentLinesResult = (
+  document: AgentDocument,
+  input: ReadDocumentLinesInput,
+) => {
+  const requestedStartLine = Number.isFinite(input.startLine) ? Math.floor(input.startLine ?? 1) : 1;
+  const requestedEndLine = Number.isFinite(input.endLine)
+    ? Math.floor(input.endLine ?? requestedStartLine + AGENT_DOCUMENT_LINES_DEFAULT_WINDOW - 1)
+    : requestedStartLine + AGENT_DOCUMENT_LINES_DEFAULT_WINDOW - 1;
+  const boundedEndLine = Math.min(
+    Math.max(requestedStartLine, requestedEndLine),
+    requestedStartLine + AGENT_DOCUMENT_LINES_MAX_WINDOW - 1,
+  );
+  const result = createDocumentLinesResult(document, {
+    ...input,
+    startLine: requestedStartLine,
+    endLine: boundedEndLine,
+  });
+  return {
+    ...result,
+    requestedStartLine,
+    requestedEndLine,
+    maxLineWindow: AGENT_DOCUMENT_LINES_MAX_WINDOW,
+    truncatedByHarness: requestedEndLine > boundedEndLine,
+    guidance:
+      "Only the requested bounded line window is returned. Request another readDocumentLines range if more lines are necessary.",
+  };
+};
+
 const normalizeLineNumber = (value: number) => Math.floor(value);
 
 const computeLineEditSplice = (
@@ -677,6 +742,113 @@ export const applyEditDocumentLinesEdit = (
   };
 };
 
+const createWorkingDocument = (
+  document: AgentDocument,
+  content: string,
+): AgentDocument => ({
+  ...document,
+  content,
+});
+
+const isBlockingPatchEdit = (edit: IncrementalDocumentEdit) =>
+  edit.invalidRange === true ||
+  edit.notFound === true ||
+  edit.unsafeAppend === true;
+
+const patchFailureReason = (edit: IncrementalDocumentEdit) =>
+  incrementalDocumentEditFailureReason(edit);
+
+export const applyDocumentPatchPlanEdit = (
+  document: AgentDocument,
+  input: ApplyDocumentPatchPlanInput,
+): IncrementalDocumentEditResult => {
+  const before = normalizeMarkdown(document.content);
+  let workingContent = before;
+  const patchResults: NonNullable<IncrementalDocumentEdit["patchResults"]> = [];
+  let failedPatchIndex: number | undefined;
+  let failedPatchReason: string | undefined;
+
+  for (const [index, patch] of input.patches.entries()) {
+    const workingDocument = createWorkingDocument(document, workingContent);
+    let applied: IncrementalDocumentEditResult;
+    if (patch.type === "replaceSection") {
+      applied = applyReplaceDocumentSectionEdit(workingDocument, {
+        ...patch,
+        operationId: input.operationId,
+        documentId: input.documentId,
+      });
+    } else if (patch.type === "replaceText") {
+      applied = applyReplaceDocumentTextEdit(workingDocument, {
+        ...patch,
+        operationId: input.operationId,
+        documentId: input.documentId,
+      });
+    } else {
+      applied = applyEditDocumentLinesEdit(workingDocument, {
+        ...input,
+        operations: patch.operations,
+      });
+    }
+
+    patchResults.push({
+      index,
+      type: patch.type,
+      changed: applied.edit.changed,
+      ...(applied.edit.alreadyApplied ? { alreadyApplied: applied.edit.alreadyApplied } : {}),
+      ...(applied.edit.notFound ? { notFound: applied.edit.notFound } : {}),
+      ...(applied.edit.invalidRange ? { invalidRange: applied.edit.invalidRange } : {}),
+      ...(applied.edit.heading ? { heading: applied.edit.heading } : {}),
+      ...(typeof applied.edit.replacements === "number" ? { replacements: applied.edit.replacements } : {}),
+      ...(typeof applied.edit.operationsApplied === "number"
+        ? { operationsApplied: applied.edit.operationsApplied }
+        : {}),
+    });
+
+    if (isBlockingPatchEdit(applied.edit)) {
+      failedPatchIndex = index;
+      failedPatchReason = patchFailureReason(applied.edit);
+      break;
+    }
+    workingContent = applied.writePayload.content;
+  }
+
+  if (failedPatchIndex !== undefined) {
+    return {
+      ok: true,
+      writePayload: createWritePayload(document, input, before),
+      edit: {
+        type: "patchPlan",
+        changed: false,
+        documentId: document.id,
+        contentLengthBefore: before.length,
+        contentLengthAfter: before.length,
+        patchCount: input.patches.length,
+        patchesApplied: 0,
+        failedPatchIndex,
+        failedPatchReason,
+        patchResults,
+      },
+    };
+  }
+
+  const changed = workingContent !== before;
+  return {
+    ok: true,
+    writePayload: createWritePayload(document, input, workingContent),
+    edit: {
+      type: "patchPlan",
+      changed,
+      documentId: document.id,
+      contentLengthBefore: before.length,
+      contentLengthAfter: workingContent.length,
+      patchCount: input.patches.length,
+      patchesApplied: patchResults.filter((entry) => entry.changed).length,
+      patchResults,
+      ...(!changed ? { alreadyApplied: true } : {}),
+    },
+  };
+};
+
 export const isIncrementalDocumentEditVerifiedNoop = (edit: IncrementalDocumentEditResult["edit"]) =>
   edit.alreadyApplied === true || edit.duplicateAppend === true;
 
@@ -694,6 +866,9 @@ export const incrementalDocumentEditFailureReason = (edit: IncrementalDocumentEd
   }
   if (edit.invalidRange) {
     return "The requested line edit used invalid or overlapping line ranges, so no document content was changed. Read document lines again and retry with valid 1-based line ranges.";
+  }
+  if (edit.type === "patchPlan" && edit.failedPatchReason) {
+    return `The document patch plan was not applied because patch ${edit.failedPatchIndex ?? "unknown"} failed: ${edit.failedPatchReason}`;
   }
   return "The document edit produced no content change.";
 };

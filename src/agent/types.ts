@@ -6,6 +6,7 @@ import type {
 } from "./documentSchema";
 import type { AgentRoleDefinition, AgentRoleId } from "./roles";
 import type { AgentModelCapability } from "./modelCatalog";
+import type { AgentRunMode } from "./runMode";
 
 export type AgentDangerLevel = "safe" | "normal" | "destructive";
 
@@ -113,6 +114,7 @@ export type AgentCurrentTaskToolResultIndexEntry = {
   inputSummary: string;
   resultKeys: string[];
   createdAt: string;
+  resultHandle?: string;
   status?: "verified_write" | "blocked" | "cache" | "skipped";
 };
 
@@ -248,6 +250,7 @@ export type AgentRun = {
   id: string;
   projectId: string;
   roleId: string;
+  runMode?: AgentRunMode;
   conversationContextId?: string;
   conversationContextFingerprint?: string;
   conversationContextUpdatedAt?: string;
@@ -258,6 +261,8 @@ export type AgentRun = {
   steps: AgentRunStep[];
   trace: AgentRequestTrace[];
   pendingToolCalls: AgentToolCallRequest[];
+  serverMutationRoundCount?: number;
+  serverMutationToolCallCount?: number;
   latestResponse?: AgentChatResponse;
   error?: string;
 };
@@ -411,6 +416,9 @@ export type AgentConfig = {
   contextWindowTokens: number;
   contextWindowMaxTokens: number | null;
   contextWindowSource: "request" | "env" | "model" | "default" | "test";
+  maxOutputTokens: number;
+  maxOutputMaxTokens: number | null;
+  maxOutputSource: "env" | "model" | "default" | "test";
   repetitionPenalty: number;
   reason?: string;
 };
@@ -419,6 +427,7 @@ export type AgentAvailableModel = {
   id: string;
   name: string;
   contextLength: number | null;
+  maxOutputTokens: number | null;
   inputModalities: string[];
   outputModalities: string[];
   capability: AgentModelCapability;
@@ -440,6 +449,7 @@ export type AgentChatRequest = {
   canvasSnapshot?: AgentCanvasSnapshot | null;
   approvedCommandPlan?: AgentCommandPlan | null;
   modelOverride?: string;
+  runMode?: AgentRunMode;
   contextWindowTokens?: number;
   repetitionPenalty?: number;
   finalAnswerOnly?: boolean;
@@ -482,6 +492,8 @@ export type AgentHarnessToolResult = {
   input: unknown;
   result: unknown;
   createdAt: string;
+  resultHandle?: string;
+  resultByteLength?: number;
 };
 
 export type AgentCompletedToolCallIndexEntry = {
@@ -492,16 +504,20 @@ export type AgentCompletedToolCallIndexEntry = {
   projectUpdatedAt?: string | null;
   resultKeys: string[];
   reusableInCurrentProjectState: boolean;
+  resultHandle?: string;
+  resultByteLength?: number;
 };
 
 export type AgentToolCallRequest = {
   toolName: string;
   input: unknown;
   reason?: string;
+  nativeToolCallId?: string;
 };
 
 export type AgentHarnessSnapshot = {
   mode: "tool-harness";
+  runMode?: AgentRunMode;
   currentPageId: string | null;
   projectId: string;
   currentPageMarkedBy: "isCurrent";
@@ -513,12 +529,33 @@ export type AgentHarnessSnapshot = {
     requiredResponseField: "taskProgress";
     planningRequired: boolean;
     maxSteps: number;
+    outputBudget: {
+      maxOutputTokens?: number | null;
+      recommendedMaxMessageChars: number;
+      recommendedMaxToolContentChars: number;
+      longEditToolCallsPerTurn: number;
+      rule: string;
+    };
+    mutationBudget: {
+      maxMutationRounds: number;
+      consumedMutationRounds?: number;
+      rule: string;
+    };
     stopRule: string;
     progressRule: string;
     actionRule: string;
     completionRule: string;
   };
   resourcePolicy: {
+    runMode?: AgentRunMode;
+    runModeLabel?: string;
+    visualPolicy?: string;
+    maxBatchReadPages?: number;
+    maxBatchRenderPages?: number;
+    mutationBudget?: {
+      maxMutationRounds: number;
+      rule: string;
+    };
     modelCapability: AgentModelCapability;
     metadocOnly: boolean;
     activeMetadocId?: string;

@@ -7,6 +7,10 @@ import {
   parseAgentContextWindowTokens,
   resolveAgentContextWindowTokens,
 } from "./contextWindow";
+import {
+  parseAgentMaxOutputTokens,
+  resolveAgentMaxOutputTokens,
+} from "./outputTokens";
 
 export type AgentConfigEnv = Record<string, string | undefined>;
 
@@ -30,12 +34,21 @@ export const getAgentConfigFromEnv = (
   const envContextWindowTokens = parseAgentContextWindowTokens(
     env.MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS ?? env.MANGAMAKER_AGENT_CONTEXT_WINDOW,
   );
+  const envMaxOutputTokens = parseAgentMaxOutputTokens(
+    env.MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS ?? env.MANGAMAKER_AGENT_MAX_TOKENS,
+  );
   const repetitionPenalty = parseRepetitionPenalty(env.MANGAMAKER_AGENT_REPETITION_PENALTY);
   const configuredModel = availableModels?.find((entry) => entry.id === model) ?? null;
   const contextWindow = resolveAgentContextWindowTokens({
     envTokens: envContextWindowTokens,
     model,
     modelContextLength: configuredModel?.contextLength ?? null,
+    testMode,
+  });
+  const maxOutput = resolveAgentMaxOutputTokens({
+    envTokens: envMaxOutputTokens,
+    model,
+    modelMaxOutputTokens: configuredModel?.maxOutputTokens ?? null,
     testMode,
   });
 
@@ -50,6 +63,7 @@ export const getAgentConfigFromEnv = (
       visionEnabled: true,
       repetitionPenalty,
       ...contextWindow,
+      ...maxOutput,
     };
   }
 
@@ -64,6 +78,7 @@ export const getAgentConfigFromEnv = (
       visionEnabled: false,
       repetitionPenalty,
       ...contextWindow,
+      ...maxOutput,
       reason: "OPENROUTER_API_KEY is not configured.",
     };
   }
@@ -79,6 +94,7 @@ export const getAgentConfigFromEnv = (
       visionEnabled: false,
       repetitionPenalty,
       ...contextWindow,
+      ...maxOutput,
       reason: "MANGAMAKER_AGENT_MODEL must be explicitly configured for the Agent.",
     };
   }
@@ -94,6 +110,7 @@ export const getAgentConfigFromEnv = (
       visionEnabled: false,
       repetitionPenalty,
       ...contextWindow,
+      ...maxOutput,
       reason:
         `Configured model is not in the MangaMaker Agent allowlist. Use a Kimi/Qwen/DeepSeek multimodal JSON model, or ${DEEPSEEK_V4_PRO_MODEL_ID} for text-only document work.`,
     };
@@ -111,5 +128,6 @@ export const getAgentConfigFromEnv = (
     visionEnabled: modelCapability === "multimodal",
     repetitionPenalty,
     ...contextWindow,
+    ...maxOutput,
   };
 };

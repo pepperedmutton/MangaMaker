@@ -1,5 +1,7 @@
 export const KIMI_K2_6_MODEL_ID = "moonshotai/kimi-k2.6";
 export const KIMI_K2_6_CONTEXT_WINDOW_TOKENS = 262_144;
+export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW_TOKENS = 1_048_576;
+export const QWEN_3_6_FLASH_CONTEXT_WINDOW_TOKENS = 1_000_000;
 export const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = KIMI_K2_6_CONTEXT_WINDOW_TOKENS;
 export const MIN_AGENT_CONTEXT_WINDOW_TOKENS = 8_192;
 
@@ -17,8 +19,18 @@ export const parseAgentContextWindowTokens = (value: unknown): number | null => 
   return Math.max(MIN_AGENT_CONTEXT_WINDOW_TOKENS, Math.floor(parsed));
 };
 
-export const getKnownAgentModelContextWindow = (model: string | null | undefined) =>
-  model === KIMI_K2_6_MODEL_ID ? KIMI_K2_6_CONTEXT_WINDOW_TOKENS : null;
+export const getKnownAgentModelContextWindow = (model: string | null | undefined) => {
+  switch (model) {
+    case KIMI_K2_6_MODEL_ID:
+      return KIMI_K2_6_CONTEXT_WINDOW_TOKENS;
+    case "deepseek/deepseek-v4-pro":
+      return DEEPSEEK_V4_PRO_CONTEXT_WINDOW_TOKENS;
+    case "qwen/qwen3.6-flash":
+      return QWEN_3_6_FLASH_CONTEXT_WINDOW_TOKENS;
+    default:
+      return null;
+  }
+};
 
 export const resolveAgentContextWindowTokens = ({
   requestedTokens,
@@ -36,7 +48,7 @@ export const resolveAgentContextWindowTokens = ({
   const knownMax = getKnownAgentModelContextWindow(model);
   const contextWindowMaxTokens =
     typeof modelContextLength === "number" && Number.isFinite(modelContextLength) && modelContextLength > 0
-      ? Math.max(modelContextLength, knownMax ?? 0)
+      ? modelContextLength
       : knownMax;
   const candidates = [
     requestedTokens ? { source: "request" as const, value: requestedTokens } : null,

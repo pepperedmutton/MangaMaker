@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { listImageAssets } from "../../src/agent/context";
 import { buildAgentHarness, executeAgentHarnessToolCall } from "../../src/agent/harness";
+import { applyDocumentPatchPlanEdit } from "../../src/agent/documentEditTools";
+import { createOpenRouterNativeTools } from "../../src/agent/nativeTools";
 import {
   createAgentConversationFingerprint,
   isAgentHarnessDiagnosticContent,
@@ -8,7 +10,12 @@ import {
   sanitizeAgentConversationMessages,
 } from "../../src/agent/conversationSanitizer";
 import { migrateAgentSystemPrompt } from "../../src/agent/systemPrompt";
-import { AGENT_MAX_BATCH_READ_PAGES } from "../../src/agent/toolLimits";
+import { AGENT_RUN_MODE_PROFILES } from "../../src/agent/runMode";
+import {
+  AGENT_RECOMMENDED_LONG_EDIT_TOOL_CALLS_PER_TURN,
+  AGENT_RECOMMENDED_MAX_MESSAGE_CHARS,
+  AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS,
+} from "../../src/agent/outputBudget";
 import {
   collectCompletedAgentToolCallKeys,
   createCachedAgentToolResult,
@@ -134,6 +141,26 @@ context.currentPage = context.pages[1];
 context.objects = context.currentPage.objects;
 
 describe("agent harness", () => {
+  it("exposes harness tools as OpenRouter native function schemas", () => {
+    const harness = buildAgentHarness(context);
+    const nativeTools = createOpenRouterNativeTools(harness.tools);
+    const readDocument = nativeTools.find((entry) => entry.function.name === "readDocument");
+    const editDocumentLines = nativeTools.find((entry) => entry.function.name === "editDocumentLines");
+
+    expect(nativeTools.length).toBe(harness.tools.length);
+    expect(readDocument).toEqual(expect.objectContaining({
+      type: "function",
+      function: expect.objectContaining({
+        name: "readDocument",
+        parameters: expect.objectContaining({
+          type: "object",
+          required: ["documentId"],
+        }),
+      }),
+    }));
+    expect(editDocumentLines?.function.description).toContain("mutates a durable MangaMaker project document");
+  });
+
   it("uses the visible page order name for model-facing image assets", () => {
     const project: Project = {
       id: "project-page-names",
@@ -214,6 +241,7 @@ describe("agent harness", () => {
     expect(harness.currentPageId).toBe("page-2");
     expect(harness.projectId).toBe("project-1");
     expect(harness.initialToolResults.map((entry) => entry.toolName)).toEqual([
+      "agentRunMode",
       "readProjectSummary",
       "listPages",
       "inspectSelection",
@@ -268,6 +296,9 @@ describe("agent harness", () => {
     });
 
     expect(harness.initialToolResults.map((entry) => entry.toolName)).toEqual(["metadocOnlyPolicy"]);
+    expect(harness.initialToolResults[0]?.result).toMatchObject({
+      mutationBudget: { maxMutationRounds: 2 },
+    });
     expect(harness.resourcePolicy).toMatchObject({
       modelCapability: "metadoc",
       metadocOnly: true,
@@ -293,6 +324,7 @@ describe("agent harness", () => {
       "replaceDocumentSection",
       "replaceDocumentText",
       "editDocumentLines",
+      "applyDocumentPatchPlan",
     ]);
 
     const blockedPageRead = await executeAgentHarnessToolCall(
@@ -348,23 +380,28 @@ describe("agent harness", () => {
       ],
     });
 
-    const oversizedPageIds = Array.from({ length: AGENT_MAX_BATCH_READ_PAGES + 2 }, (_, index) => `page-${index + 1}`);
+    const economyReadLimit = AGENT_RUN_MODE_PROFILES.economy.batchLimits.readPages;
+    const oversizedPageIds = Array.from({ length: economyReadLimit + 2 }, (_, index) => `page-${index + 1}`);
     const oversizedRead = await executeAgentHarnessToolCall(context, {
       toolName: "readPages",
       input: { pageIds: oversizedPageIds },
     });
     expect(oversizedRead.result).toMatchObject({
-      requestedPageIdCount: AGENT_MAX_BATCH_READ_PAGES + 2,
-      maxPageIds: AGENT_MAX_BATCH_READ_PAGES,
+      requestedPageIdCount: economyReadLimit + 2,
+      maxPageIds: economyReadLimit,
       truncated: true,
-      pageIds: oversizedPageIds.slice(0, AGENT_MAX_BATCH_READ_PAGES),
-      skippedPageIds: oversizedPageIds.slice(AGENT_MAX_BATCH_READ_PAGES),
+      pageIds: oversizedPageIds.slice(0, economyReadLimit),
+      skippedPageIds: oversizedPageIds.slice(economyReadLimit),
     });
   });
 
   it("publishes document-only mutation policy", () => {
     const harness = buildAgentHarness(context);
     expect(harness.resourcePolicy).toMatchObject({
+      runMode: "economy",
+      maxBatchReadPages: AGENT_RUN_MODE_PROFILES.economy.batchLimits.readPages,
+      maxBatchRenderPages: AGENT_RUN_MODE_PROFILES.economy.batchLimits.renderPages,
+      mutationBudget: AGENT_RUN_MODE_PROFILES.economy.mutationBudget,
       allPagesReadable: true,
       assetsReadableOnDemand: true,
       documentsReadableOnDemand: true,
@@ -372,6 +409,17 @@ describe("agent harness", () => {
       documentsCreatableByAgent: false,
       projectMutationPath: "documentOnly",
     });
+    expect(harness.taskProtocol.outputBudget).toMatchObject({
+      maxOutputTokens: AGENT_RUN_MODE_PROFILES.economy.maxOutputTokens,
+      recommendedMaxMessageChars: AGENT_RECOMMENDED_MAX_MESSAGE_CHARS,
+      recommendedMaxToolContentChars: AGENT_RECOMMENDED_MAX_TOOL_CONTENT_CHARS,
+      longEditToolCallsPerTurn: AGENT_RECOMMENDED_LONG_EDIT_TOOL_CALLS_PER_TURN,
+    });
+    expect(harness.taskProtocol.outputBudget.rule).toContain("applyDocumentPatchPlan");
+    expect(harness.taskProtocol.mutationBudget).toMatchObject({
+      maxMutationRounds: 2,
+    });
+    expect(harness.taskProtocol.stopRule).toContain("two mutation rounds");
     expect(harness.tools.find((entry) => entry.name === "listCommandManifest")).toBeUndefined();
     expect(harness.tools.find((entry) => entry.name === "proposeCommandPlan")).toBeUndefined();
     expect(harness.tools.find((entry) => entry.name === "listDocuments")).toMatchObject({
@@ -426,6 +474,79 @@ describe("agent harness", () => {
       inputSchema: expect.objectContaining({
         required: expect.arrayContaining(["operationId", "documentId", "operations"]),
       }),
+    });
+    expect(harness.tools.find((entry) => entry.name === "applyDocumentPatchPlan")).toMatchObject({
+      mutatesProject: true,
+      requiresConfirmation: false,
+      inputSchema: expect.objectContaining({
+        required: expect.arrayContaining(["operationId", "documentId", "patches"]),
+      }),
+    });
+  });
+
+  it("applies several document patches as one atomic document edit", () => {
+    const document = {
+      id: "work",
+      title: "Work",
+      role: "assistant",
+      status: "draft" as const,
+      path: "docs/work/assistant/work.md",
+      relatedPageIds: [],
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      summary: "",
+      content: "# Work\n\n## A\n\nold A\n\n## B\n\nold B\n",
+    };
+
+    const applied = applyDocumentPatchPlanEdit(document, {
+      operationId: "multi-patch",
+      documentId: "work",
+      patches: [
+        { type: "replaceSection", heading: "A", content: "new A" },
+        { type: "replaceSection", heading: "B", content: "new B" },
+      ],
+    });
+
+    expect(applied.edit).toMatchObject({
+      type: "patchPlan",
+      changed: true,
+      patchCount: 2,
+      patchesApplied: 2,
+    });
+    expect(applied.writePayload.content).toContain("new A");
+    expect(applied.writePayload.content).toContain("new B");
+  });
+
+  it("applies run-mode page and render batch limits to the visible tool schemas", () => {
+    const economyHarness = buildAgentHarness(context, [], { runMode: "economy" });
+    const deepHarness = buildAgentHarness(context, [], { runMode: "deep" });
+
+    expect(economyHarness.tools.find((entry) => entry.name === "readPages")?.inputSchema).toMatchObject({
+      properties: {
+        pageIds: {
+          maxItems: AGENT_RUN_MODE_PROFILES.economy.batchLimits.readPages,
+        },
+      },
+    });
+    expect(economyHarness.tools.find((entry) => entry.name === "renderPages")?.inputSchema).toMatchObject({
+      properties: {
+        pageIds: {
+          maxItems: AGENT_RUN_MODE_PROFILES.economy.batchLimits.renderPages,
+        },
+      },
+    });
+    expect(deepHarness.tools.find((entry) => entry.name === "readPages")?.inputSchema).toMatchObject({
+      properties: {
+        pageIds: {
+          maxItems: AGENT_RUN_MODE_PROFILES.deep.batchLimits.readPages,
+        },
+      },
+    });
+    expect(deepHarness.tools.find((entry) => entry.name === "renderPages")?.inputSchema).toMatchObject({
+      properties: {
+        pageIds: {
+          maxItems: AGENT_RUN_MODE_PROFILES.deep.batchLimits.renderPages,
+        },
+      },
     });
   });
 
@@ -837,6 +958,7 @@ describe("agent harness", () => {
     const selected = selectAgentDynamicToolResultsForPrompt(merged);
 
     expect(merged.filter((entry) => entry.toolName === "readDocument")).toHaveLength(1);
+    expect(selected.some((entry) => entry.toolName === "toolBudget")).toBe(false);
     expect(selected).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

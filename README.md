@@ -105,7 +105,7 @@ Non-goals:
 - Show welcome-screen thumbnails and delete projects from the welcome context menu.
 - Add, duplicate, delete, reorder, and select pages.
 - Change current page background color from the ribbon.
-- Export current page as PNG and the whole project as PDF.
+- Export current page as PNG and the whole project as PDF or an all-page JPG ZIP.
 - Web runtime persists to `projects/<sanitized-project-title>/project.json` with assets under `projects/<sanitized-project-title>/assets/`.
 - Desktop runtime persists to `projects/<project-id>/project.json` with assets under `projects/<project-id>/assets/`.
 
@@ -123,7 +123,8 @@ Non-goals:
 - Support horizontal and vertical text, with vertical as the default for new text.
 - Support font family, font size, direction, horizontal alignment, and vertical alignment in the Inspector.
 - Create, edit, move, resize, and delete speech bubbles.
-- Support ten bubble types: `round`, `ellipse`, `cloud`, `square`, `roundedSquare`, `oval`, `explosion`, `thought`, `jagged`, `bubbleRound`.
+- Support schema-defined bubble types: `round`, `ellipse`, `cloud`, `square`, `roundedSquare`, `oval`, `explosion`, `thought`, `jagged`, `bubbleRound`, `whisper`, `scream`, `burstSoft`, `hexagon`, `octagon`, `diamond`, `heart`, `bracket`, `caption`, `speed`, `cloudDense`, `balloonTall`, `balloonWide`, `wave`, `rough`, `droplet`, `arrow`, `pinched`, `doubleOutline`, `electric`, and `custom`.
+- Narration or caption boxes are ordinary bubbles; automation must use `caption` or `roundedSquare` with `showTail: false`, never `bubbleType: "narration"`.
 - Support type-specific bubble controls such as corner radius, bumpiness, jaggedness, thought circles, spike settings, and tail width.
 - Support continuous-outline tail editing for non-explosion bubbles through both tail tip and tail-base controls.
 
@@ -131,6 +132,9 @@ Non-goals:
 - Undo and redo.
 - Shared command model for UI, tests, and automation.
 - Local automation bridge via `window.mangaMaker`.
+- External automation and other agents should follow `docs/automation-tool-interface.md`; `window.mangaMaker.commands.describe()` is the current machine-readable command contract.
+- Text insertion automation must create text boxes with `createText` and adjust geometry/typography with `updateText`; bubble styling uses `createBubble`/`updateBubble`, not direct project JSON edits.
+- All-page project export automation should call `window.mangaMaker.project.exportAllPages({ format: "jpgZip" })` or `commands.execute("exportProjectAllPages", { format: "jpgZip" | "pdf" })`; `exportPagePng` is single-page only.
 - Lazy project persistence on manual save, project leave, and page close/hide.
 - Default web share launcher with terminal-printed public link output for the active share provider.
 
@@ -295,8 +299,8 @@ Open the Agent from the top-right `Inspector` / `Agent` sidebar toggle, not from
 - `MANGAMAKER_AGENT_TEST_MODE=1` enables deterministic test mode and does not require a real provider key.
 - `OPENROUTER_API_KEY` is required for the web/Vite OpenRouter backend. Do not commit real keys.
 - `MANGAMAKER_AGENT_MODEL` is required outside test mode. The app does not silently default to a non-vision model for multimodal use.
-- `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` controls the Agent prompt/input budget. The default is `262144`, matching the OpenRouter-listed Kimi K2.6 context limit; smaller values intentionally compact conversation and tool context more aggressively. The sidebar `Agent Config` panel can override this per project for future runs.
-- `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS` can raise or lower the model response budget; the default is `16384`. `MANGAMAKER_AGENT_REASONING_MAX_TOKENS` defaults to `2048` and caps OpenRouter reasoning output so reasoning models do not spend the whole response budget before emitting Agent JSON. `MANGAMAKER_AGENT_REASONING_EXCLUDE` defaults to `true`, which keeps returned traces smaller while still allowing the model to reason internally. `MANGAMAKER_AGENT_TEMPERATURE` defaults to `0.1`, and `MANGAMAKER_AGENT_TOP_P` defaults to `0.9` for low-variance JSON/tool behavior.
+- `MANGAMAKER_AGENT_CONTEXT_WINDOW_TOKENS` controls the Agent prompt/input budget. By default the backend uses the selected OpenRouter model's reported context limit and clamps any override to that limit. The sidebar `Agent Config` panel can override this per project for future runs.
+- `MANGAMAKER_AGENT_MAX_OUTPUT_TOKENS` can intentionally lower the model response budget; when it is unset, MangaMaker uses the selected OpenRouter model's `top_provider.max_completion_tokens` limit. `MANGAMAKER_AGENT_REASONING_MAX_TOKENS` defaults to `2048` and caps OpenRouter reasoning output so reasoning models do not spend the whole response budget before emitting Agent JSON. `MANGAMAKER_AGENT_REASONING_EXCLUDE` defaults to `true`, which keeps returned traces smaller while still allowing the model to reason internally. `MANGAMAKER_AGENT_TEMPERATURE` defaults to `0.1`, and `MANGAMAKER_AGENT_TOP_P` defaults to `0.9` for low-variance JSON/tool behavior.
 - The available OpenRouter model list is filtered to DeepSeek and Kimi/Moonshot models. Multimodal Agent choices must report image input, text output, and `response_format` support in OpenRouter metadata. `deepseek/deepseek-v4-pro` is also allowed as a text-only document model; the sidebar marks vision as unavailable and the backend blocks page/image/render tools while allowing Markdown document tools. Google, Anthropic, OpenAI, and other text-only models are not valid built-in Agent models.
 - The sidebar shows whether visual input is enabled. If a canvas screenshot cannot be sent or read, the response shows a warning instead of silently falling back to text-only mode.
 
