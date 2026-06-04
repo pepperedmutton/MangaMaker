@@ -166,6 +166,14 @@ window.mangaMaker?.session.get()
 window.mangaMaker?.agent.getDebugSnapshot()
 ```
 
+Live project update rules:
+
+- Preferred path: if the agent can execute JavaScript in the open editor, mutate pages through `window.mangaMaker.commands.execute(...)`. Text changes made by commands such as `updateText` update the visible canvas immediately; call `saveProject` after a batch to persist them.
+- External API path: if the agent runs outside the browser and must submit a full updated project JSON, do not write `projects/*/project.json` directly. POST the full project to `/__mangamaker__/persistence/write_project_draft` with `project_id`, `project_title`, and `project_json: JSON.stringify(project)`.
+- The web editor listens to `GET /__mangamaker__/persistence/events`; when that API write targets the project already open in the editor, MangaMaker reloads the project data in place without refresh, without reopening the project, and without changing the selected page, zoom, or viewed canvas position.
+- If the updated project object is already inside the browser, call `window.mangaMaker.project.load(project)`. For the currently open project id, this applies the data in place and preserves the user's current page.
+- After live updates, verify with `window.mangaMaker.project.get()` and `window.mangaMaker.session.get()` rather than reading the project file from disk.
+
 Rules for text and bubble insertion:
 
 - Read `window.mangaMaker.commands.describe()` before generating commands; it is the current machine-readable command manifest.

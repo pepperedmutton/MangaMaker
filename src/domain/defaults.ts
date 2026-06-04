@@ -1,11 +1,11 @@
 import type { Bubble, ElementItem, Page, PanelStyle, Point, Project, ProjectType, TextItem } from "./schema";
 import { DEFAULT_TEXT_FONT_FAMILY } from "../platform/localFonts";
 
-export const GRID_SIZE = 20;
+export const GRID_SIZE = 1;
 export const MOVE_SNAP_SIZE = 1;
 export const MIN_PANEL_SIZE = 160;
-export const MIN_BUBBLE_WIDTH = 180;
-export const MIN_BUBBLE_HEIGHT = 120;
+export const MIN_BUBBLE_WIDTH = 1;
+export const MIN_BUBBLE_HEIGHT = 1;
 export const MIN_TEXT_BOX_WIDTH = 100;
 export const MIN_TEXT_BOX_HEIGHT = 120;
 export const MANGA_PAGE_WIDTH = 1200;
@@ -19,6 +19,11 @@ export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 6;
 export const DEFAULT_ZOOM = 1;
 export const ZOOM_STEP = 0.01;
+export const MOSAIC_CELL_SIZE = 18;
+export const MOSAIC_PIXEL_SIZE = 18;
+export const MIN_MOSAIC_PIXEL_SIZE = 4;
+export const MAX_MOSAIC_PIXEL_SIZE = 80;
+export const MOSAIC_BRUSH_RADIUS = 34;
 export const DEFAULT_TEXT_INSERT_DEFAULTS = {
   width: 360,
   height: 360,
@@ -207,6 +212,15 @@ export const clonePage = (page: Page): Page => {
     return {
       ...element,
       id,
+      ...(element.mosaic
+        ? {
+            mosaic: {
+              ...element.mosaic,
+              panelId: panelIdMap.get(element.mosaic.panelId) ?? element.mosaic.panelId,
+              cells: element.mosaic.cells.map((point) => ({ ...point })),
+            },
+          }
+        : {}),
     };
   });
 

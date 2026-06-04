@@ -2,7 +2,7 @@ import { z } from "zod";
 import { create } from "zustand";
 import { commandRegistry } from "../commands/registry";
 import type { CommandDefinition } from "../commands/types";
-import { createBlankProject, DEFAULT_ZOOM } from "../domain/defaults";
+import { createBlankProject, DEFAULT_ZOOM, MOSAIC_PIXEL_SIZE } from "../domain/defaults";
 import { normalizeProjectPageNames } from "../domain/pageNaming";
 import { objectTypeSchema, projectSchema, type Project } from "../domain/schema";
 import { resolveInitialLocale, type Locale } from "../i18n";
@@ -195,6 +195,9 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       presetBubbleType: "round",
       customSmoothness: 0.45,
     },
+    mosaicInsert: {
+      pixelSize: MOSAIC_PIXEL_SIZE,
+    },
     zoom: DEFAULT_ZOOM,
     lastExport: null,
     statusMessage: null,
@@ -289,6 +292,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
             activeTool: get().activeTool,
             textInsertDefaults: get().textInsertDefaults,
             bubbleInsert: get().bubbleInsert,
+            mosaicInsert: get().mosaicInsert,
             zoom: get().zoom,
             lastExport: get().lastExport,
             statusMessage: get().statusMessage,

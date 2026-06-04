@@ -1,4 +1,4 @@
-import type { Bubble, Group, Page, Panel, Project, TextItem } from "../domain/schema";
+import type { Bubble, ElementItem, Group, Page, Panel, Project, TextItem } from "../domain/schema";
 
 const DEFAULT_PROJECT_TYPE = "manga";
 const DEFAULT_PAGE_BACKGROUND = "#ffffff";
@@ -142,6 +142,27 @@ const compactBubble = (bubble: Bubble) => ({
     : {}),
 });
 
+const compactElement = (element: ElementItem) => ({
+  id: element.id,
+  x: element.x,
+  y: element.y,
+  width: element.width,
+  height: element.height,
+  src: element.src,
+  title: element.title,
+  category: element.category,
+  ...(element.rotation !== 0 ? { rotation: element.rotation } : {}),
+  ...(element.opacity !== 1 ? { opacity: element.opacity } : {}),
+  ...(element.mosaic
+    ? {
+        mosaic: {
+          ...element.mosaic,
+          cells: element.mosaic.cells,
+        },
+      }
+    : {}),
+});
+
 const compactGroup = (group: Group) => ({
   id: group.id,
   members: group.members,
@@ -155,6 +176,9 @@ const compactPage = (page: Page) => ({
   panels: page.panels.map(compactPanel),
   texts: page.texts.map(compactText),
   bubbles: page.bubbles.map(compactBubble),
+  ...((page.elements ?? []).length > 0
+    ? { elements: (page.elements ?? []).map(compactElement) }
+    : {}),
   ...(page.groups.length > 0 ? { groups: page.groups.map(compactGroup) } : {}),
   layers: page.layers,
   ...(page.background !== DEFAULT_PAGE_BACKGROUND ? { background: page.background } : {}),

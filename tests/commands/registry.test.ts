@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { clampBubbleTailBaseLocalPoint, getPageWorkspace } from "../../src/domain/helpers";
-import type { Bubble } from "../../src/domain/schema";
+import type { Bubble, ElementItem } from "../../src/domain/schema";
 import { createHarness, runCommand } from "./harness";
 
 describe("commandRegistry", () => {
@@ -68,8 +68,8 @@ describe("commandRegistry", () => {
     expect(movedText).toMatchObject({ x: 213, y: 277 });
     expect(movedElement).toMatchObject({ x: 337, y: 419 });
     expect(movedBubble).toMatchObject({ x: 391, y: 463 });
-    expect(movedBubble.tailTip.x - bubble.tailTip.x).toBeCloseTo(391 - bubble.x, 6);
-    expect(movedBubble.tailTip.y - bubble.tailTip.y).toBeCloseTo(463 - bubble.y, 6);
+    expect(movedBubble.tailTip.x).toBeCloseTo(bubble.tailTip.x, 6);
+    expect(movedBubble.tailTip.y).toBeCloseTo(bubble.tailTip.y, 6);
   });
 
   it("supports the core page workflow for creation, duplication, reorder, and removal", async () => {
@@ -183,6 +183,138 @@ describe("commandRegistry", () => {
     expect(harness.readSession().panelImageEditing).toBeNull();
   });
 
+  it("stores mosaic strokes as selectable panel-bound elements", async () => {
+    const harness = createHarness();
+
+    await runCommand(harness, "createProject", { title: "Mosaic" });
+    const page = (await runCommand(harness, "addPage", {})) as { id: string };
+    const panel = (await runCommand(harness, "createPanel", {
+      pageId: page.id,
+      x: 80,
+      y: 120,
+      width: 320,
+      height: 260,
+    })) as { id: string };
+    await runCommand(harness, "placeImageInPanel", {
+      pageId: page.id,
+      panelId: panel.id,
+      src: "data:image/png;base64,AAAA",
+    });
+    const mosaicSettings = await runCommand(harness, "setMosaicInsertState", {
+      pixelSize: 36,
+    });
+    expect(mosaicSettings).toMatchObject({ pixelSize: 36 });
+
+    const firstStroke = (await runCommand(harness, "createMosaic", {
+      pageId: page.id,
+      panelId: panel.id,
+      cellSize: 20,
+      pixelSize: harness.readSession().mosaicInsert.pixelSize,
+      cells: [
+        { x: 100, y: 120 },
+        { x: 120, y: 120 },
+      ],
+    })) as ElementItem;
+
+    expect(firstStroke).toMatchObject({
+      src: "",
+      title: "Mosaic",
+      category: "effects",
+      mosaic: {
+        panelId: panel.id,
+        cellSize: 20,
+        pixelSize: 36,
+      },
+    });
+    expect(harness.readSession().selection).toEqual({
+      pageId: page.id,
+      objectType: "element",
+      objectId: firstStroke.id,
+    });
+
+    await runCommand(harness, "createMosaic", {
+      pageId: page.id,
+      panelId: panel.id,
+      cellSize: 20,
+      cells: [{ x: 140, y: 120 }],
+    });
+
+    const pageAfterMerge = harness.readSession().project.pages[0];
+    const mergedMosaics = pageAfterMerge.elements.filter((element) => element.mosaic);
+    expect(mergedMosaics).toHaveLength(1);
+    expect(mergedMosaics[0].mosaic?.cells).toEqual([
+      { x: 100, y: 120 },
+      { x: 120, y: 120 },
+      { x: 140, y: 120 },
+    ]);
+    expect(pageAfterMerge.layers.filter((layer) => layer.startsWith("element:"))).toEqual([
+      `element:${mergedMosaics[0].id}`,
+    ]);
+
+    const updatedStrength = (await runCommand(harness, "updateElement", {
+      pageId: page.id,
+      elementId: mergedMosaics[0].id,
+      mosaicPixelSize: 48,
+    })) as ElementItem;
+
+    expect(updatedStrength.mosaic?.pixelSize).toBe(48);
+    expect(updatedStrength.mosaic?.cellSize).toBe(20);
+    expect(updatedStrength.mosaic?.cells).toEqual([
+      { x: 100, y: 120 },
+      { x: 120, y: 120 },
+      { x: 140, y: 120 },
+    ]);
+
+    const detachedStroke = (await runCommand(harness, "createMosaic", {
+      pageId: page.id,
+      panelId: panel.id,
+      cellSize: 20,
+      cells: [{ x: 300, y: 120 }],
+    })) as ElementItem;
+
+    const pageAfterDetachedStroke = harness.readSession().project.pages[0];
+    expect(pageAfterDetachedStroke.elements.filter((element) => element.mosaic)).toHaveLength(2);
+
+    await runCommand(harness, "selectObject", {
+      pageId: page.id,
+      objectType: "element",
+      objectId: detachedStroke.id,
+    });
+    const envelope = await runCommand(harness, "createClipboardEnvelope", {});
+    expect(envelope).toMatchObject({
+      item: {
+        kind: "element",
+        element: {
+          id: detachedStroke.id,
+          mosaic: {
+            panelId: panel.id,
+            cells: [{ x: 300, y: 120 }],
+          },
+        },
+      },
+    });
+
+    const movedIntoContact = (await runCommand(harness, "updateElement", {
+      pageId: page.id,
+      elementId: detachedStroke.id,
+      x: 160,
+      y: 120,
+    })) as ElementItem;
+
+    expect(movedIntoContact.id).toBe(detachedStroke.id);
+    expect(movedIntoContact.mosaic?.cells).toEqual([
+      { x: 100, y: 120 },
+      { x: 120, y: 120 },
+      { x: 140, y: 120 },
+      { x: 160, y: 120 },
+    ]);
+    const pageAfterMoveMerge = harness.readSession().project.pages[0];
+    expect(pageAfterMoveMerge.elements.filter((element) => element.mosaic)).toHaveLength(1);
+    expect(pageAfterMoveMerge.layers.filter((layer) => layer.startsWith("element:"))).toEqual([
+      `element:${detachedStroke.id}`,
+    ]);
+  });
+
   it("supports polygon panels, text box sizing, text direction, and bubbles", async () => {
     const harness = createHarness();
 
@@ -294,14 +426,8 @@ describe("commandRegistry", () => {
       x: bubble.x + 40,
       y: bubble.y + 30,
     })) as Bubble;
-    expect(movedBubble.tailTip.x - bubble.tailTip.x).toBeCloseTo(
-      movedBubble.x - bubble.x,
-      6,
-    );
-    expect(movedBubble.tailTip.y - bubble.tailTip.y).toBeCloseTo(
-      movedBubble.y - bubble.y,
-      6,
-    );
+    expect(movedBubble.tailTip.x).toBeCloseTo(bubble.tailTip.x, 6);
+    expect(movedBubble.tailTip.y).toBeCloseTo(bubble.tailTip.y, 6);
 
     const tailHiddenBubble = (await runCommand(harness, "updateBubble", {
       pageId: page.id,

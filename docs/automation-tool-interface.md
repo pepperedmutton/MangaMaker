@@ -29,6 +29,46 @@ window.mangaMaker.agent.getDebugSnapshot()
 - Do not emit legacy bubble `style` objects. Use `updateBubble` fields such as `backgroundColor`, `strokeColor`, `strokeWidth`, `opacity`, `cornerRadius`, `tailTip`, `tailBase`, and `tailWidth`.
 - Do not use `bubbleType: "narration"` in new automation output. It is accepted only as a legacy load-time alias and migrates to `caption`.
 
+## Live Project Updates
+
+Preferred live path: if the agent can run JavaScript in the open editor, use
+`window.mangaMaker.commands.execute("updateText", ...)` or other command APIs.
+Those commands update the React/Zustand editor state immediately. Call
+`saveProject` after the batch so the same state is persisted.
+
+External API path: if the agent runs outside the browser and has to submit a
+full updated project JSON, do not write `projects/*/project.json` directly.
+Send the full project through the web persistence API instead:
+
+```ts
+await fetch("/__mangamaker__/persistence/write_project_draft", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    project_id: project.id,
+    project_title: project.title,
+    project_json: JSON.stringify(project),
+  }),
+});
+```
+
+The open editor subscribes to `GET /__mangamaker__/persistence/events`. When the
+write targets the project already open in the editor, MangaMaker reloads that
+project data in place. The selected page, zoom, and canvas position are
+preserved, so updated text appears without refresh, reopening, or moving the
+viewed page.
+
+If an agent already has an updated project object inside the browser, call
+`window.mangaMaker.project.load(project)`. For the currently open project, this
+also applies the new project data without switching the viewed page.
+
+After either path, verify through the live editor state:
+
+```ts
+const project = window.mangaMaker.project.get();
+const session = window.mangaMaker.session.get();
+```
+
 ## Text Insertion
 
 `createText` creates one text box and accepts only:

@@ -40,9 +40,9 @@ const getProfileValue = (
 };
 
 const BASE_FORBIDDEN_LINE_START =
-  "\u3001\u3002\uff0c\uff0e\u30fb\uff1a\uff1b\uff1f\uff01\ufe10\ufe11\ufe12\ufe13\ufe14\ufe15\ufe16\ufe36\ufe42\ufe44)]\uff5d\u3015\u3009\u300b\u300d\u300f\u3011\u3019\u3017\u301f\u2019\u201d\uff60\u00bb";
+  "\u3001\u3002\uff0c\uff0e\u30fb\uff1a\uff1b\uff1f\uff01\ufe10\ufe11\ufe12\ufe13\ufe14\ufe15\ufe16\ufe36\ufe3c\ufe42\ufe44)]\uff5d\u3015\u3009\u300b\u300d\u300f\u3011\u3019\u3017\u301f\u2019\u201d\uff60\u00bb";
 const BASE_FORBIDDEN_LINE_END =
-  "\ufe35\ufe41\ufe43([\uff5b\u3014\u3008\u300a\u300c\u300e\u3010\u3018\u3016\u301d\u2018\u201c\uff5f\u00ab";
+  "\ufe35\ufe3b\ufe41\ufe43([\uff5b\u3014\u3008\u300a\u300c\u300e\u3010\u3018\u3016\u301d\u2018\u201c\uff5f\u00ab";
 const ZH_STRICT_FORBIDDEN_LINE_START = "\u2013\u2014\u2015\ufe31\ufe32\u2026\u22ef\ufe19";
 const JA_STRICT_FORBIDDEN_LINE_START =
   "\u30fc\uff70\u30fb\uff65\u3041\u3043\u3045\u3047\u3049\u3063\u3083\u3085\u3087\u308e\u3095\u3096\u30a1\u30a3\u30a5\u30a7\u30a9\u30c3\u30e3\u30e5\u30e7\u30ee\u30f5\u30f6\u309b\u309c\u309d\u309e\u30fd\u30fe\u3005";
@@ -117,6 +117,8 @@ const VERTICAL_LEFT_CORNER_BRACKET = "\uFE41";
 const VERTICAL_RIGHT_CORNER_BRACKET = "\uFE42";
 const VERTICAL_LEFT_WHITE_CORNER_BRACKET = "\uFE43";
 const VERTICAL_RIGHT_WHITE_CORNER_BRACKET = "\uFE44";
+const VERTICAL_LEFT_BLACK_LENTICULAR_BRACKET = "\uFE3B";
+const VERTICAL_RIGHT_BLACK_LENTICULAR_BRACKET = "\uFE3C";
 const VERTICAL_EXCLAMATION = "\uFE15";
 const VERTICAL_QUESTION = "\uFE16";
 const HORIZONTAL_ELLIPSIS = "\u2026";
@@ -336,6 +338,10 @@ const normalizeMangaQuotes = (value: string) => {
 
 const normalizeVerticalBrackets = (value: string) =>
   value
+    .split("\u3010")
+    .join(VERTICAL_LEFT_BLACK_LENTICULAR_BRACKET)
+    .split("\u3011")
+    .join(VERTICAL_RIGHT_BLACK_LENTICULAR_BRACKET)
     .split("\u300c")
     .join(VERTICAL_LEFT_CORNER_BRACKET)
     .split("\u300d")

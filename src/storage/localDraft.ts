@@ -2,6 +2,7 @@ import { projectSchema, type Project } from "../domain/schema";
 import { normalizeProjectForCurrentVersion } from "./projectMigration";
 import {
   deleteProjectFromProjectsFolder,
+  getProjectFileClientId,
   isProjectsFilePersistenceAvailable,
   listProjectsFromProjectsFolder,
   loadProjectFromProjectsFolder,
@@ -281,6 +282,7 @@ const queueWebPersistenceOnUnload = (project: Project, projectJson: string) => {
       project_id: project.id,
       project_title: project.title,
       project_json: projectJson,
+      client_id: getProjectFileClientId(),
     });
     return navigator.sendBeacon(
       `${WEB_PERSISTENCE_API_BASE}/write_project_draft`,

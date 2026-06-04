@@ -13,6 +13,7 @@ const MAJOR_AUTO_SAVE_COMMAND_IDS = new Set([
   "createText",
   "createBubble",
   "createElement",
+  "createMosaic",
   "deleteObject",
   "groupSelection",
   "ungroupSelection",

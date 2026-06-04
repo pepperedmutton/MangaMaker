@@ -11,7 +11,11 @@ import {
   createId,
   clonePage,
   MAX_ZOOM,
+  MAX_MOSAIC_PIXEL_SIZE,
+  MIN_MOSAIC_PIXEL_SIZE,
   MIN_ZOOM,
+  MOSAIC_CELL_SIZE,
+  MOSAIC_PIXEL_SIZE,
 } from "../domain/defaults";
 import {
   clamp,
@@ -32,11 +36,12 @@ import {
   getPageWorkspace,
   getPageById,
   getBubbleTailBaseLocalPoint,
+  getMosaicBounds,
   insertPanelPoint,
+  isMosaicElement,
   preservePanelImageViewBox,
   removePanelPoint,
   removeLayerRef,
-  shiftBubbleTail,
   scaleBubbleLocalPoint,
   scalePanelPoints,
   snapValue,
@@ -164,7 +169,7 @@ const setLastExportArtifact = (
   });
 };
 
-const getToolLabel = (locale: Locale, tool: "select" | "panel" | "text" | "bubble" | "element") =>
+const getToolLabel = (locale: Locale, tool: "select" | "panel" | "text" | "bubble" | "element" | "mosaic") =>
   translate(locale, `toolbar.${tool}`);
 
 const snapshotSession = (
@@ -327,6 +332,10 @@ const buildClipboardEnvelopeForSession = async (
       const text =
         selectionPage.texts.find((entry) => entry.id === session.selection?.objectId) ?? null;
       item = text ? { kind: "text", text } : null;
+    } else if (session.selection.objectType === "element") {
+      const element =
+        (selectionPage.elements ?? []).find((entry) => entry.id === session.selection?.objectId) ?? null;
+      item = element ? { kind: "element", element } : null;
     } else {
       const bubble =
         selectionPage.bubbles.find((entry) => entry.id === session.selection?.objectId) ?? null;
@@ -520,6 +529,11 @@ const applyMoveDeltaToPage = (
   }
 
   const memberKeys = new Set(members.map(objectRefKey));
+  const movedPanelIds = new Set(
+    members
+      .filter((member) => member.objectType === "panel")
+      .map((member) => member.objectId),
+  );
   return {
     ...page,
     panels: page.panels.map((panel) =>
@@ -542,24 +556,17 @@ const applyMoveDeltaToPage = (
     ),
     bubbles: page.bubbles.map((bubble) =>
       memberKeys.has(`bubble:${bubble.id}`)
-        ? shiftBubbleTail(
-            {
-              ...bubble,
-              x: bubble.x + deltaX,
-              y: bubble.y + deltaY,
-            },
-            deltaX,
-            deltaY,
-          )
+        ? {
+            ...bubble,
+            x: bubble.x + deltaX,
+            y: bubble.y + deltaY,
+          }
         : bubble,
     ),
     elements: (page.elements ?? []).map((element) =>
-      memberKeys.has(`element:${element.id}`)
-        ? {
-            ...element,
-            x: element.x + deltaX,
-            y: element.y + deltaY,
-          }
+      memberKeys.has(`element:${element.id}`) ||
+      (isMosaicElement(element) && movedPanelIds.has(element.mosaic.panelId))
+        ? shiftMosaicElement(element, deltaX, deltaY)
         : element,
     ),
   };
@@ -1508,6 +1515,273 @@ const createPastedText = (
   };
 };
 
+const normalizeMosaicCoordinate = (value: number) =>
+  Math.round(value * 1000) / 1000;
+
+const mosaicCellKey = (cell: { x: number; y: number }) =>
+  `${normalizeMosaicCoordinate(cell.x)}:${normalizeMosaicCoordinate(cell.y)}`;
+
+const dedupeMosaicCells = (cells: Array<{ x: number; y: number }>) => {
+  const byKey = new Map<string, { x: number; y: number }>();
+  for (const cell of cells) {
+    if (!Number.isFinite(cell.x) || !Number.isFinite(cell.y)) {
+      continue;
+    }
+    byKey.set(mosaicCellKey(cell), {
+      x: normalizeMosaicCoordinate(cell.x),
+      y: normalizeMosaicCoordinate(cell.y),
+    });
+  }
+  return [...byKey.values()].sort((left, right) => left.y - right.y || left.x - right.x);
+};
+
+const doMosaicCellsTouch = (
+  left: { x: number; y: number },
+  right: { x: number; y: number },
+  cellSize: number,
+) => {
+  const epsilon = 0.001;
+  return (
+    left.x <= right.x + cellSize + epsilon &&
+    left.x + cellSize + epsilon >= right.x &&
+    left.y <= right.y + cellSize + epsilon &&
+    left.y + cellSize + epsilon >= right.y
+  );
+};
+
+const doMosaicCellSetsTouch = (
+  leftCells: Array<{ x: number; y: number }>,
+  rightCells: Array<{ x: number; y: number }>,
+  cellSize: number,
+) => {
+  const indexedCells = new Map<string, Array<{ x: number; y: number }>>();
+  for (const cell of rightCells) {
+    const bucketX = Math.floor(cell.x / cellSize);
+    const bucketY = Math.floor(cell.y / cellSize);
+    const key = `${bucketX}:${bucketY}`;
+    const entries = indexedCells.get(key) ?? [];
+    entries.push(cell);
+    indexedCells.set(key, entries);
+  }
+  for (const cell of leftCells) {
+    const bucketX = Math.floor(cell.x / cellSize);
+    const bucketY = Math.floor(cell.y / cellSize);
+    for (let yOffset = -1; yOffset <= 1; yOffset += 1) {
+      for (let xOffset = -1; xOffset <= 1; xOffset += 1) {
+        const entries = indexedCells.get(`${bucketX + xOffset}:${bucketY + yOffset}`) ?? [];
+        if (entries.some((entry) => doMosaicCellsTouch(cell, entry, cellSize))) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+};
+
+const createMosaicElementFromCells = (
+  panelId: string,
+  cells: Array<{ x: number; y: number }>,
+  cellSize = MOSAIC_CELL_SIZE,
+  pixelSize = cellSize,
+) => {
+  const normalizedCells = dedupeMosaicCells(cells);
+  const bounds = getMosaicBounds({
+    panelId,
+    cellSize,
+    pixelSize,
+    cells: normalizedCells,
+  });
+  return {
+    id: createId("element"),
+    ...createDefaultElement({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      src: "",
+      title: "Mosaic",
+      category: "effects",
+      opacity: 1,
+      mosaic: {
+        panelId,
+        cellSize,
+        pixelSize,
+        cells: normalizedCells,
+      },
+    }),
+  };
+};
+
+const shiftMosaicElement = (
+  element: Project["pages"][number]["elements"][number],
+  deltaX: number,
+  deltaY: number,
+) =>
+  isMosaicElement(element)
+    ? {
+        ...element,
+        x: element.x + deltaX,
+        y: element.y + deltaY,
+        mosaic: {
+          ...element.mosaic,
+          cells: element.mosaic.cells.map((cell) => ({
+            x: normalizeMosaicCoordinate(cell.x + deltaX),
+            y: normalizeMosaicCoordinate(cell.y + deltaY),
+          })),
+        },
+      }
+    : {
+        ...element,
+        x: element.x + deltaX,
+        y: element.y + deltaY,
+      };
+
+const moveMosaicElementTo = (
+  element: Project["pages"][number]["elements"][number],
+  x: number,
+  y: number,
+) => shiftMosaicElement(element, x - element.x, y - element.y);
+
+const scaleMosaicElementWithPanel = (
+  element: Project["pages"][number]["elements"][number],
+  previousPanel: Pick<Project["pages"][number]["panels"][number], "x" | "y" | "width" | "height">,
+  nextPanel: Pick<Project["pages"][number]["panels"][number], "x" | "y" | "width" | "height">,
+) => {
+  if (!isMosaicElement(element) || element.mosaic.panelId.length === 0) {
+    return element;
+  }
+  const scaleX = nextPanel.width / Math.max(previousPanel.width, 0.0001);
+  const scaleY = nextPanel.height / Math.max(previousPanel.height, 0.0001);
+  const cells = dedupeMosaicCells(
+    element.mosaic.cells.map((cell) => ({
+      x: nextPanel.x + (cell.x - previousPanel.x) * scaleX,
+      y: nextPanel.y + (cell.y - previousPanel.y) * scaleY,
+    })),
+  );
+  if (cells.length === 0) {
+    return element;
+  }
+  const bounds = getMosaicBounds({
+    ...element.mosaic,
+    cells,
+  });
+  return {
+    ...element,
+    ...bounds,
+    mosaic: {
+      ...element.mosaic,
+      cells,
+    },
+  };
+};
+
+const mergeConnectedMosaicElementsForTarget = (
+  page: Project["pages"][number],
+  targetElementId: string,
+) => {
+  const elements = page.elements ?? [];
+  const targetElement = elements.find((element) => element.id === targetElementId);
+  if (!targetElement || !isMosaicElement(targetElement)) {
+    return page;
+  }
+
+  const connectedElementIds = new Set<string>([targetElement.id]);
+  let mergedCells = dedupeMosaicCells(targetElement.mosaic.cells);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const element of elements) {
+      if (
+        connectedElementIds.has(element.id) ||
+        !isMosaicElement(element) ||
+        element.mosaic.panelId !== targetElement.mosaic.panelId ||
+        Math.abs(element.mosaic.cellSize - targetElement.mosaic.cellSize) > 0.001
+      ) {
+        continue;
+      }
+      if (!doMosaicCellSetsTouch(mergedCells, element.mosaic.cells, targetElement.mosaic.cellSize)) {
+        continue;
+      }
+      connectedElementIds.add(element.id);
+      mergedCells = dedupeMosaicCells([...mergedCells, ...element.mosaic.cells]);
+      changed = true;
+    }
+  }
+
+  if (connectedElementIds.size <= 1) {
+    return page;
+  }
+
+  const bounds = getMosaicBounds({
+    ...targetElement.mosaic,
+    cells: mergedCells,
+  });
+  const mergedElement = {
+    ...targetElement,
+    ...bounds,
+    mosaic: {
+      ...targetElement.mosaic,
+      cells: mergedCells,
+    },
+  };
+  const nextPage = {
+    ...page,
+    elements: elements
+      .filter((element) => element.id === targetElement.id || !connectedElementIds.has(element.id))
+      .map((element) => (element.id === targetElement.id ? mergedElement : element)),
+    layers: page.layers.filter((layer) => {
+      if (!layer.startsWith("element:")) {
+        return true;
+      }
+      const elementId = layer.slice("element:".length);
+      return elementId === targetElement.id || !connectedElementIds.has(elementId);
+    }),
+  };
+  return {
+    ...nextPage,
+    groups: sanitizeGroupList(nextPage, nextPage.groups),
+  };
+};
+
+const createPastedElement = (
+  page: Project["pages"][number],
+  element: Project["pages"][number]["elements"][number],
+) => {
+  const rect = clampElementRectToWorkspace(page, {
+    x: element.x + CLIPBOARD_PASTE_OFFSET,
+    y: element.y + CLIPBOARD_PASTE_OFFSET,
+    width: element.width,
+    height: element.height,
+  });
+  const deltaX = rect.x - element.x;
+  const deltaY = rect.y - element.y;
+  const targetPanelId =
+    element.mosaic && page.panels.some((panel) => panel.id === element.mosaic?.panelId)
+      ? element.mosaic.panelId
+      : page.panels.find((panel) => panel.image)?.id ?? page.panels[0]?.id ?? element.mosaic?.panelId;
+  const shifted = shiftMosaicElement(
+    {
+      ...element,
+      id: createId("element"),
+    },
+    deltaX,
+    deltaY,
+  );
+  return isMosaicElement(shifted) && targetPanelId
+    ? {
+        ...shifted,
+        ...rect,
+        mosaic: {
+          ...shifted.mosaic,
+          panelId: targetPanelId,
+        },
+      }
+    : {
+        ...shifted,
+        ...rect,
+      };
+};
+
 const createPastedBubble = (
   page: Project["pages"][number],
   bubble: Project["pages"][number]["bubbles"][number],
@@ -2108,6 +2382,47 @@ const commands = {
         };
       }
 
+      if (input.item.kind === "element") {
+        const element = createPastedElement(page, input.item.element);
+        const nextProject = ensureProject(
+          touch(
+            updatePage(current, targetPageId, (entry) => ({
+              ...entry,
+              elements: [...(entry.elements ?? []), element],
+              layers: [...entry.layers, toLayerRef("element", element.id)],
+            })),
+          ),
+        );
+        context.setProject(nextProject);
+        context.setSession({
+          selectedPageId: targetPageId,
+          selection: {
+            pageId: targetPageId,
+            objectType: "element",
+            objectId: element.id,
+          },
+          multiSelection: [
+            {
+              pageId: targetPageId,
+              objectType: "element",
+              objectId: element.id,
+            },
+          ],
+          panelImageEditing: null,
+          activeTool: "select",
+          statusMessage: createContextStatus(
+            context,
+            "success",
+            isMosaicElement(element) ? "command.mosaicAdded" : "command.elementAdded",
+          ),
+        });
+        return {
+          kind: "element" as const,
+          pageId: targetPageId,
+          objectId: element.id,
+        };
+      }
+
       const bubble = createPastedBubble(page, input.item.bubble);
       const nextProject = ensureProject(
         touch(
@@ -2172,7 +2487,7 @@ const commands = {
     id: "setTool",
     label: "Set Tool",
     inputSchema: z.object({
-      tool: z.enum(["select", "panel", "text", "bubble", "element"]),
+      tool: z.enum(["select", "panel", "text", "bubble", "element", "mosaic"]),
     }),
     execute: (context, input) => {
       const locale = getLocale(context);
@@ -2211,6 +2526,25 @@ const commands = {
         },
       });
       return context.getSession().bubbleInsert;
+    },
+  },
+  setMosaicInsertState: {
+    id: "setMosaicInsertState",
+    label: "Set Mosaic Insert State",
+    inputSchema: z.object({
+      pixelSize: z.number().min(MIN_MOSAIC_PIXEL_SIZE).max(MAX_MOSAIC_PIXEL_SIZE).optional(),
+    }),
+    execute: (context, input) => {
+      const current = context.getSession().mosaicInsert ?? {
+        pixelSize: MOSAIC_PIXEL_SIZE,
+      };
+      context.setSession({
+        mosaicInsert: {
+          ...current,
+          ...(input.pixelSize !== undefined ? { pixelSize: input.pixelSize } : {}),
+        },
+      });
+      return context.getSession().mosaicInsert;
     },
   },
   setLocale: {
@@ -2354,6 +2688,9 @@ const commands = {
           if (member.objectType === "text") {
             return page.texts.some((text) => text.id === member.objectId);
           }
+          if (member.objectType === "element") {
+            return (page.elements ?? []).some((element) => element.id === member.objectId);
+          }
           return page.bubbles.some((bubble) => bubble.id === member.objectId);
         }),
       );
@@ -2387,6 +2724,9 @@ const commands = {
                   }
                   if (member.objectType === "text") {
                     return mergedPage.texts.some((text) => text.id === member.objectId);
+                  }
+                  if (member.objectType === "element") {
+                    return (mergedPage.elements ?? []).some((element) => element.id === member.objectId);
                   }
                   return mergedPage.bubbles.some((bubble) => bubble.id === member.objectId);
                 }),
@@ -2743,6 +3083,11 @@ const commands = {
                   }
                 : item,
             ),
+            elements: (entry.elements ?? []).map((element) =>
+              isMosaicElement(element) && element.mosaic.panelId === input.panelId
+                ? scaleMosaicElementWithPanel(element, panel, rect)
+                : element,
+            ),
           })),
         ),
       );
@@ -3051,6 +3396,12 @@ const commands = {
       const newHeight = Math.max(20, snapValue(maxY - minY));
       const newX = minX;
       const newY = minY;
+      const nextPanelRect = {
+        x: newX,
+        y: newY,
+        width: newWidth,
+        height: newHeight,
+      };
       const nextProject = ensureProject(
         touch(
           updatePage(context.getProject(), input.pageId, (entry) => ({
@@ -3069,12 +3420,7 @@ const commands = {
                           ...p.image,
                           viewBox: preservePanelImageViewBox(
                             p,
-                            {
-                              x: newX,
-                              y: newY,
-                              width: newWidth,
-                              height: newHeight,
-                            },
+                            nextPanelRect,
                             p.image.sourceWidth ?? p.image.viewBox.width,
                             p.image.sourceHeight ?? p.image.viewBox.height,
                             p.image.viewBox,
@@ -3083,6 +3429,11 @@ const commands = {
                       : null,
                   }
                 : p,
+            ),
+            elements: (entry.elements ?? []).map((element) =>
+              isMosaicElement(element) && element.mosaic.panelId === input.panelId
+                ? scaleMosaicElementWithPanel(element, panel, nextPanelRect)
+                : element,
             ),
           })),
         ),
@@ -3228,6 +3579,7 @@ const commands = {
       height: z.number().positive().optional(),
       rotation: z.number().optional(),
       opacity: z.number().min(0).max(1).optional(),
+      mosaicPixelSize: z.number().positive().optional(),
       title: z.string().optional(),
     }),
     execute: (context, input) => {
@@ -3269,20 +3621,40 @@ const commands = {
               shouldApplyGroupedMove && moveMembers.length > 1
                 ? applyMoveDeltaToPage(entry, moveMembers, clampedDelta.deltaX, clampedDelta.deltaY)
                 : entry;
-            return {
+            const updatedPage = {
               ...movedPage,
-              elements: (movedPage.elements ?? []).map((element) =>
-                element.id === input.elementId
-                  ? {
-                      ...element,
-                      ...resolvedRect,
-                      ...(input.rotation !== undefined ? { rotation: input.rotation } : {}),
-                      ...(input.opacity !== undefined ? { opacity: input.opacity } : {}),
-                      ...(input.title !== undefined ? { title: input.title } : {}),
-                    }
-                  : element,
-              ),
+              elements: (movedPage.elements ?? []).map((element) => {
+                if (element.id !== input.elementId) {
+                  return element;
+                }
+                const movedElement =
+                  isMosaicElement(element) &&
+                  (Math.abs(resolvedRect.x - element.x) > 0.0001 ||
+                    Math.abs(resolvedRect.y - element.y) > 0.0001)
+                    ? moveMosaicElementTo(element, resolvedRect.x, resolvedRect.y)
+                    : {
+                        ...element,
+                        ...resolvedRect,
+                      };
+                return {
+                  ...movedElement,
+                  ...(input.rotation !== undefined ? { rotation: input.rotation } : {}),
+                  ...(input.opacity !== undefined ? { opacity: input.opacity } : {}),
+                  ...(input.title !== undefined ? { title: input.title } : {}),
+                  ...(input.mosaicPixelSize !== undefined && isMosaicElement(movedElement)
+                    ? {
+                        mosaic: {
+                          ...movedElement.mosaic,
+                          pixelSize: input.mosaicPixelSize,
+                        },
+                      }
+                    : {}),
+                };
+              }),
             };
+            return shouldApplyGroupedMove && isMosaicElement(currentElement)
+              ? mergeConnectedMosaicElementsForTarget(updatedPage, input.elementId)
+              : updatedPage;
           }),
         ),
       );
@@ -3290,6 +3662,94 @@ const commands = {
       return withPage(nextProject, input.pageId, (entry) =>
         (entry.elements ?? []).find((item) => item.id === input.elementId),
       );
+    },
+  },
+  createMosaic: {
+    id: "createMosaic",
+    label: "Create Mosaic",
+    recordHistory: true,
+    inputSchema: z.object({
+      pageId: z.string(),
+      panelId: z.string(),
+      cellSize: z.number().positive().optional(),
+      pixelSize: z.number().positive().optional(),
+      cells: z.array(pointSchema).min(1),
+    }),
+    execute: (context, input) => {
+      const page = getPageById(context.getProject(), input.pageId);
+      const panel = getPanel(context.getProject(), input.pageId, input.panelId);
+      if (!panel.image) {
+        throw new Error(`Panel image not found: ${input.panelId}`);
+      }
+      const cellSize = input.cellSize ?? MOSAIC_CELL_SIZE;
+      let pixelSize = input.pixelSize ?? cellSize;
+      let mergedCells = dedupeMosaicCells(input.cells);
+      if (mergedCells.length === 0) {
+        return null;
+      }
+
+      const connectedElementIds = new Set<string>();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const element of page.elements ?? []) {
+          if (
+            connectedElementIds.has(element.id) ||
+            !isMosaicElement(element) ||
+            element.mosaic.panelId !== input.panelId ||
+            Math.abs(element.mosaic.cellSize - cellSize) > 0.001
+          ) {
+            continue;
+          }
+          if (!doMosaicCellSetsTouch(mergedCells, element.mosaic.cells, cellSize)) {
+            continue;
+          }
+          pixelSize =
+            connectedElementIds.size === 0
+              ? (element.mosaic.pixelSize ?? element.mosaic.cellSize)
+              : Math.max(pixelSize, element.mosaic.pixelSize ?? element.mosaic.cellSize);
+          connectedElementIds.add(element.id);
+          mergedCells = dedupeMosaicCells([...mergedCells, ...element.mosaic.cells]);
+          changed = true;
+        }
+      }
+
+      const mosaicElement = createMosaicElementFromCells(input.panelId, mergedCells, cellSize, pixelSize);
+      const nextProject = ensureProject(
+        touch(
+          updatePage(context.getProject(), input.pageId, (entry) => ({
+            ...entry,
+            elements: [
+              ...(entry.elements ?? []).filter((element) => !connectedElementIds.has(element.id)),
+              mosaicElement,
+            ],
+            layers: [
+              ...entry.layers.filter((layer) => {
+                if (!layer.startsWith("element:")) {
+                  return true;
+                }
+                return !connectedElementIds.has(layer.slice("element:".length));
+              }),
+              toLayerRef("element", mosaicElement.id),
+            ],
+          })),
+        ),
+      );
+      context.setProject(nextProject);
+      const selection = {
+        pageId: input.pageId,
+        objectType: "element" as const,
+        objectId: mosaicElement.id,
+      };
+      context.setSession({
+        selectedPageId: input.pageId,
+        selection,
+        multiSelection: [selection],
+        panelImageEditing: null,
+        activeTool: context.getSession().activeTool,
+        statusMessage: createContextStatus(context, "success", "command.mosaicAdded"),
+      });
+      return mosaicElement;
     },
   },
   createText: {
@@ -3658,12 +4118,7 @@ const commands = {
       };
       const tailTip = input.tailTip
         ? clampPointToWorkspace(page, input.tailTip)
-        : shouldApplyGroupedMove
-          ? {
-              x: bubble.tailTip.x + clampedDelta.deltaX,
-              y: bubble.tailTip.y + clampedDelta.deltaY,
-            }
-          : bubble.tailTip;
+        : bubble.tailTip;
       const nextGeometryBubble = {
         ...bubble,
         ...resolvedRect,
@@ -3844,6 +4299,17 @@ const commands = {
       const nextProject = ensureProject(
         touch(
           updatePage(context.getProject(), input.pageId, (entry) => {
+            const removedElementIds = new Set<string>();
+            if (input.objectType === "element") {
+              removedElementIds.add(input.objectId);
+            }
+            if (input.objectType === "panel") {
+              for (const element of entry.elements ?? []) {
+                if (isMosaicElement(element) && element.mosaic.panelId === input.objectId) {
+                  removedElementIds.add(element.id);
+                }
+              }
+            }
             const nextPage = {
               ...entry,
               panels:
@@ -3855,14 +4321,20 @@ const commands = {
                   ? entry.texts.filter((item) => item.id !== input.objectId)
                   : entry.texts,
               elements:
-                input.objectType === "element"
-                  ? (entry.elements ?? []).filter((item) => item.id !== input.objectId)
+                removedElementIds.size > 0
+                  ? (entry.elements ?? []).filter((item) => !removedElementIds.has(item.id))
                   : (entry.elements ?? []),
               bubbles:
                 input.objectType === "bubble"
                   ? entry.bubbles.filter((item) => item.id !== input.objectId)
                   : entry.bubbles,
-              layers: removeLayerRef(entry.layers, input.objectType, input.objectId),
+              layers: removeLayerRef(entry.layers, input.objectType, input.objectId).filter(
+                (layer) =>
+                  !(
+                    layer.startsWith("element:") &&
+                    removedElementIds.has(layer.slice("element:".length))
+                  ),
+              ),
             };
             return {
               ...nextPage,

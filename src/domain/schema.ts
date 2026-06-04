@@ -138,6 +138,13 @@ export const textItemSchema = z.object({
 
 export const elementCategorySchema = z.enum(["text", "symbols", "artWords", "effects", "balloons"]);
 
+export const mosaicOverlaySchema = z.object({
+  panelId: z.string(),
+  cellSize: z.number().positive().default(18),
+  pixelSize: z.number().positive().default(18),
+  cells: z.array(pointSchema).min(1),
+});
+
 export const elementItemSchema = z.object({
   id: z.string(),
   x: z.number(),
@@ -149,6 +156,7 @@ export const elementItemSchema = z.object({
   title: z.string(),
   category: elementCategorySchema.default("symbols"),
   opacity: z.number().min(0).max(1).default(1),
+  mosaic: mosaicOverlaySchema.optional(),
 });
 
 export const objectRefSchema = z.object({
@@ -272,6 +280,7 @@ export type Panel = z.infer<typeof panelSchema>;
 export type TextDirection = z.infer<typeof textDirectionSchema>;
 export type TextItem = z.infer<typeof textItemSchema>;
 export type ElementCategory = z.infer<typeof elementCategorySchema>;
+export type MosaicOverlay = z.infer<typeof mosaicOverlaySchema>;
 export type ElementItem = z.infer<typeof elementItemSchema>;
 export type ObjectRef = z.infer<typeof objectRefSchema>;
 export type Group = z.infer<typeof groupSchema>;

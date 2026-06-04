@@ -171,8 +171,8 @@ describe("text layout", () => {
     expect(/[\u2014\u2015\u2026]/u.test(output)).toBe(false);
   });
 
-  it("renders corner brackets and parentheses as vertical glyphs in vertical text", () => {
-    const output = layoutTextForDisplayContent("\u300c\u7532\u300d\u300e\u4e59\u300f\uff08\u4e19\uff09", {
+  it("renders corner, lenticular, and parentheses brackets as vertical glyphs in vertical text", () => {
+    const output = layoutTextForDisplayContent("\u300c\u7532\u300d\u300e\u4e59\u300f\u3010\u4e2d\u548c\u3011\uff08\u4e19\uff09", {
       direction: "vertical",
       maxWidth: 8,
       maxHeight: 20,
@@ -185,9 +185,11 @@ describe("text layout", () => {
     expect(output).toContain("\uFE42");
     expect(output).toContain("\uFE43");
     expect(output).toContain("\uFE44");
+    expect(output).toContain("\uFE3B");
+    expect(output).toContain("\uFE3C");
     expect(output).toContain("\uFE35");
     expect(output).toContain("\uFE36");
-    expect(/[\u300c\u300d\u300e\u300f\uFF08\uFF09()]/u.test(output)).toBe(false);
+    expect(/[\u300c\u300d\u300e\u300f\u3010\u3011\uFF08\uFF09()]/u.test(output)).toBe(false);
   });
 
   it("normalizes quote marks to manga corner quotes", () => {

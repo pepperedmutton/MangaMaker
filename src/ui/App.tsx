@@ -18,7 +18,11 @@ import {
   hasLocalDraft,
   saveLocalDraftBeforeUnload,
 } from "../storage/localDraft";
-import { persistImportedImageForProject } from "../storage/projectFiles";
+import {
+  persistImportedImageForProject,
+  subscribeToProjectDraftUpdates,
+} from "../storage/projectFiles";
+import { applyProjectDraftUpdateToOpenEditor } from "../storage/projectLiveUpdates";
 import { useEditorStore } from "../state/editorStore";
 import type { ToolMode } from "../state/types";
 import { AgentSidebar } from "./AgentSidebar";
@@ -297,6 +301,16 @@ export const App = () => {
   useEffect(() => {
     installAutomationApi();
   }, []);
+
+  useEffect(
+    () =>
+      subscribeToProjectDraftUpdates((event) => {
+        void applyProjectDraftUpdateToOpenEditor(event).catch((error) => {
+          console.warn("Failed to apply live project draft update:", error);
+        });
+      }),
+    [],
+  );
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -732,6 +746,11 @@ export const App = () => {
 
       if (!usesModifier && key === "m") {
         void executeCommand("setTool", { tool: "element" });
+        return;
+      }
+
+      if (!usesModifier && key === "x") {
+        void executeCommand("setTool", { tool: "mosaic" });
         return;
       }
 

@@ -127,6 +127,9 @@ describe("localDraft persistence", () => {
         localStorage,
       },
     });
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error("network blocked");
+    }) as typeof fetch;
   });
 
   afterEach(() => {

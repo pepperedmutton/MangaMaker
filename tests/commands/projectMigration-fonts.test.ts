@@ -5,7 +5,7 @@ import { DEFAULT_TEXT_FONT_FAMILY } from "../../src/platform/localFonts";
 import { normalizeProjectForCurrentVersion } from "../../src/storage/projectMigration";
 
 describe("projectMigration font normalization", () => {
-  it("forces existing text items to the curated default font family", () => {
+  it("preserves supported text fonts and falls back for unsupported fonts", () => {
     const rawProject = {
       id: "project-1",
       title: "Fonts",
@@ -46,7 +46,7 @@ describe("projectMigration font normalization", () => {
               height: 220,
               content: "B",
               fontSize: 30,
-              fontFamily: "Noto Serif SC",
+              fontFamily: "LXGW WenKai",
               fontWeight: 400,
               letterSpacing: 0,
               lineSpacing: 0,
@@ -69,7 +69,7 @@ describe("projectMigration font normalization", () => {
 
     expect(normalized.pages[0].texts.map((text) => text.fontFamily)).toEqual([
       DEFAULT_TEXT_FONT_FAMILY,
-      DEFAULT_TEXT_FONT_FAMILY,
+      "LXGW WenKai",
     ]);
   });
 
@@ -166,5 +166,50 @@ describe("projectMigration font normalization", () => {
     expect(bubble.backgroundColor).toBe("rgba(255, 255, 255, 0.8)");
     expect(bubble.strokeColor).toBe("transparent");
     expect(bubble.strokeWidth).toBe(0);
+  });
+
+  it("fills missing legacy page and panel geometry before schema parsing", () => {
+    const rawProject = {
+      id: "project-legacy-geometry",
+      title: "Legacy Geometry",
+      type: "manga",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      pages: [
+        {
+          id: "page-1",
+          name: "Page 1",
+          panels: [
+            {
+              id: "panel-1",
+            },
+          ],
+          texts: [],
+          bubbles: [],
+          groups: [],
+          layers: ["panel:panel-1"],
+        },
+      ],
+    };
+
+    const normalized = projectSchema.parse(normalizeProjectForCurrentVersion(rawProject));
+    const page = normalized.pages[0];
+    const panel = page.panels[0];
+
+    expect(page.width).toBe(1200);
+    expect(page.height).toBe(1700);
+    expect(panel).toMatchObject({
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 1700,
+      rotation: 0,
+      style: {
+        fill: "#fffdf8",
+        stroke: "#111111",
+        strokeWidth: 4,
+        cornerRadius: 12,
+      },
+    });
   });
 });

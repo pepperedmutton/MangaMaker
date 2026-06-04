@@ -133,6 +133,7 @@ const AGENT_RUN_FILE = "run.json";
 const AGENT_RUN_TOOL_RESULTS_DIR = "tool-results";
 const API_BASE = "/__mangamaker__/persistence";
 const AGENT_API_BASE = "/__mangamaker__/agent";
+const PERSISTENCE_CLIENT_ID_HEADER = "x-mangamaker-client-id";
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const AGENT_TEST_MODE = process.env.MANGAMAKER_AGENT_TEST_MODE === "1";
@@ -227,6 +228,17 @@ const ALLOWED_HOSTS = Array.from(
     ...envAllowedHosts,
   ]),
 );
+const SERVER_WATCH_IGNORED = [
+  "**/.codex_tmp/**",
+  "**/.mangamaker_runtime/**",
+  "**/.tmp*/**",
+  "**/dist/**",
+  "**/projects/**",
+  "**/projects_backup_*/**",
+  "**/src/assets/fonts/**",
+  "**/src-tauri/target/**",
+  "**/test-results/**",
+];
 
 const sanitizePathComponent = (value: string, fallback: string) => {
   const sanitized = value
@@ -237,10 +249,18 @@ const sanitizePathComponent = (value: string, fallback: string) => {
   return sanitized.length > 0 ? sanitized : fallback;
 };
 
-const ensureProjectsRoot = async () => {
+const ensureProjectsRoot = () => {
   const root = path.resolve(process.cwd(), PROJECTS_DIR_NAME);
-  await fsp.mkdir(root, { recursive: true });
+  fs.mkdirSync(root, { recursive: true });
   return root;
+};
+
+const statSyncOrNull = (filePath: string) => {
+  try {
+    return fs.statSync(filePath);
+  } catch {
+    return null;
+  }
 };
 
 const readProjectIdFromDir = async (projectDir: string) => {
@@ -657,6 +677,38 @@ const readJsonBody = async <T>(req: IncomingMessage): Promise<T> => {
     throw new Error("Empty request body");
   }
   return JSON.parse(raw) as T;
+};
+
+type ProjectDraftWrittenEvent = {
+  type: "projectDraftWritten";
+  project_id: string;
+  path: string;
+  updated_at: string;
+  origin_client_id?: string;
+};
+
+type PersistenceEventClient = {
+  id: number;
+  res: ServerResponse;
+};
+
+const writePersistenceSseEvent = (res: ServerResponse, eventName: string, payload: unknown) => {
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+};
+
+const broadcastProjectDraftEvent = (
+  clients: Set<PersistenceEventClient>,
+  event: ProjectDraftWrittenEvent,
+) => {
+  for (const client of clients) {
+    try {
+      writePersistenceSseEvent(client.res, event.type, event);
+    } catch {
+      clients.delete(client);
+      client.res.end();
+    }
+  }
 };
 
 const writeFileAtomically = async (filePath: string, contents: string) => {
@@ -8840,6 +8892,7 @@ const renderPasswordLoginPage = (nextPath: string, errorMessage?: string | null)
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MangaMaker 闂備浇鐨崱鈺佹缂?/title>
+    </title>
     <style>
       :root {
         color-scheme: light;
@@ -8911,12 +8964,91 @@ const renderPasswordLoginPage = (nextPath: string, errorMessage?: string | null)
     <main class="auth-card">
       <h1>MangaMaker</h1>
       <p>闂佽崵濮村ú銊╁蓟婢跺本顐芥い鎾卞灩缁€鍌炴煏婢舵鍘涢柛鐔风箻濮婂宕掗妶鍛亪闂佷紮闄勯崹鍧楀箚?/p>
+      </p>
       ${errorBlock}
       <form method="post" action="${AUTH_LOGIN_PATH}">
         <input type="hidden" name="next" value="${escapedNext}" />
         <label for="password">闂佽閰ｅ褍螞濞戙垺鍋?/label>
+        </label>
         <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
         <button type="submit">闂備浇鐨崱鈺佹缂?/button>
+        </button>
+      </form>
+    </main>
+  </body>
+</html>`;
+};
+
+const renderPasswordLoginPageSafe = (nextPath: string, errorMessage?: string | null) => {
+  const errorBlock = errorMessage
+    ? `<p class="auth-error">${escapeHtml(errorMessage)}</p>`
+    : "";
+  const escapedNext = escapeHtml(nextPath);
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MangaMaker Login</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: "Source Han Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: radial-gradient(circle at 20% 20%, #efe9dc 0%, #e1d3bd 48%, #cfb18c 100%);
+        color: #2d241b;
+      }
+      .auth-card {
+        width: min(420px, calc(100vw - 32px));
+        padding: 28px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 18px 42px rgba(45, 36, 27, 0.22);
+      }
+      h1 { margin: 0 0 6px; font-size: 26px; }
+      p { margin: 0 0 18px; color: #5c4a3a; }
+      label { display: block; margin: 0 0 10px; font-weight: 600; }
+      input[type="password"] {
+        width: 100%;
+        border: 1px solid #b89a7b;
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 16px;
+        outline: none;
+      }
+      input[type="password"]:focus {
+        border-color: #8f5b2f;
+        box-shadow: 0 0 0 2px rgba(143, 91, 47, 0.15);
+      }
+      button {
+        margin-top: 14px;
+        width: 100%;
+        border: 0;
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 16px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(135deg, #8f5b2f, #6f4a2c);
+        cursor: pointer;
+      }
+      .auth-error { margin: 0 0 12px; color: #b42318; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main class="auth-card">
+      <h1>MangaMaker</h1>
+      <p>Enter the MangaMaker access password to continue.</p>
+      ${errorBlock}
+      <form method="post" action="${AUTH_LOGIN_PATH}">
+        <input type="hidden" name="next" value="${escapedNext}" />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
+        <button type="submit">Log in</button>
       </form>
     </main>
   </body>
@@ -9027,7 +9159,7 @@ const attachWebAuthMiddleware = (
         redirect(res, normalizeNextPath(url.searchParams.get("next")));
         return;
       }
-      text(res, 200, renderPasswordLoginPage(normalizeNextPath(url.searchParams.get("next"))));
+      text(res, 200, renderPasswordLoginPageSafe(normalizeNextPath(url.searchParams.get("next"))));
       return;
     }
 
@@ -9048,7 +9180,7 @@ const attachWebAuthMiddleware = (
         json(res, 401, { error: "Invalid password" });
         return;
       }
-      text(res, 401, renderPasswordLoginPage(nextPath, "Invalid password, try again."));
+      text(res, 401, renderPasswordLoginPageSafe(nextPath, "Invalid password, try again."));
       return;
     }
 
@@ -9090,6 +9222,19 @@ const attachWebPersistenceMiddleware = (
   middlewares: { use: (handler: (req: IncomingMessage, res: ServerResponse, next: () => void) => void) => void },
   closeHandlers: Array<() => void>,
 ) => {
+  const eventClients = new Set<PersistenceEventClient>();
+  let nextEventClientId = 1;
+  const keepAliveInterval = setInterval(() => {
+    for (const client of eventClients) {
+      try {
+        writePersistenceSseEvent(client.res, "ping", { at: new Date().toISOString() });
+      } catch {
+        eventClients.delete(client);
+        client.res.end();
+      }
+    }
+  }, 25000);
+
   const handler = async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
     const method = req.method?.toUpperCase() ?? "GET";
     const host = req.headers.host;
@@ -9114,6 +9259,10 @@ const attachWebPersistenceMiddleware = (
         const stream = fs.createReadStream(candidate);
         res.statusCode = 200;
         res.setHeader("Content-Type", inferContentType(candidate));
+        res.setHeader("Content-Length", String(stats.size));
+        if (candidate.includes(`${path.sep}${PROJECT_ASSETS_DIR}${path.sep}`)) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        }
         stream.pipe(res);
         return;
       }
@@ -9124,6 +9273,31 @@ const attachWebPersistenceMiddleware = (
       }
 
       const root = await ensureProjectsRoot();
+
+      if (method === "GET" && pathname === `${API_BASE}/events`) {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders?.();
+
+        const client: PersistenceEventClient = {
+          id: nextEventClientId++,
+          res,
+        };
+        eventClients.add(client);
+        writePersistenceSseEvent(res, "ready", {
+          type: "ready",
+          client_id: url.searchParams.get("client_id") ?? "",
+          at: new Date().toISOString(),
+        });
+
+        req.on("close", () => {
+          eventClients.delete(client);
+        });
+        return;
+      }
 
       if (method === "GET" && pathname === `${API_BASE}/health`) {
         json(res, 200, { ok: true });
@@ -9188,6 +9362,7 @@ const attachWebPersistenceMiddleware = (
           project_id: string;
           project_title?: string;
           project_json: string;
+          client_id?: string;
         }>(req);
         let titleFromJson = "";
         try {
@@ -9211,50 +9386,74 @@ const attachWebPersistenceMiddleware = (
         const normalizedProjectJson = normalizeProjectAssetPaths(payload.project_json, projectFolder);
         await fsp.writeFile(path.join(projectDir, PROJECT_JSON_FILE), normalizedProjectJson, "utf8");
         await fsp.writeFile(path.join(root, PROJECT_META_FILE), projectFolder, "utf8");
-        json(res, 200, { path: `/projects/${projectFolder}/${PROJECT_JSON_FILE}` });
+        const publicPath = `/projects/${projectFolder}/${PROJECT_JSON_FILE}`;
+        const originClientId =
+          getRequestHeader(req, PERSISTENCE_CLIENT_ID_HEADER).trim() ||
+          (typeof payload.client_id === "string" ? payload.client_id.trim() : "");
+        broadcastProjectDraftEvent(eventClients, {
+          type: "projectDraftWritten",
+          project_id: payload.project_id,
+          path: publicPath,
+          updated_at: new Date().toISOString(),
+          ...(originClientId ? { origin_client_id: originClientId } : {}),
+        });
+        json(res, 200, { path: publicPath });
         return;
       }
 
       if (method === "GET" && pathname === `${API_BASE}/read_project_draft`) {
-        const metaFile = path.join(root, PROJECT_META_FILE);
-        const metaExists = await fsp.stat(metaFile).catch(() => null);
-        if (!metaExists?.isFile()) {
-          json(res, 200, { project_json: null });
-          return;
+        const requestedProjectId = url.searchParams.get("project_id")?.trim() ?? "";
+        let folder: string;
+        let projectFile: string;
+        if (requestedProjectId) {
+          const projectDir = await findProjectDirById(root, requestedProjectId);
+          if (!projectDir) {
+            json(res, 200, { project_json: null });
+            return;
+          }
+          folder = path.basename(projectDir);
+          projectFile = path.join(projectDir, PROJECT_JSON_FILE);
+        } else {
+          const metaFile = path.join(root, PROJECT_META_FILE);
+          const metaExists = statSyncOrNull(metaFile);
+          if (!metaExists?.isFile()) {
+            json(res, 200, { project_json: null });
+            return;
+          }
+          const latestProject = fs.readFileSync(metaFile, "utf8").trim();
+          folder = sanitizePathComponent(latestProject, "project");
+          projectFile = path.join(root, folder, PROJECT_JSON_FILE);
         }
-        const latestProject = (await fsp.readFile(metaFile, "utf8")).trim();
-        const folder = sanitizePathComponent(latestProject, "project");
-        const projectFile = path.join(root, folder, PROJECT_JSON_FILE);
-        const projectExists = await fsp.stat(projectFile).catch(() => null);
+        const projectExists = statSyncOrNull(projectFile);
         if (!projectExists?.isFile()) {
           json(res, 200, { project_json: null });
           return;
         }
-        const projectJson = await fsp.readFile(projectFile, "utf8");
+        const projectJson = fs.readFileSync(projectFile, "utf8");
         const normalizedProjectJson = normalizeProjectAssetPaths(projectJson, folder);
         if (normalizedProjectJson !== projectJson) {
-          await fsp.writeFile(projectFile, normalizedProjectJson, "utf8");
+          fs.writeFileSync(projectFile, normalizedProjectJson, "utf8");
         }
         json(res, 200, { project_json: normalizedProjectJson });
         return;
       }
 
       if (method === "GET" && pathname === `${API_BASE}/list_project_drafts`) {
-        const entries = await fsp.readdir(root, { withFileTypes: true });
+        const entries = fs.readdirSync(root, { withFileTypes: true });
         const drafts: Array<{ modifiedAt: number; projectJson: string }> = [];
         for (const entry of entries) {
           if (!entry.isDirectory()) {
             continue;
           }
           const projectFile = path.join(root, entry.name, PROJECT_JSON_FILE);
-          const stats = await fsp.stat(projectFile).catch(() => null);
+          const stats = statSyncOrNull(projectFile);
           if (!stats?.isFile()) {
             continue;
           }
-          const projectJson = await fsp.readFile(projectFile, "utf8");
+          const projectJson = fs.readFileSync(projectFile, "utf8");
           const normalizedProjectJson = normalizeProjectAssetPaths(projectJson, entry.name);
           if (normalizedProjectJson !== projectJson) {
-            await fsp.writeFile(projectFile, normalizedProjectJson, "utf8");
+            fs.writeFileSync(projectFile, normalizedProjectJson, "utf8");
           }
           drafts.push({ modifiedAt: stats.mtimeMs, projectJson: normalizedProjectJson });
         }
@@ -9316,7 +9515,11 @@ const attachWebPersistenceMiddleware = (
 
   middlewares.use(handler);
   closeHandlers.push(() => {
-    // connect does not expose remove; process lifetime cleanup is sufficient.
+    clearInterval(keepAliveInterval);
+    for (const client of eventClients) {
+      client.res.end();
+    }
+    eventClients.clear();
   });
 };
 
@@ -9362,6 +9565,9 @@ export default defineConfig({
   plugins: [react(), webAuthPlugin(), webAgentPlugin(), webPersistencePlugin()],
   server: {
     allowedHosts: ALLOWED_HOSTS,
+    watch: {
+      ignored: SERVER_WATCH_IGNORED,
+    },
   },
   preview: {
     allowedHosts: ALLOWED_HOSTS,

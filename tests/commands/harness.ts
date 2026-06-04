@@ -3,6 +3,7 @@ import {
   createBlankProject,
   DEFAULT_TEXT_INSERT_DEFAULTS,
   DEFAULT_ZOOM,
+  MOSAIC_PIXEL_SIZE,
 } from "../../src/domain/defaults";
 import type { Project } from "../../src/domain/schema";
 import type { EditorSessionState, HistoryEntry } from "../../src/state/types";
@@ -22,6 +23,9 @@ export const createHarness = () => {
       mode: "preset",
       presetBubbleType: "round",
       customSmoothness: 0.45,
+    },
+    mosaicInsert: {
+      pixelSize: MOSAIC_PIXEL_SIZE,
     },
     zoom: DEFAULT_ZOOM,
     lastExport: null,

@@ -15,6 +15,9 @@ import {
   CG_PAGE_HEIGHT,
   CG_PAGE_WIDTH,
   GRID_SIZE,
+  MOSAIC_BRUSH_RADIUS,
+  MOSAIC_CELL_SIZE,
+  MOSAIC_PIXEL_SIZE,
   createDefaultBubble,
 } from "../domain/defaults";
 import {
@@ -25,11 +28,13 @@ import {
   clampPanelRectToWorkspace,
   clampTextBoxMoveToWorkspace,
   getBubbleBasePoints,
+  getMosaicBounds,
   getPageWorkspace,
   getPanelAbsolutePoints,
   getRenderableLayers,
   getSelectedObject,
   getBubbleTailBaseLocalPoint,
+  isMosaicElement,
   isPointInPolygon,
   panImageViewBox,
   preservePanelImageViewBox,
@@ -128,6 +133,15 @@ type MarqueeDragState = {
   startY: number;
   x: number;
   y: number;
+} | null;
+
+type MosaicDraftState = {
+  panelId: string;
+  cellSize: number;
+  pixelSize: number;
+  brushRadius: number;
+  cells: Point[];
+  lastPoint: Point;
 } | null;
 
 type SmartGuideState = {
@@ -272,6 +286,7 @@ const useImageElement = (src: string | null | undefined) => {
 
     let active = true;
     const nextImage = new window.Image();
+    nextImage.decoding = "async";
     nextImage.onload = () => {
       if (active) {
         setImage(nextImage);
@@ -286,6 +301,71 @@ const useImageElement = (src: string | null | undefined) => {
 
   return image;
 };
+
+const usePixelatedPanelCanvas = (
+  panel: Pick<Panel, "width" | "height" | "image">,
+  image: HTMLImageElement | null,
+  pixelSize: number,
+) => {
+  const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    if (!image || !panel.image) {
+      setCanvas(null);
+      return;
+    }
+
+    const width = Math.max(1, Math.ceil(panel.width));
+    const height = Math.max(1, Math.ceil(panel.height));
+    const resolvedPixelSize = Math.max(1, pixelSize);
+    const lowWidth = Math.max(1, Math.ceil(width / resolvedPixelSize));
+    const lowHeight = Math.max(1, Math.ceil(height / resolvedPixelSize));
+    const lowCanvas = document.createElement("canvas");
+    lowCanvas.width = lowWidth;
+    lowCanvas.height = lowHeight;
+    const lowContext = lowCanvas.getContext("2d");
+    const pixelCanvas = document.createElement("canvas");
+    pixelCanvas.width = width;
+    pixelCanvas.height = height;
+    const pixelContext = pixelCanvas.getContext("2d");
+
+    if (!lowContext || !pixelContext) {
+      setCanvas(null);
+      return;
+    }
+
+    const { viewBox } = panel.image;
+    lowContext.drawImage(
+      image,
+      viewBox.x,
+      viewBox.y,
+      viewBox.width,
+      viewBox.height,
+      0,
+      0,
+      lowWidth,
+      lowHeight,
+    );
+    pixelContext.imageSmoothingEnabled = false;
+    pixelContext.drawImage(lowCanvas, 0, 0, width, height);
+    setCanvas(pixelCanvas);
+  }, [
+    image,
+    panel.image,
+    panel.image?.viewBox.x,
+    panel.image?.viewBox.y,
+    panel.image?.viewBox.width,
+    panel.image?.viewBox.height,
+    panel.width,
+    panel.height,
+    pixelSize,
+  ]);
+
+  return canvas;
+};
+
+const getMosaicPixelSize = (mosaic: NonNullable<ElementItem["mosaic"]>) =>
+  mosaic.pixelSize ?? mosaic.cellSize ?? MOSAIC_PIXEL_SIZE;
 
 const getPointFromEvent = (
   event: KonvaEventObject<MouseEvent>,
@@ -522,6 +602,93 @@ const getPanelImageRenderMetrics = (
   };
 };
 
+const normalizeMosaicCoordinate = (value: number) => Math.round(value * 1000) / 1000;
+
+const mosaicCellKey = (cell: Point) =>
+  `${normalizeMosaicCoordinate(cell.x)}:${normalizeMosaicCoordinate(cell.y)}`;
+
+const dedupeMosaicCells = (cells: Point[]) => {
+  const byKey = new Map<string, Point>();
+  for (const cell of cells) {
+    if (!Number.isFinite(cell.x) || !Number.isFinite(cell.y)) {
+      continue;
+    }
+    byKey.set(mosaicCellKey(cell), {
+      x: normalizeMosaicCoordinate(cell.x),
+      y: normalizeMosaicCoordinate(cell.y),
+    });
+  }
+  return [...byKey.values()].sort((left, right) => left.y - right.y || left.x - right.x);
+};
+
+const getMosaicCellsForPoint = (
+  panel: Panel,
+  point: Point,
+  cellSize: number,
+  brushRadius: number,
+) => {
+  const absolutePoints = getPanelAbsolutePoints(panel);
+  const minX = Math.floor((point.x - brushRadius) / cellSize) * cellSize;
+  const maxX = Math.floor((point.x + brushRadius) / cellSize) * cellSize;
+  const minY = Math.floor((point.y - brushRadius) / cellSize) * cellSize;
+  const maxY = Math.floor((point.y + brushRadius) / cellSize) * cellSize;
+  const cells: Point[] = [];
+
+  for (let y = minY; y <= maxY; y += cellSize) {
+    for (let x = minX; x <= maxX; x += cellSize) {
+      const center = {
+        x: x + cellSize * 0.5,
+        y: y + cellSize * 0.5,
+      };
+      if (Math.hypot(center.x - point.x, center.y - point.y) > brushRadius) {
+        continue;
+      }
+      if (!isPointInPolygon(center, absolutePoints)) {
+        continue;
+      }
+      cells.push({
+        x: normalizeMosaicCoordinate(x),
+        y: normalizeMosaicCoordinate(y),
+      });
+    }
+  }
+
+  return cells;
+};
+
+const getMosaicCellsForSegment = (
+  panel: Panel,
+  fromPoint: Point,
+  toPoint: Point,
+  cellSize: number,
+  brushRadius: number,
+) => {
+  const distance = Math.hypot(toPoint.x - fromPoint.x, toPoint.y - fromPoint.y);
+  const stepCount = Math.max(1, Math.ceil(distance / Math.max(1, cellSize * 0.45)));
+  const cells: Point[] = [];
+  for (let index = 0; index <= stepCount; index += 1) {
+    const ratio = index / stepCount;
+    cells.push(
+      ...getMosaicCellsForPoint(
+        panel,
+        {
+          x: fromPoint.x + (toPoint.x - fromPoint.x) * ratio,
+          y: fromPoint.y + (toPoint.y - fromPoint.y) * ratio,
+        },
+        cellSize,
+        brushRadius,
+      ),
+    );
+  }
+  return dedupeMosaicCells(cells);
+};
+
+const findTopImagePanelAtPoint = (page: Page, point: Point) =>
+  getRenderableLayers(page)
+    .flatMap((entry) => (entry.objectType === "panel" && entry.object.image ? [entry.object] : []))
+    .reverse()
+    .find((panel) => isPointInPolygon(point, getPanelAbsolutePoints(panel))) ?? null;
+
 const CanvasContextMenu = ({
   title,
   actions,
@@ -671,8 +838,8 @@ const ResizeHandles = ({
     }
 
     // Enforce minimum size
-    newWidth = Math.max(20, newWidth);
-    newHeight = Math.max(20, newHeight);
+    newWidth = Math.max(1, newWidth);
+    newHeight = Math.max(1, newHeight);
 
     // Calculate new x, y to maintain center
     const newX = centerX - newWidth / 2;
@@ -687,7 +854,7 @@ const ResizeHandles = ({
     pointerY: number,
     baseRect: typeof rect,
   ) => {
-    const minimumSize = 20;
+    const minimumSize = 1;
     const pageX = pointerX / scale;
     const pageY = pointerY / scale;
     const left = baseRect.x;
@@ -1067,9 +1234,296 @@ const SelectedPanelImagePreview = ({
   );
 };
 
+const MosaicCellsOverlay = ({
+  panel,
+  cells,
+  cellSize,
+  scale,
+  opacity,
+  pixelatedImage,
+  listening = false,
+}: {
+  panel: Panel;
+  cells: Point[];
+  cellSize: number;
+  scale: number;
+  opacity: number;
+  pixelatedImage: HTMLCanvasElement | null;
+  listening?: boolean;
+}) => (
+  <Group
+    listening={listening}
+    clipFunc={(ctx) => {
+      ctx.beginPath();
+      for (const cell of cells) {
+        ctx.rect(
+          (cell.x - panel.x) * scale,
+          (cell.y - panel.y) * scale,
+          cellSize * scale,
+          cellSize * scale,
+        );
+      }
+      ctx.closePath();
+    }}
+  >
+    {pixelatedImage ? (
+      <KonvaImage
+        image={pixelatedImage}
+        x={0}
+        y={0}
+        width={panel.width * scale}
+        height={panel.height * scale}
+        opacity={opacity}
+        listening={false}
+      />
+    ) : (
+      cells.map((cell) => (
+        <Rect
+          key={mosaicCellKey(cell)}
+          x={(cell.x - panel.x) * scale}
+          y={(cell.y - panel.y) * scale}
+          width={cellSize * scale}
+          height={cellSize * scale}
+          fill="rgba(170,170,170,0.72)"
+          listening={false}
+        />
+      ))
+    )}
+  </Group>
+);
+
+const MosaicElementNode = ({
+  page,
+  panel,
+  item,
+  scale,
+  selected,
+  highlighted,
+  image,
+  onOpenContextMenu,
+}: {
+  page: Page;
+  panel: Panel;
+  item: ElementItem & { mosaic: NonNullable<ElementItem["mosaic"]> };
+  scale: number;
+  selected: boolean;
+  highlighted: boolean;
+  image: HTMLImageElement | null;
+  onOpenContextMenu: (
+    event: KonvaEventObject<MouseEvent>,
+    target: ContextMenuTarget,
+  ) => void;
+}) => {
+  const executeCommand = useEditorStore((state) => state.executeCommand);
+  const activeTool = useEditorStore((state) => state.activeTool);
+  const multiSelection = useEditorStore((state) => state.multiSelection);
+  const [liveDragOffset, setLiveDragOffset] = useState<Point | null>(null);
+  const liveDragOffsetRef = useRef<Point | null>(null);
+  const dragStartPointerRef = useRef<Point | null>(null);
+  const displayCells = useMemo(
+    () =>
+      liveDragOffset
+        ? item.mosaic.cells.map((cell) => ({
+            x: cell.x + liveDragOffset.x,
+            y: cell.y + liveDragOffset.y,
+          }))
+        : item.mosaic.cells,
+    [item.mosaic.cells, liveDragOffset],
+  );
+  const displayMosaic = useMemo(
+    () => ({
+      ...item.mosaic,
+      cells: displayCells,
+    }),
+    [displayCells, item.mosaic],
+  );
+  const bounds = getMosaicBounds(displayMosaic);
+  const localBounds = {
+    x: bounds.x - panel.x,
+    y: bounds.y - panel.y,
+    width: bounds.width,
+    height: bounds.height,
+  };
+  const isHighlighted = highlighted || selected;
+  const isInMultiSelection = multiSelection.some(
+    (entry) =>
+      entry.pageId === page.id &&
+      entry.objectType === "element" &&
+      entry.objectId === item.id,
+  );
+  const pixelatedImage = usePixelatedPanelCanvas(panel, image, getMosaicPixelSize(item.mosaic));
+
+  useEffect(() => {
+    setLiveDragOffset(null);
+    liveDragOffsetRef.current = null;
+    dragStartPointerRef.current = null;
+  }, [item.id]);
+
+  const handleSelect = (event: KonvaEventObject<MouseEvent>) => {
+    event.cancelBubble = true;
+    if (event.evt.shiftKey) {
+      const currentPageSelection = multiSelection
+        .filter((entry) => entry.pageId === page.id)
+        .map((entry) => ({
+          objectType: entry.objectType,
+          objectId: entry.objectId,
+        }));
+      const alreadySelected = currentPageSelection.some(
+        (entry) => entry.objectType === "element" && entry.objectId === item.id,
+      );
+      const nextObjects = alreadySelected
+        ? currentPageSelection.filter(
+            (entry) => !(entry.objectType === "element" && entry.objectId === item.id),
+          )
+        : [
+            ...currentPageSelection,
+            {
+              objectType: "element" as const,
+              objectId: item.id,
+            },
+          ];
+      if (nextObjects.length === 0) {
+        void executeCommand("clearSelection", {});
+      } else {
+        void executeCommand("selectObjects", {
+          pageId: page.id,
+          objects: nextObjects,
+        });
+      }
+      return;
+    }
+    void executeCommand("selectObject", {
+      pageId: page.id,
+      objectType: "element",
+      objectId: item.id,
+    });
+  };
+
+  return (
+    <Group
+      draggable={activeTool === "select"}
+      onClick={handleSelect}
+      onContextMenu={(event) => {
+        event.cancelBubble = true;
+        if (!isInMultiSelection) {
+          void executeCommand("selectObject", {
+            pageId: page.id,
+            objectType: "element",
+            objectId: item.id,
+          });
+        }
+        onOpenContextMenu(event, {
+          kind: "element",
+          elementId: item.id,
+        });
+      }}
+      onDragStart={(event) => {
+        event.cancelBubble = true;
+        event.target.position({ x: 0, y: 0 });
+        const pointer = event.target.getStage()?.getPointerPosition() ?? null;
+        dragStartPointerRef.current = pointer
+          ? {
+              x: pointer.x,
+              y: pointer.y,
+            }
+          : null;
+        liveDragOffsetRef.current = { x: 0, y: 0 };
+        setLiveDragOffset({ x: 0, y: 0 });
+        if (!selected) {
+          void executeCommand("selectObject", {
+            pageId: page.id,
+            objectType: "element",
+            objectId: item.id,
+          });
+        }
+      }}
+      onDragMove={(event) => {
+        event.cancelBubble = true;
+        const pointer = event.target.getStage()?.getPointerPosition() ?? null;
+        const dragStartPointer = dragStartPointerRef.current;
+        const requestedDelta =
+          pointer && dragStartPointer
+            ? {
+                x: (pointer.x - dragStartPointer.x) / scale,
+                y: (pointer.y - dragStartPointer.y) / scale,
+              }
+            : {
+                x: event.target.x() / scale,
+                y: event.target.y() / scale,
+              };
+        const requestedX = item.x + requestedDelta.x;
+        const requestedY = item.y + requestedDelta.y;
+        const nextRect = clampElementMoveRectToWorkspace(page, {
+          x: requestedX,
+          y: requestedY,
+          width: item.width,
+          height: item.height,
+        });
+        const nextOffset = {
+          x: nextRect.x - item.x,
+          y: nextRect.y - item.y,
+        };
+        liveDragOffsetRef.current = nextOffset;
+        setLiveDragOffset(nextOffset);
+        event.target.position({ x: 0, y: 0 });
+      }}
+      onDragEnd={(event) => {
+        event.cancelBubble = true;
+        const finalOffset = liveDragOffsetRef.current ?? {
+          x: event.target.x() / scale,
+          y: event.target.y() / scale,
+        };
+        const nextX = item.x + finalOffset.x;
+        const nextY = item.y + finalOffset.y;
+        liveDragOffsetRef.current = null;
+        dragStartPointerRef.current = null;
+        setLiveDragOffset(null);
+        event.target.position({ x: 0, y: 0 });
+        void executeCommand("updateElement", {
+          pageId: page.id,
+          elementId: item.id,
+          x: nextX,
+          y: nextY,
+        });
+      }}
+    >
+      <Rect
+        x={localBounds.x * scale}
+        y={localBounds.y * scale}
+        width={localBounds.width * scale}
+        height={localBounds.height * scale}
+        fill="rgba(0,0,0,0.001)"
+      />
+      <MosaicCellsOverlay
+        panel={panel}
+        cells={displayCells}
+        cellSize={item.mosaic.cellSize}
+        scale={scale}
+        opacity={item.opacity}
+        pixelatedImage={pixelatedImage}
+      />
+      {isHighlighted ? (
+        <Rect
+          x={localBounds.x * scale}
+          y={localBounds.y * scale}
+          width={localBounds.width * scale}
+          height={localBounds.height * scale}
+          stroke="#c36d2f"
+          dash={[8, 6]}
+          strokeWidth={selected ? 2 : 1.5}
+          fillEnabled={false}
+          listening={false}
+        />
+      ) : null}
+    </Group>
+  );
+};
+
 const PanelNode = ({
   page,
   panel,
+  mosaics,
+  mosaicDraft,
   scale,
   selected,
   highlighted,
@@ -1079,6 +1533,8 @@ const PanelNode = ({
 }: {
   page: Page;
   panel: Panel;
+  mosaics: Array<ElementItem & { mosaic: NonNullable<ElementItem["mosaic"]> }>;
+  mosaicDraft: MosaicDraftState;
   scale: number;
   selected: boolean;
   highlighted: boolean;
@@ -1091,7 +1547,9 @@ const PanelNode = ({
 }) => {
   const executeCommand = useEditorStore((state) => state.executeCommand);
   const activeTool = useEditorStore((state) => state.activeTool);
+  const selection = useEditorStore((state) => state.selection);
   const multiSelection = useEditorStore((state) => state.multiSelection);
+  const mosaicInsert = useEditorStore((state) => state.mosaicInsert);
   const image = useImageElement(panel.image?.src);
   const { t } = useI18n();
   const isHighlighted = highlighted || selected;
@@ -1147,9 +1605,14 @@ const PanelNode = ({
               panel.image.viewBox,
             ),
           }
-        : null,
+      : null,
     };
   }, [liveRect, panel]);
+  const draftPixelatedImage = usePixelatedPanelCanvas(
+    displayPanel,
+    image,
+    mosaicDraft?.pixelSize ?? mosaicInsert.pixelSize ?? MOSAIC_PIXEL_SIZE,
+  );
   const displayPoints = livePoints ?? displayPanel.points;
   const displayRect = {
     x: displayPanel.x,
@@ -1511,6 +1974,40 @@ const PanelNode = ({
         >
           <Rect width={displayPanel.width * scale} height={displayPanel.height * scale} fill={panel.style.fill} />
           {!showImagePreview ? renderImage() : null}
+          {!showImagePreview
+            ? mosaics.map((mosaic) => (
+                <MosaicElementNode
+                  key={mosaic.id}
+                  page={page}
+                  panel={displayPanel}
+                  item={mosaic}
+                  scale={scale}
+                  selected={
+                    selection?.pageId === page.id &&
+                    selection.objectType === "element" &&
+                    selection.objectId === mosaic.id
+                  }
+                  highlighted={multiSelection.some(
+                    (entry) =>
+                      entry.pageId === page.id &&
+                      entry.objectType === "element" &&
+                      entry.objectId === mosaic.id,
+                  )}
+                  image={image}
+                  onOpenContextMenu={onOpenContextMenu}
+                />
+              ))
+            : null}
+          {!showImagePreview && mosaicDraft?.panelId === panel.id ? (
+            <MosaicCellsOverlay
+              panel={displayPanel}
+              cells={mosaicDraft.cells}
+              cellSize={mosaicDraft.cellSize}
+              scale={scale}
+              opacity={0.92}
+              pixelatedImage={draftPixelatedImage}
+            />
+          ) : null}
         </Group>
         {showImagePreview ? (
           <SelectedPanelImagePreview page={page} panel={displayPanel} scale={scale} image={image} />
@@ -3404,9 +3901,11 @@ export const CanvasView = ({
   const multiSelection = useEditorStore((state) => state.multiSelection);
   const activeTool = useEditorStore((state) => state.activeTool);
   const bubbleInsert = useEditorStore((state) => state.bubbleInsert);
+  const mosaicInsert = useEditorStore((state) => state.mosaicInsert);
   const zoom = useEditorStore((state) => state.zoom);
   const [draftShape, setDraftShape] = useState<DraftShape>(null);
   const [marqueeDrag, setMarqueeDrag] = useState<MarqueeDragState>(null);
+  const [mosaicDraft, setMosaicDraft] = useState<MosaicDraftState>(null);
   const [customBubblePoints, setCustomBubblePoints] = useState<Point[]>([]);
   const [customBubbleHoverPoint, setCustomBubbleHoverPoint] = useState<Point | null>(null);
   const [boundaryOverlayPreview, setBoundaryOverlayPreview] = useState<BoundaryOverlayPreview>(null);
@@ -3424,6 +3923,7 @@ export const CanvasView = ({
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const isCustomBubbleInsertMode =
     activeTool === "bubble" && bubbleInsert.mode === "customClickDraw";
+  const isMosaicMode = activeTool === "mosaic";
   const { t } = useI18n();
 
   useLayoutEffect(() => {
@@ -3520,6 +4020,7 @@ export const CanvasView = ({
 
   useEffect(() => {
     setMarqueeDrag(null);
+    setMosaicDraft(null);
     setCustomBubblePoints([]);
     setCustomBubbleHoverPoint(null);
   }, [page.id]);
@@ -3533,6 +4034,17 @@ export const CanvasView = ({
     setCustomBubblePoints([]);
     setCustomBubbleHoverPoint(null);
   }, [isCustomBubbleInsertMode]);
+
+  useEffect(() => {
+    if (isMosaicMode) {
+      setDraftShape(null);
+      setMarqueeDrag(null);
+      setCustomBubblePoints([]);
+      setCustomBubbleHoverPoint(null);
+      return;
+    }
+    setMosaicDraft(null);
+  }, [isMosaicMode]);
 
   useEffect(() => {
     if (!isActive || !isCustomBubbleInsertMode) {
@@ -4023,6 +4535,21 @@ export const CanvasView = ({
     });
   };
 
+  const finalizeMosaicDraft = async (draft: NonNullable<MosaicDraftState>) => {
+    const cells = dedupeMosaicCells(draft.cells);
+    setMosaicDraft(null);
+    if (cells.length === 0) {
+      return;
+    }
+    await executeCommand("createMosaic", {
+      pageId: page.id,
+      panelId: draft.panelId,
+      cellSize: draft.cellSize,
+      pixelSize: draft.pixelSize,
+      cells,
+    });
+  };
+
   const handleCanvasDown = async (event: KonvaEventObject<MouseEvent>) => {
     closeContextMenu();
     if (isCustomBubbleInsertMode) {
@@ -4051,6 +4578,29 @@ export const CanvasView = ({
     }
     const point = getPointFromEvent(event, scale, pageCanvasOrigin);
     if (!point) {
+      return;
+    }
+
+    if (isMosaicMode) {
+      const targetPanel = findTopImagePanelAtPoint(page, point);
+      if (!targetPanel) {
+        await executeCommand("clearSelection", {});
+        return;
+      }
+      const cells = getMosaicCellsForPoint(
+        targetPanel,
+        point,
+        MOSAIC_CELL_SIZE,
+        MOSAIC_BRUSH_RADIUS,
+      );
+      setMosaicDraft({
+        panelId: targetPanel.id,
+        cellSize: MOSAIC_CELL_SIZE,
+        pixelSize: mosaicInsert.pixelSize ?? MOSAIC_PIXEL_SIZE,
+        brushRadius: MOSAIC_BRUSH_RADIUS,
+        cells,
+        lastPoint: point,
+      });
       return;
     }
 
@@ -4092,6 +4642,13 @@ export const CanvasView = ({
 
   const handleCanvasContextMenu = (event: KonvaEventObject<MouseEvent>) => {
     setMarqueeDrag(null);
+    if (isMosaicMode) {
+      event.evt.preventDefault();
+      event.cancelBubble = true;
+      setMosaicDraft(null);
+      closeContextMenu();
+      return;
+    }
     if (isCustomBubbleInsertMode) {
       event.evt.preventDefault();
       event.cancelBubble = true;
@@ -4212,7 +4769,9 @@ export const CanvasView = ({
       : contextMenu?.target.kind === "text"
         ? t("contextMenu.text")
         : contextMenu?.target.kind === "element"
-          ? t("contextMenu.element")
+          ? elementForContextMenu && isMosaicElement(elementForContextMenu)
+            ? t("contextMenu.mosaic")
+            : t("contextMenu.element")
           : contextMenu?.target.kind === "bubble"
             ? t("contextMenu.bubble")
             : t("contextMenu.canvas");
@@ -4354,7 +4913,18 @@ export const CanvasView = ({
             ...groupContextActions,
           ]
         : contextMenu?.target.kind === "element" && elementForContextMenu
-          ? [
+          ? isMosaicElement(elementForContextMenu)
+            ? [
+                {
+                  label: t("contextMenu.deleteMosaic"),
+                  danger: true,
+                  onSelect: () => {
+                    confirmDeleteObject("element", elementForContextMenu.id);
+                  },
+                },
+                ...groupContextActions,
+              ]
+            : [
               {
                 label: t("contextMenu.moveLayerUp"),
                 disabled: !elementLayerMoveState?.canMoveUp,
@@ -4520,6 +5090,26 @@ export const CanvasView = ({
         height={stageHeight}
         onWheel={handleWheel}
         onMouseMove={(event) => {
+          if (mosaicDraft) {
+            const point = getPointFromEvent(event, scale, pageCanvasOrigin);
+            const panel = page.panels.find((entry) => entry.id === mosaicDraft.panelId) ?? null;
+            if (!point || !panel) {
+              return;
+            }
+            const nextCells = getMosaicCellsForSegment(
+              panel,
+              mosaicDraft.lastPoint,
+              point,
+              mosaicDraft.cellSize,
+              mosaicDraft.brushRadius,
+            );
+            setMosaicDraft({
+              ...mosaicDraft,
+              cells: dedupeMosaicCells([...mosaicDraft.cells, ...nextCells]),
+              lastPoint: point,
+            });
+            return;
+          }
           if (isCustomBubbleInsertMode) {
             const point = getPointFromEvent(event, scale, pageCanvasOrigin);
             setCustomBubbleHoverPoint(point);
@@ -4552,11 +5142,18 @@ export const CanvasView = ({
           if (isCustomBubbleInsertMode) {
             setCustomBubbleHoverPoint(null);
           }
+          if (mosaicDraft) {
+            void finalizeMosaicDraft(mosaicDraft);
+          }
           if (marqueeDrag) {
             setMarqueeDrag(null);
           }
         }}
         onMouseUp={() => {
+          if (mosaicDraft) {
+            void finalizeMosaicDraft(mosaicDraft);
+            return;
+          }
           if (isCustomBubbleInsertMode) {
             return;
           }
@@ -4801,6 +5398,13 @@ export const CanvasView = ({
                       key={entry.layer}
                       page={page}
                       panel={entry.object}
+                      mosaics={(page.elements ?? []).filter(
+                        (element): element is ElementItem & { mosaic: NonNullable<ElementItem["mosaic"]> } =>
+                          isMosaicElement(element) && element.mosaic.panelId === entry.object.id,
+                      )}
+                      mosaicDraft={
+                        mosaicDraft?.panelId === entry.object.id ? mosaicDraft : null
+                      }
                       scale={scale}
                       selected={
                         selection?.pageId === page.id &&
@@ -4816,6 +5420,9 @@ export const CanvasView = ({
                 }
 
                 if (entry.objectType === "element") {
+                  if (isMosaicElement(entry.object)) {
+                    return null;
+                  }
                   return (
                     <ElementNode
                       key={entry.layer}
@@ -5004,13 +5611,23 @@ export const CanvasView = ({
               ) : null}
             </Group>
           </Group>
-          {isCustomBubbleInsertMode ? (
+          {isCustomBubbleInsertMode || isMosaicMode ? (
             <Rect
               width={stageWidth}
               height={stageHeight}
               fill="rgba(0,0,0,0.001)"
               onMouseDown={handleCanvasDown}
               onContextMenu={handleCanvasContextMenu}
+            />
+          ) : null}
+          {isMosaicMode ? (
+            <Text
+              x={16}
+              y={14}
+              text={t("canvas.mosaicDrawHint")}
+              fontSize={13}
+              fill="#6f4a2c"
+              listening={false}
             />
           ) : null}
           {isCustomBubbleInsertMode ? (

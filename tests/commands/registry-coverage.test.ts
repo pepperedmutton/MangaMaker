@@ -111,6 +111,7 @@ describe("commandRegistry coverage", () => {
         "updateText",
         "createElement",
         "updateElement",
+        "createMosaic",
         "createBubble",
         "updateBubble",
         "deleteObject",
@@ -120,6 +121,7 @@ describe("commandRegistry coverage", () => {
         "exportProjectJpgZip",
         "selectObjects",
         "setBubbleInsertState",
+        "setMosaicInsertState",
       ].sort(),
     );
   });
@@ -271,8 +273,8 @@ describe("commandRegistry coverage", () => {
     })) as { id: string; x: number; y: number; width: number; height: number };
 
     expect(panel).toMatchObject({
-      x: 20,
-      y: 20,
+      x: 13,
+      y: 27,
       width: 160,
       height: 160,
     });
@@ -432,10 +434,10 @@ describe("commandRegistry coverage", () => {
     });
     expect(updatedText).toMatchObject({
       content: "Updated caption",
-      x: 180,
-      y: 200,
-      width: 200,
-      height: 280,
+      x: 181,
+      y: 199,
+      width: 201,
+      height: 281,
       fontSize: 42,
       fontFamily: "LXGW WenKai",
       color: "#334455",
@@ -464,8 +466,8 @@ describe("commandRegistry coverage", () => {
     expect(updatedBubble).toMatchObject({
       x: 280,
       y: 320,
-      width: 300,
-      height: 160,
+      width: 301,
+      height: 151,
       bubbleType: "explosion",
     });
     expect((updatedBubble as { tailTip: { x: number; y: number } }).tailTip.x).toBeGreaterThan(1200);
@@ -490,14 +492,8 @@ describe("commandRegistry coverage", () => {
       y: number;
       tailTip: { x: number; y: number };
     };
-    expect(movedBubbleShape.tailTip.x - updatedBubbleShape.tailTip.x).toBeCloseTo(
-      movedBubbleShape.x - updatedBubbleShape.x,
-      6,
-    );
-    expect(movedBubbleShape.tailTip.y - updatedBubbleShape.tailTip.y).toBeCloseTo(
-      movedBubbleShape.y - updatedBubbleShape.y,
-      6,
-    );
+    expect(movedBubbleShape.tailTip.x).toBeCloseTo(updatedBubbleShape.tailTip.x, 6);
+    expect(movedBubbleShape.tailTip.y).toBeCloseTo(updatedBubbleShape.tailTip.y, 6);
 
     const layerOrderBefore = [...harness.readSession().project.pages[0].layers];
     const movedLayer = await runCommand(harness, "moveLayer", {

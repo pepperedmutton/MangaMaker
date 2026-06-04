@@ -166,13 +166,25 @@ export const toLayerRef = (objectType: ObjectType, objectId: string) =>
 export const removeLayerRef = (layers: string[], objectType: ObjectType, objectId: string) =>
   layers.filter((layer) => layer !== toLayerRef(objectType, objectId));
 
-export const shiftBubbleTail = (bubble: Bubble, deltaX: number, deltaY: number): Bubble => ({
-  ...bubble,
-  tailTip: {
-    x: bubble.tailTip.x + deltaX,
-    y: bubble.tailTip.y + deltaY,
-  },
-});
+export const isMosaicElement = (
+  element: ElementItem,
+): element is ElementItem & { mosaic: NonNullable<ElementItem["mosaic"]> } =>
+  element.mosaic !== undefined;
+
+export const getMosaicBounds = (
+  mosaic: NonNullable<ElementItem["mosaic"]>,
+): Rect => {
+  const minX = Math.min(...mosaic.cells.map((cell) => cell.x));
+  const minY = Math.min(...mosaic.cells.map((cell) => cell.y));
+  const maxX = Math.max(...mosaic.cells.map((cell) => cell.x + mosaic.cellSize));
+  const maxY = Math.max(...mosaic.cells.map((cell) => cell.y + mosaic.cellSize));
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+};
 
 export const getBubbleTextBounds = (
   bubble: Pick<Bubble, "width" | "height" | "bubbleType">,

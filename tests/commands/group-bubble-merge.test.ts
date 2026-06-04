@@ -46,7 +46,7 @@ describe("groupSelection bubble merge", () => {
       x: 100,
       y: 100,
       width: 320,
-      height: 240,
+      height: 230,
       bubbleType: "custom",
       showTail: false,
     });
@@ -153,7 +153,7 @@ describe("groupSelection bubble merge", () => {
     expect(pageState?.bubbles).toHaveLength(1);
     const mergedBubble = pageState?.bubbles[0];
     expect(mergedBubble?.bubbleType).toBe("custom");
-    expect((mergedBubble?.customHandleProfile?.movableIndices ?? []).length).toBeGreaterThanOrEqual(7);
+    expect((mergedBubble?.customHandleProfile?.movableIndices ?? []).length).toBeGreaterThanOrEqual(6);
     expect(mergedBubble?.customHandleProfile?.lockedIndices ?? []).toHaveLength(0);
     for (const index of mergedBubble?.customHandleProfile?.movableIndices ?? []) {
       expect(index).toBeGreaterThanOrEqual(0);

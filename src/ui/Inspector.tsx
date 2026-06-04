@@ -2,9 +2,12 @@ import { useState } from "react";
 import {
   getPageWorkspace,
   getSelectedObject,
+  isMosaicElement,
 } from "../domain/helpers";
 import {
   createDefaultBubble,
+  MAX_MOSAIC_PIXEL_SIZE,
+  MIN_MOSAIC_PIXEL_SIZE,
   MIN_PANEL_SIZE,
 } from "../domain/defaults";
 import {
@@ -718,6 +721,96 @@ const ElementInspector = ({ page, element }: { page: Page; element: ElementItem 
   );
 };
 
+const MosaicInspector = ({
+  page,
+  element,
+}: {
+  page: Page;
+  element: ElementItem & { mosaic: NonNullable<ElementItem["mosaic"]> };
+}) => {
+  const executeCommand = useEditorStore((state) => state.executeCommand);
+  const { t } = useI18n();
+  const panelIndex = page.panels.findIndex((panel) => panel.id === element.mosaic.panelId);
+
+  return (
+    <>
+      <section>
+        <div className="insp-header">
+          <p className="eyebrow">{t("common.mosaic")}</p>
+          <DeleteButton pageId={page.id} objectType="element" objectId={element.id} />
+        </div>
+        <h3>{t("common.mosaic")}</h3>
+        <p>{t("inspector.mosaicCells", { count: element.mosaic.cells.length })}</p>
+        {panelIndex >= 0 ? <p>{t("inspector.mosaicPanel", { index: panelIndex + 1 })}</p> : null}
+      </section>
+      <section>
+        <p className="eyebrow">{t("inspector.styleSection")}</p>
+        <label>
+          <span>{t("inspector.mosaicIntensity")}</span>
+          <RangeInput
+            value={Math.round(element.mosaic.pixelSize ?? element.mosaic.cellSize)}
+            min={MIN_MOSAIC_PIXEL_SIZE}
+            max={MAX_MOSAIC_PIXEL_SIZE}
+            onChange={(mosaicPixelSize) =>
+              void executeCommand("updateElement", {
+                pageId: page.id,
+                elementId: element.id,
+                mosaicPixelSize,
+              })
+            }
+          />
+        </label>
+        <label>
+          <span>{t("inspector.opacity")}</span>
+          <RangeInput
+            value={Math.round(element.opacity * 100)}
+            min={0}
+            max={100}
+            onChange={(opacity) =>
+              void executeCommand("updateElement", {
+                pageId: page.id,
+                elementId: element.id,
+                opacity: opacity / 100,
+              })
+            }
+          />
+        </label>
+      </section>
+    </>
+  );
+};
+
+const MosaicToolInspector = () => {
+  const executeCommand = useEditorStore((state) => state.executeCommand);
+  const mosaicInsert = useEditorStore((state) => state.mosaicInsert);
+  const { t } = useI18n();
+
+  return (
+    <>
+      <section>
+        <p className="eyebrow">{t("common.mosaic")}</p>
+        <h3>{t("toolbar.mosaic")}</h3>
+      </section>
+      <section>
+        <p className="eyebrow">{t("inspector.styleSection")}</p>
+        <label>
+          <span>{t("inspector.mosaicIntensity")}</span>
+          <RangeInput
+            value={Math.round(mosaicInsert.pixelSize)}
+            min={MIN_MOSAIC_PIXEL_SIZE}
+            max={MAX_MOSAIC_PIXEL_SIZE}
+            onChange={(pixelSize) =>
+              void executeCommand("setMosaicInsertState", {
+                pixelSize,
+              })
+            }
+          />
+        </label>
+      </section>
+    </>
+  );
+};
+
 const PRESET_BUBBLE_TYPES: Array<{
   type: Exclude<Bubble["bubbleType"], "custom">;
   labelKey: string;
@@ -1292,6 +1385,9 @@ export const Inspector = ({
     selectedObject !== null &&
     "src" in selectedObject;
   const isElementInsertState = activeTool === "element" && !elementIsExplicitlySelected;
+  const isSelectedMosaic =
+    elementIsExplicitlySelected && selectedObject !== null && isMosaicElement(selectedObject);
+  const isMosaicInsertState = activeTool === "mosaic" && !isSelectedMosaic;
 
   return (
     <aside className="right-sidebar">
@@ -1299,6 +1395,8 @@ export const Inspector = ({
         <BubbleInsertLibrary onInsertBubble={onInsertBubble} />
       ) : isElementInsertState ? (
         <ElementInsertLibrary onInsertElement={onInsertElement} />
+      ) : isMosaicInsertState ? (
+        <MosaicToolInspector />
       ) : !selectedObject ? (
         <>
           <section>
@@ -1346,6 +1444,8 @@ export const Inspector = ({
         <PanelInspector page={page} panel={selectedObject} onImportImage={onImportImage} />
       ) : "content" in selectedObject ? (
         <TextInspector page={page} text={selectedObject} />
+      ) : "src" in selectedObject && isMosaicElement(selectedObject) ? (
+        <MosaicInspector page={page} element={selectedObject} />
       ) : "src" in selectedObject ? (
         <ElementInspector page={page} element={selectedObject} />
       ) : (

@@ -111,6 +111,12 @@ export const TopToolbar = ({
           active={activeTool === "bubble"}
           onClick={() => onSetTool("bubble")}
         />
+        <ToolbarButton
+          label={translate(locale, "toolbar.mosaic")}
+          shortcut="X"
+          active={activeTool === "mosaic"}
+          onClick={() => onSetTool("mosaic")}
+        />
       </div>
       <div className="toolbar-group toolbar-group-end">
         <ToolbarButton

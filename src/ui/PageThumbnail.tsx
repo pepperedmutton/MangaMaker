@@ -1,4 +1,5 @@
 import type { Page, Panel } from "../domain/schema";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n/useI18n";
 
 const getPanelAbsolutePoints = (panel: Panel) =>
@@ -28,11 +29,42 @@ const toSafeClipId = (pageId: string, panelId: string) =>
 export const PageThumbnail = ({
   page,
   displayName,
+  renderImages = true,
 }: {
   page: Page | null;
   displayName?: string;
+  renderImages?: boolean;
 }) => {
   const { t } = useI18n();
+  const thumbnailRef = useRef<HTMLDivElement | null>(null);
+  const [isImageRenderReady, setIsImageRenderReady] = useState(false);
+
+  useEffect(() => {
+    if (!renderImages) {
+      return;
+    }
+    if (isImageRenderReady) {
+      return;
+    }
+    const element = thumbnailRef.current;
+    if (!element || typeof window === "undefined" || !("IntersectionObserver" in window)) {
+      setIsImageRenderReady(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0)) {
+          setIsImageRenderReady(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "240px 0px" },
+    );
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+    };
+  }, [isImageRenderReady, renderImages]);
 
   if (!page) {
     return (
@@ -42,8 +74,10 @@ export const PageThumbnail = ({
     );
   }
 
+  const shouldRenderImages = renderImages && isImageRenderReady;
+
   return (
-    <div className="page-thumbnail">
+    <div className="page-thumbnail" ref={thumbnailRef}>
       <svg
         className="page-thumbnail-svg"
         viewBox={`0 0 ${page.width} ${page.height}`}
@@ -60,7 +94,7 @@ export const PageThumbnail = ({
         <rect x={0} y={0} width={page.width} height={page.height} fill={page.background} />
         {page.panels.map((panel) => {
           const absolutePoints = getPanelAbsolutePoints(panel);
-          const imageMetrics = getPanelImageMetrics(panel);
+          const imageMetrics = shouldRenderImages ? getPanelImageMetrics(panel) : null;
           const clipId = toSafeClipId(page.id, panel.id);
           return (
             <g key={panel.id}>

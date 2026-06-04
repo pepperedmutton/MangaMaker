@@ -210,6 +210,12 @@ export const RibbonBar = ({
             active={activeTool === "element"}
             onClick={() => onSetTool("element")}
           />
+          <RibbonButton
+            label={t("toolbar.mosaic")}
+            shortcut="X"
+            active={activeTool === "mosaic"}
+            onClick={() => onSetTool("mosaic")}
+          />
         </div>
       </div>
 

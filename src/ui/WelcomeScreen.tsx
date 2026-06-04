@@ -156,9 +156,9 @@ export const WelcomeScreen = ({
               <p className="hint">{t("welcome.noProjects")}</p>
             ) : (
               <div className="welcome-project-grid">
-                {projects.map((project) => (
+                {projects.map((project, index) => (
                   <button
-                    key={project.id}
+                    key={`${project.id}:${project.title}:${project.updatedAt}:${index}`}
                     className="welcome-project-card"
                     type="button"
                     onClick={() => onOpenProject(project)}

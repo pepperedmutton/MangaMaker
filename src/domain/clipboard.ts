@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { bubbleSchema, pageSchema, panelSchema, textItemSchema } from "./schema";
+import { bubbleSchema, elementItemSchema, pageSchema, panelSchema, textItemSchema } from "./schema";
 
 export const MANGAMAKER_CLIPBOARD_SIGNATURE = "mangamaker-clipboard/v1";
 
@@ -19,6 +19,10 @@ export const clipboardItemSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("bubble"),
     bubble: bubbleSchema,
+  }),
+  z.object({
+    kind: z.literal("element"),
+    element: elementItemSchema,
   }),
 ]);
 
@@ -43,4 +47,3 @@ export const parseClipboardEnvelope = (rawText: string) => {
     return null;
   }
 };
-

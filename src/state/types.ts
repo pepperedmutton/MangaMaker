@@ -1,13 +1,17 @@
 import type { BubbleType, ObjectType, Project } from "../domain/schema";
 import type { Locale } from "../i18n";
 
-export type ToolMode = "select" | "panel" | "text" | "bubble" | "element";
+export type ToolMode = "select" | "panel" | "text" | "bubble" | "element" | "mosaic";
 export type BubbleInsertMode = "preset" | "customClickDraw";
 
 export type BubbleInsertState = {
   mode: BubbleInsertMode;
   presetBubbleType: Exclude<BubbleType, "custom">;
   customSmoothness: number;
+};
+
+export type MosaicInsertState = {
+  pixelSize: number;
 };
 
 export type EditorSelectionItem = {
@@ -75,6 +79,7 @@ export type EditorSessionState = {
   panelImageEditing: PanelImageEditingState;
   textInsertDefaults: TextInsertDefaults;
   bubbleInsert: BubbleInsertState;
+  mosaicInsert: MosaicInsertState;
   locale: Locale;
   activeTool: ToolMode;
   zoom: number;

@@ -12,6 +12,7 @@ import type {
   PanelImageEditingState,
   SaveStatus,
   StatusMessage,
+  MosaicInsertState,
   TextInsertDefaults,
   ToolMode,
 } from "../state/types";
@@ -31,6 +32,7 @@ export type CommandContext = {
           activeTool: ToolMode;
           textInsertDefaults: TextInsertDefaults;
           bubbleInsert: BubbleInsertState;
+          mosaicInsert: MosaicInsertState;
           zoom: number;
           lastExport: ExportArtifact;
           statusMessage: StatusMessage;

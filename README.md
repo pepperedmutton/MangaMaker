@@ -133,6 +133,7 @@ Non-goals:
 - Shared command model for UI, tests, and automation.
 - Local automation bridge via `window.mangaMaker`.
 - External automation and other agents should follow `docs/automation-tool-interface.md`; `window.mangaMaker.commands.describe()` is the current machine-readable command contract.
+- Live external text updates must use either browser commands (`window.mangaMaker.commands.execute("updateText", ...)`) or the web persistence API (`POST /__mangamaker__/persistence/write_project_draft`). Direct file writes to `projects/*/project.json` do not update the open editor. The persistence API broadcasts a live event so the current project reloads in place without refresh or page movement.
 - Text insertion automation must create text boxes with `createText` and adjust geometry/typography with `updateText`; bubble styling uses `createBubble`/`updateBubble`, not direct project JSON edits.
 - All-page project export automation should call `window.mangaMaker.project.exportAllPages({ format: "jpgZip" })` or `commands.execute("exportProjectAllPages", { format: "jpgZip" | "pdf" })`; `exportPagePng` is single-page only.
 - Lazy project persistence on manual save, project leave, and page close/hide.

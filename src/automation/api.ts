@@ -44,6 +44,9 @@ export const installAutomationApi = () => {
     return;
   }
 
+  const normalizeIncomingProject = (project: Project) =>
+    projectSchema.parse(normalizeProjectForCurrentVersion(project));
+
   window.mangaMaker = {
     commands: {
       list: () => Object.keys(commandRegistry),
@@ -52,12 +55,19 @@ export const installAutomationApi = () => {
     },
     project: {
       get: () => useEditorStore.getState().project,
-      load: (project) =>
-        useEditorStore
+      load: (project) => {
+        const parsedProject = normalizeIncomingProject(project);
+        const state = useEditorStore.getState();
+        if (state.appView === "editor" && state.project.id === parsedProject.id) {
+          state.setProject(parsedProject);
+          return Promise.resolve(parsedProject);
+        }
+        return useEditorStore
           .getState()
           .executeCommand("loadProject", {
-            project: projectSchema.parse(normalizeProjectForCurrentVersion(project)),
-          }),
+            project: parsedProject,
+          });
+      },
       reset: () => useEditorStore.getState().resetProject(),
       exportAllPages: (options = {}) =>
         useEditorStore

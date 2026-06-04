@@ -1,9 +1,17 @@
-import { createDefaultText, createId } from "../domain/defaults";
+import {
+  CG_PAGE_HEIGHT,
+  CG_PAGE_WIDTH,
+  MANGA_PAGE_HEIGHT,
+  MANGA_PAGE_WIDTH,
+  createDefaultPanelStyle,
+  createDefaultText,
+  createId,
+} from "../domain/defaults";
 import { BUBBLE_TYPE_VALUES } from "../domain/schema";
 import { getBubbleTextBounds } from "../domain/helpers";
 import { normalizeProjectPageNames } from "../domain/pageNaming";
 import { DEFAULT_LOCALE } from "../i18n";
-import { DEFAULT_TEXT_FONT_FAMILY } from "../platform/localFonts";
+import { DEFAULT_TEXT_FONT_FAMILY, isSupportedFontFamily } from "../platform/localFonts";
 
 type AnyRecord = Record<string, unknown>;
 
@@ -25,6 +33,48 @@ const toNumber = (value: unknown, fallback: number) =>
 
 const toStringValue = (value: unknown, fallback = "") =>
   typeof value === "string" ? value : fallback;
+
+const getFallbackPageSize = (projectType: unknown) =>
+  projectType === "cg"
+    ? { width: CG_PAGE_WIDTH, height: CG_PAGE_HEIGHT }
+    : { width: MANGA_PAGE_WIDTH, height: MANGA_PAGE_HEIGHT };
+
+const toPositiveNumber = (value: unknown, fallback: number) =>
+  Math.max(1, toNumber(value, fallback));
+
+const normalizePageGeometry = (page: AnyRecord, projectType: unknown) => {
+  const fallbackSize = getFallbackPageSize(projectType);
+  page.width = toPositiveNumber(page.width, fallbackSize.width);
+  page.height = toPositiveNumber(page.height, fallbackSize.height);
+};
+
+const normalizePanelStyle = (value: unknown) => {
+  const defaults = createDefaultPanelStyle();
+  const style = isRecord(value) ? value : {};
+  return {
+    fill: toStringValue(style.fill, defaults.fill),
+    stroke: toStringValue(style.stroke, defaults.stroke),
+    strokeWidth: Math.max(0, toNumber(style.strokeWidth, defaults.strokeWidth)),
+    cornerRadius: Math.max(0, toNumber(style.cornerRadius, defaults.cornerRadius)),
+  };
+};
+
+const normalizePagePanels = (page: AnyRecord) => {
+  const pageWidth = toPositiveNumber(page.width, MANGA_PAGE_WIDTH);
+  const pageHeight = toPositiveNumber(page.height, MANGA_PAGE_HEIGHT);
+  return asArray(page.panels)
+    .filter((item) => isRecord(item))
+    .map((rawPanel) => {
+      const panel = structuredClone(rawPanel) as AnyRecord;
+      panel.x = toNumber(panel.x, 0);
+      panel.y = toNumber(panel.y, 0);
+      panel.width = toPositiveNumber(panel.width, pageWidth);
+      panel.height = toPositiveNumber(panel.height, pageHeight);
+      panel.rotation = toNumber(panel.rotation, 0);
+      panel.style = normalizePanelStyle(panel.style);
+      return panel;
+    });
+};
 
 const normalizeBubbleType = (value: unknown) => {
   const rawType = toStringValue(value, "round");
@@ -84,6 +134,12 @@ const normalizePageGroups = (page: AnyRecord) => {
       .map((bubble) => toStringValue((bubble as AnyRecord).id))
       .filter((id) => id.length > 0),
   );
+  const elementIds = new Set(
+    asArray(page.elements)
+      .filter((item) => isRecord(item))
+      .map((element) => toStringValue((element as AnyRecord).id))
+      .filter((id) => id.length > 0),
+  );
 
   page.groups = groups
     .map((group) => {
@@ -103,10 +159,13 @@ const normalizePageGroups = (page: AnyRecord) => {
           if (objectType === "bubble") {
             return bubbleIds.has(objectId);
           }
+          if (objectType === "element") {
+            return elementIds.has(objectId);
+          }
           return false;
         })
         .map((member) => ({
-          objectType: toStringValue(member.objectType) as "panel" | "text" | "bubble",
+          objectType: toStringValue(member.objectType) as "panel" | "text" | "bubble" | "element",
           objectId: toStringValue(member.objectId),
         }));
       if (members.length < 2) {
@@ -117,13 +176,14 @@ const normalizePageGroups = (page: AnyRecord) => {
         members,
       };
     })
-    .filter((group): group is { id: string; members: Array<{ objectType: "panel" | "text" | "bubble"; objectId: string }> } => group !== null);
+    .filter((group): group is { id: string; members: Array<{ objectType: "panel" | "text" | "bubble" | "element"; objectId: string }> } => group !== null);
 };
 
 const normalizePageTextFonts = (page: AnyRecord) => {
   const texts = asArray(page.texts).filter((item) => isRecord(item)) as AnyRecord[];
   for (const text of texts) {
-    text.fontFamily = DEFAULT_TEXT_FONT_FAMILY;
+    const fontFamily = toStringValue(text.fontFamily, DEFAULT_TEXT_FONT_FAMILY);
+    text.fontFamily = isSupportedFontFamily(fontFamily) ? fontFamily : DEFAULT_TEXT_FONT_FAMILY;
   }
 };
 
@@ -269,9 +329,11 @@ export const normalizeProjectForCurrentVersion = (rawProject: unknown): unknown 
     if (!isRecord(page)) {
       return rawPage;
     }
-    page.panels = asArray(page.panels).filter((item) => isRecord(item));
+    normalizePageGeometry(page, project.type);
+    page.panels = normalizePagePanels(page);
     page.texts = asArray(page.texts).filter((item) => isRecord(item));
     page.bubbles = asArray(page.bubbles).filter((item) => isRecord(item));
+    page.elements = asArray(page.elements).filter((item) => isRecord(item));
     page.layers = asArray(page.layers).map((layer) => toStringValue(layer)).filter((layer) => layer.length > 0);
     page.groups = asArray(page.groups).filter((item) => isRecord(item));
 

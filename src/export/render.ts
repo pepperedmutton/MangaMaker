@@ -2,6 +2,7 @@ import { PDFDocument } from "pdf-lib";
 import {
   getBubbleBasePoints,
   getRenderableLayers,
+  isMosaicElement,
 } from "../domain/helpers";
 import type { ElementItem, Page, Panel, TextItem } from "../domain/schema";
 import {
@@ -227,6 +228,59 @@ const drawPanelImage = async (context: CanvasRenderingContext2D, panel: Panel) =
     panel.width,
     panel.height,
   );
+  context.restore();
+};
+
+const drawMosaicElement = async (
+  context: CanvasRenderingContext2D,
+  panel: Panel,
+  element: ElementItem,
+) => {
+  if (!panel.image || !isMosaicElement(element)) {
+    return;
+  }
+
+  const image = await loadImage(panel.image.src);
+  const { viewBox } = panel.image;
+  const cellSize = Math.max(1, element.mosaic.cellSize);
+  const pixelSize = Math.max(1, element.mosaic.pixelSize ?? cellSize);
+  const lowCanvas = document.createElement("canvas");
+  lowCanvas.width = Math.max(1, Math.ceil(panel.width / pixelSize));
+  lowCanvas.height = Math.max(1, Math.ceil(panel.height / pixelSize));
+  const lowContext = lowCanvas.getContext("2d");
+  const pixelCanvas = document.createElement("canvas");
+  pixelCanvas.width = Math.max(1, Math.ceil(panel.width));
+  pixelCanvas.height = Math.max(1, Math.ceil(panel.height));
+  const pixelContext = pixelCanvas.getContext("2d");
+  if (!lowContext || !pixelContext) {
+    return;
+  }
+
+  lowContext.drawImage(
+    image,
+    viewBox.x,
+    viewBox.y,
+    viewBox.width,
+    viewBox.height,
+    0,
+    0,
+    lowCanvas.width,
+    lowCanvas.height,
+  );
+  pixelContext.imageSmoothingEnabled = false;
+  pixelContext.drawImage(lowCanvas, 0, 0, pixelCanvas.width, pixelCanvas.height);
+
+  context.save();
+  buildPanelPath(context, panel);
+  context.clip();
+  context.beginPath();
+  for (const cell of element.mosaic.cells) {
+    context.rect(cell.x, cell.y, cellSize, cellSize);
+  }
+  context.clip();
+  context.globalAlpha = element.opacity;
+  context.imageSmoothingEnabled = false;
+  context.drawImage(pixelCanvas, panel.x, panel.y, panel.width, panel.height);
   context.restore();
 };
 
@@ -471,6 +525,11 @@ export const renderPageToCanvas = async (page: Page) => {
       buildPanelPath(context, panel);
       context.fill();
       await drawPanelImage(context, panel);
+      for (const element of page.elements ?? []) {
+        if (isMosaicElement(element) && element.mosaic.panelId === panel.id) {
+          await drawMosaicElement(context, panel, element);
+        }
+      }
       context.strokeStyle = panel.style.stroke;
       context.lineWidth = panel.style.strokeWidth;
       buildPanelPath(context, panel);
@@ -484,6 +543,9 @@ export const renderPageToCanvas = async (page: Page) => {
     }
 
     if (entry.objectType === "element") {
+      if (isMosaicElement(entry.object)) {
+        continue;
+      }
       await drawElement(context, entry.object);
       continue;
     }

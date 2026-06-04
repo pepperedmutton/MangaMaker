@@ -366,7 +366,7 @@ const main = async () => {
     console.log(`Local URL: ${localUrl}`);
 
     if (!options.share) {
-      return;
+      await new Promise(() => undefined);
     }
 
     const shareProviderLabel = options.shareProvider === "ngrok" ? "ngrok" : "Gradio";

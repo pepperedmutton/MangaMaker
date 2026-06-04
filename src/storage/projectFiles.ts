@@ -5,6 +5,29 @@ import { serializeProjectForStorage } from "./projectSerialization";
 const isTauriRuntime = () => typeof window !== "undefined" && isTauri();
 const isWebRuntime = () => typeof window !== "undefined" && !isTauriRuntime();
 const WEB_PERSISTENCE_API_BASE = "/__mangamaker__/persistence";
+const PERSISTENCE_CLIENT_ID_HEADER = "x-mangamaker-client-id";
+
+export type ProjectDraftWrittenEvent = {
+  type: "projectDraftWritten";
+  project_id: string;
+  path?: string;
+  updated_at?: string;
+  origin_client_id?: string;
+};
+
+let projectFileClientId: string | null = null;
+
+export const getProjectFileClientId = () => {
+  if (projectFileClientId) {
+    return projectFileClientId;
+  }
+  const browserRandomId =
+    typeof window !== "undefined" ? window.crypto?.randomUUID?.() : undefined;
+  projectFileClientId =
+    browserRandomId ??
+    `mangamaker-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return projectFileClientId;
+};
 
 const fileToDataUrl = (file: File) =>
   new Promise<string>((resolve, reject) => {
@@ -44,28 +67,65 @@ export const saveProjectToProjectsFolder = async (project: Project) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        [PERSISTENCE_CLIENT_ID_HEADER]: getProjectFileClientId(),
       },
       body: JSON.stringify({
         project_id: project.id,
         project_title: project.title,
         project_json: projectJson,
+        client_id: getProjectFileClientId(),
       }),
     },
   );
   return result.path;
 };
 
-export const loadProjectFromProjectsFolder = async () => {
+export const loadProjectFromProjectsFolder = async (projectId?: string) => {
   if (isTauriRuntime()) {
     return invoke<string | null>("read_project_draft");
   }
   if (!isWebRuntime()) {
     return null;
   }
+  const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
   const result = await fetchJson<{ project_json: string | null }>(
-    `${WEB_PERSISTENCE_API_BASE}/read_project_draft`,
+    `${WEB_PERSISTENCE_API_BASE}/read_project_draft${query}`,
   );
   return result.project_json;
+};
+
+export const subscribeToProjectDraftUpdates = (
+  onProjectDraftWritten: (event: ProjectDraftWrittenEvent) => void,
+) => {
+  if (!isWebRuntime() || typeof window.EventSource === "undefined") {
+    return () => undefined;
+  }
+
+  const clientId = getProjectFileClientId();
+  const source = new window.EventSource(
+    `${WEB_PERSISTENCE_API_BASE}/events?client_id=${encodeURIComponent(clientId)}`,
+  );
+  const handleProjectDraftWritten = (event: MessageEvent) => {
+    let parsed: ProjectDraftWrittenEvent;
+    try {
+      parsed = JSON.parse(event.data) as ProjectDraftWrittenEvent;
+    } catch {
+      return;
+    }
+    if (parsed.type !== "projectDraftWritten" || typeof parsed.project_id !== "string") {
+      return;
+    }
+    if (parsed.origin_client_id === clientId) {
+      return;
+    }
+    onProjectDraftWritten(parsed);
+  };
+
+  source.addEventListener("projectDraftWritten", handleProjectDraftWritten);
+  return () => {
+    source.removeEventListener("projectDraftWritten", handleProjectDraftWritten);
+    source.close();
+  };
 };
 
 export const listProjectsFromProjectsFolder = async () => {
